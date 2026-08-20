@@ -65,3 +65,38 @@ the tool.
 
 Atomic because the alternative is a directory truncated by a crash mid-write,
 which is a machine that has quietly forgotten every peer it knew.
+
+## Identity is a key; the name is a label
+
+**Decided.** Every machine holds an Ed25519 keypair, generated on first use, and
+records are signed. A name identifies a peer to a person; the key identifies it
+to the software.
+
+Names cannot carry the weight. Two machines may choose the same one, a peer may
+rename itself tomorrow, and a name arriving over the network is a claim anyone
+could make. Without a key, an address in a record is a stranger's suggestion
+about where to find your machine.
+
+Generated on first use rather than asked for, because a setup step people skip
+protects nothing. The private key lives beside the directory, not in it, at mode
+600 — the directory is a file people are invited to read and paste into bug
+reports.
+
+Ed25519 from Node's own crypto: small keys, small signatures, no dependencies,
+and no parameters to get wrong.
+
+## A peer is admitted into a profile
+
+**Decided.** `trusted` by default, and it grants hailing and directory access —
+not everything.
+
+Admission is not one thing. "I know this machine exists" and "this machine may
+use my services" are different grants, and collapsing them makes every peer you
+can name a peer that can act. Relaying in particular spends this machine's
+bandwidth and exposure on someone else's traffic; enrolment changes how it is
+reachable. Both are decisions, not consequences of being known.
+
+An unknown profile name resolves to `trusted` rather than to nothing. Failing
+shut would mean a peer that silently stops working after a config edit or a
+version bump — a failure indistinguishable from a network problem, which is the
+worst way for this to break.

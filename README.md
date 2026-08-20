@@ -28,6 +28,42 @@ stale the moment a laptop changes network.
 peerhailer keeps a directory of **names**, the routes each name was last
 reachable on, and when. Names are the identity; addresses are cache.
 
+## Identity is a key, not a name
+
+Every machine holds an Ed25519 key, generated on first use. A name is a label a
+person chose; the **key is the identity**. Records are signed, so the addresses
+a peer reports are a claim only that key could have made, and a machine renaming
+itself is still recognised.
+
+```bash
+hail id > sol.pub                              # on sol
+hail add sol --key-file sol.pub                # on luna
+```
+
+Once a key is bound to a name, a record signed by any other key is refused —
+that being what impersonation looks like. A peer with no key we hold cannot hail
+us at all, and is told nothing about why.
+
+## Capability profiles
+
+A peer is admitted *into a profile*, and the profile decides what it may ask
+for. `trusted` is the default: your own machines.
+
+| Profile | Grants | For |
+| --- | --- | --- |
+| `trusted` | hail, directory | Your own machines |
+| `known` | nothing | Recorded, never answered — a phone you hail *from* |
+| `carrier` | hail, directory, relay | A peer that may also carry traffic for you |
+
+```bash
+hail add phone --key-file phone.pub --profile known
+hail profiles
+```
+
+Knowing a machine exists and letting it use your services are different grants,
+and relaying — which spends your bandwidth and exposure on someone else's
+traffic — is not inherited by being a peer at all.
+
 ## Three rules it will not bend
 
 **Records carry no credentials.** A record travels to every peer that asks, so
@@ -54,8 +90,11 @@ transport are separate concerns, so no particular overlay becomes a dependency.
 ## Use
 
 ```bash
+hail name sol                   # set this machine's name
+hail id                         # print its public key, for handing over
 hail status                     # what this machine is, and who it knows
-hail add luna http://host:8787  # admit a peer  (--transport lan|tailscale|tinc|relay)
+hail add luna http://host:8787 --key-file luna.pub    # admit a peer
+hail profiles                   # what each capability profile grants
 hail walk                       # ask known peers who else they know
 hail peers                      # admitted peers, and candidates heard of
 hail forget mars                # remove one, admitted or not

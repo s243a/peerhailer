@@ -15,7 +15,23 @@
  *
  * @module hail
  */
-import { makePeerRecord } from "./peerRecord.js";
+import { signPayload } from "./identity.js";
+import { makePeerRecord, verifyRecord } from "./peerRecord.js";
+
+/**
+ * What a hail says about itself.
+ *
+ * Signed, because the receiver decides what to answer based on who is asking —
+ * an unsigned name is a claim anyone could make. The timestamp bounds how long
+ * a captured request stays useful.
+ *
+ * @param {{name: string, privateKey: string} | undefined} as
+ */
+function hailBody(as) {
+  if (!as) return {};
+  const from = { name: as.name, at: Date.now() };
+  return { from, signature: signPayload(from, as.privateKey) };
+}
 
 /** Long enough for a sleepy box, short enough that a dead one does not hold a walk. */
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -27,10 +43,10 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * route that worked last time is the one most likely to work now.
  *
  * @param {any} record
- * @param {{fetchImpl?: typeof fetch, timeoutMs?: number}} [options]
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string}}} [options]
  * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
  */
-export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, as } = {}) {
   const peer = makePeerRecord(record);
   if (!peer) return { ok: false, error: "not a usable peer record" };
   if (peer.addresses.length === 0) return { ok: false, error: `no known address for ${peer.name}` };
@@ -44,7 +60,7 @@ export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_
       const response = await fetchImpl(`${address.value.replace(/\/$/, "")}/hail`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ from: peer.name }),
+        body: JSON.stringify(hailBody(as)),
         signal: controller.signal,
       });
       if (!response.ok) {

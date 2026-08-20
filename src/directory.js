@@ -19,6 +19,8 @@
  * @module directory
  */
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
+import { sameKey } from "./identity.js";
+import { allows, DEFAULT_PROFILE, resolveProfile } from "./profiles.js";
 
 /**
  * @param {{ self?: any, admitted?: any[], candidates?: any[], now?: () => number }} [state]
@@ -26,18 +28,21 @@ import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 export function createDirectory(state = {}) {
   const self = makePeerRecord(state.self ?? { name: "unnamed" }) ?? {
     name: "unnamed",
+    publicKey: null,
     addresses: [],
     lastSeen: null,
   };
   const now = state.now ?? (() => Date.now());
-  /** @type {Map<string, import("./peerRecord.js").PeerRecord>} */
+  /** @type {Map<string, import("./peerRecord.js").PeerRecord & {profile: string}>} */
   const admitted = new Map();
   /** @type {Map<string, { record: import("./peerRecord.js").PeerRecord, heardFrom: string[] }>} */
   const candidates = new Map();
 
   for (const peer of state.admitted ?? []) {
     const record = makePeerRecord(peer);
-    if (record) admitted.set(record.name, record);
+    if (record) {
+      admitted.set(record.name, { ...record, profile: peer.profile ?? DEFAULT_PROFILE });
+    }
   }
   for (const peer of state.candidates ?? []) {
     const record = makePeerRecord(peer);
@@ -47,16 +52,25 @@ export function createDirectory(state = {}) {
   /**
    * Admit a peer: the deliberate act that gossip is not allowed to perform.
    *
+   * A peer is admitted *into a profile*, which is what it may then ask for.
+   * `trusted` unless another is named — the common case is your own machines.
+   *
    * @param {any} peer
-   * @returns {import("./peerRecord.js").PeerRecord | null}
+   * @param {{profile?: string}} [options]
+   * @returns {(import("./peerRecord.js").PeerRecord & {profile: string}) | null}
    */
-  function admit(peer) {
+  function admit(peer, { profile } = {}) {
     const record = makePeerRecord(peer);
     if (!record) return null;
-    const merged = mergePeerRecord(admitted.get(record.name) ?? null, record) ?? record;
-    admitted.set(merged.name, merged);
-    candidates.delete(merged.name);
-    return merged;
+    const existing = admitted.get(record.name) ?? null;
+    const merged = mergePeerRecord(existing, record) ?? record;
+    const withProfile = {
+      ...merged,
+      profile: profile ?? peer?.profile ?? existing?.profile ?? DEFAULT_PROFILE,
+    };
+    admitted.set(withProfile.name, withProfile);
+    candidates.delete(withProfile.name);
+    return withProfile;
   }
 
   /**
@@ -89,7 +103,9 @@ export function createDirectory(state = {}) {
       const known = admitted.get(record.name);
       if (known) {
         const merged = mergePeerRecord(known, record);
-        if (merged) admitted.set(record.name, merged);
+        // The profile is ours; nothing a peer says can change what another peer
+        // is allowed to ask of us.
+        if (merged) admitted.set(record.name, { ...merged, profile: known.profile });
         learned.merged.push(record.name);
         continue;
       }
@@ -126,8 +142,9 @@ export function createDirectory(state = {}) {
     // makePeerRecord only returns null for a nameless record, which this cannot
     // be — but a silent null here would erase a peer, so it is checked.
     if (!updated) return record;
-    admitted.set(name, updated);
-    return updated;
+    const stampedRecord = { ...updated, profile: record.profile };
+    admitted.set(name, stampedRecord);
+    return stampedRecord;
   }
 
   /**
@@ -140,7 +157,13 @@ export function createDirectory(state = {}) {
   function hailResponse() {
     return {
       self: publicRecord({ ...self, lastSeen: now() }),
-      peers: [...admitted.values()].map((record) => publicRecord(record)).filter(Boolean),
+      // Peers granted nothing are still ours to know about, but telling others
+      // where to find a machine we deliberately do not answer would hand out a
+      // reachability we chose not to use.
+      peers: [...admitted.values()]
+        .filter((record) => allows(record.profile, "hail"))
+        .map((record) => publicRecord(record))
+        .filter(Boolean),
     };
   }
 
@@ -152,7 +175,28 @@ export function createDirectory(state = {}) {
     markReachable,
     hailResponse,
     /** @param {string} name */
+    /** @param {string} name */
     get: (name) => admitted.get(name) ?? null,
+    /**
+     * Find an admitted peer by the key it signs with.
+     *
+     * The lookup that matters when someone calls: a name is what they claim, a
+     * key is what they proved.
+     *
+     * @param {string} publicKey
+     */
+    getByKey: (publicKey) =>
+      [...admitted.values()].find((record) => sameKey(record.publicKey, publicKey)) ?? null,
+    /**
+     * @param {string} name
+     * @param {string} capability
+     */
+    allowsCapability: (name, capability) => {
+      const record = admitted.get(name);
+      return record ? allows(record.profile, capability) : false;
+    },
+    /** @param {string} name */
+    profileFor: (name) => resolveProfile(admitted.get(name)?.profile),
     listAdmitted: () => [...admitted.values()],
     listCandidates: () =>
       [...candidates.entries()].map(([name, entry]) => ({ ...entry.record, name, heardFrom: entry.heardFrom })),

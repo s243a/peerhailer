@@ -21,23 +21,14 @@
  * @module server
  */
 import { createServer } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+
+import { verifyPayload } from "./identity.js";
+import { signRecord } from "./peerRecord.js";
+import { HAIL } from "./profiles.js";
 
 const MAX_BODY = 1_000_000;
-
-/**
- * Constant time, so a rejection cannot be turned into a guessing game.
- *
- * @param {unknown} given
- * @param {string | undefined} expected
- */
-function secretMatches(given, expected) {
-  if (!expected) return true;
-  if (typeof given !== "string") return false;
-  const a = Buffer.from(given);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+/** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
+const FRESHNESS_MS = 5 * 60_000;
 
 /**
  * @param {import("node:http").IncomingMessage} request
@@ -65,11 +56,11 @@ function readBody(request) {
 /**
  * @param {{
  *   directory: ReturnType<typeof import("./directory.js").createDirectory>,
- *   token?: string,
+ *   identity: {publicKey: string, privateKey: string},
  *   log?: (message: string) => void,
  * }} options
  */
-export function createDaemon({ directory, token, log = () => {} }) {
+export function createDaemon({ directory, identity, log = () => {} }) {
   /**
    * Every failure looks like this. Same status, same body, same shape.
    *
@@ -90,16 +81,63 @@ export function createDaemon({ directory, token, log = () => {} }) {
     response.end(JSON.stringify(payload));
   };
 
+  /**
+   * Why a caller was turned away — to our own log, never to them.
+   *
+   * The caller is told the same nothing whichever branch it was. An operator
+   * staring at a peer that will not connect needs the reason; a stranger
+   * probing does not.
+   *
+   * @param {string} reason
+   */
+  const debugRefusal = (reason) => {
+    log(`[hail] refused: ${reason}`);
+    return null;
+  };
+
+  /**
+   * Who is calling, if anyone we know.
+   *
+   * The caller signs its own name and a timestamp; we check that against the
+   * key we hold for that name. A name alone proves nothing — the key is the
+   * identity — and a profile without the hail capability is turned away just
+   * the same as a stranger.
+   *
+   * @param {any} body
+   */
+  const authenticate = (body) => {
+    const claim = body?.from;
+    if (typeof claim?.name !== "string") return debugRefusal("no name in claim");
+
+    const known = directory.get(claim.name);
+    if (!known?.publicKey) return debugRefusal(`unknown or keyless peer ${claim.name}`);
+    if (!verifyPayload(claim, body?.signature, known.publicKey)) {
+      return debugRefusal(`signature from ${claim.name} did not verify`);
+    }
+
+    // Replay is bounded rather than prevented: a signed hail is a request to be
+    // told who we know, so a stale one costs the same as a fresh one. The window
+    // exists so a captured request cannot be useful indefinitely.
+    const age = Math.abs(Date.now() - (Number(claim.at) || 0));
+    if (!Number.isFinite(age) || age > FRESHNESS_MS) return debugRefusal(`stale hail from ${claim.name}`);
+
+    return directory.allowsCapability(claim.name, HAIL)
+      ? known
+      : debugRefusal(`${claim.name} has no hail capability`);
+  };
+
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
       if (url.pathname === "/hail" && request.method === "POST") {
-        const bearer = (request.headers.authorization ?? "").replace(/^Bearer /, "");
-        if (!secretMatches(bearer, token)) return nothingHere(response);
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const caller = authenticate(body);
+        if (!caller) return nothingHere(response);
+
         const answer = directory.hailResponse();
-        log(`[hail] answered with ${answer.peers.length} peers`);
-        return send(response, 200, answer);
+        log(`[hail] ${caller.name} answered with ${answer.peers.length} peers`);
+        return send(response, 200, { ...answer, signed: signRecord(directory.self, identity.privateKey) });
       }
 
       if (url.pathname === "/api/peers" && request.method === "GET") {
