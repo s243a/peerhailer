@@ -51,9 +51,14 @@ for. `trusted` is the default: your own machines.
 
 | Profile | Grants | For |
 | --- | --- | --- |
-| `trusted` | hail, directory | Your own machines |
+| `trusted` *(pinned)* | hail, directory | Your own machines |
 | `known` | nothing | Recorded, never answered — a phone you hail *from* |
 | `carrier` | hail, directory, relay | A peer that may also carry traffic for you |
+
+Profiles are offered pinned-first, and `trusted` is pinned because it is the
+answer nearly every time. `hail profiles pin <name>` changes that, and you can
+define your own. Pinning grants nothing — it decides what gets picked when
+someone is moving quickly, which is reason enough to think about it.
 
 ```bash
 hail add phone --key-file phone.pub --profile known

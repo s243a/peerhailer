@@ -28,7 +28,13 @@ export const ENROL = "enrol";
 export const RELAY = "relay";
 
 /**
- * @typedef {{ name: string, allows: string[], description: string }} CapabilityProfile
+ * @typedef {{
+ *   name: string,
+ *   allows: string[],
+ *   description: string,
+ *   pinned?: boolean,
+ *   builtIn?: boolean,
+ * }} CapabilityProfile
  */
 
 /** The always-present fallback, so resolution can never yield nothing. */
@@ -40,6 +46,11 @@ const TRUSTED = {
   // inheriting by being a peer at all.
   allows: [HAIL, DIRECTORY],
   description: "Your own machines. May hail, and see who else you know.",
+  // Pinned because it is the answer nearly every time, and a list whose common
+  // case is buried gets scrolled past. Pinning is presentation only — see
+  // listProfiles for why that still matters.
+  pinned: true,
+  builtIn: true,
 };
 
 /** @type {Record<string, CapabilityProfile>} */
@@ -47,6 +58,7 @@ export const BUILT_IN_PROFILES = {
   trusted: TRUSTED,
   known: {
     name: "known",
+    builtIn: true,
     // Findable, but not answered. For a machine you want in your directory
     // without opening anything to it — a phone you hail from, never to.
     allows: [],
@@ -54,6 +66,7 @@ export const BUILT_IN_PROFILES = {
   },
   carrier: {
     name: "carrier",
+    builtIn: true,
     allows: [HAIL, DIRECTORY, RELAY],
     description: "A trusted peer that may also ask this machine to relay for it.",
   },
@@ -84,4 +97,58 @@ export function resolveProfile(name, profiles = BUILT_IN_PROFILES) {
  */
 export function allows(profileName, capability, profiles = BUILT_IN_PROFILES) {
   return resolveProfile(profileName, profiles).allows.includes(capability);
+}
+
+/**
+ * Profiles as a list, in the order they should be offered.
+ *
+ * Pinned first, then alphabetical. `trusted` is pinned out of the box because
+ * it is the answer nearly every time.
+ *
+ * Ordering grants nothing, and is still worth thinking about: whatever sits at
+ * the top of a list is what gets chosen when someone is moving quickly. Pin the
+ * profile you want applied without thought, and be wary of pinning a permissive
+ * one — the risk is not that pinning grants anything, but that it decides what
+ * people pick.
+ *
+ * @param {Record<string, Partial<CapabilityProfile>>} [custom] user profiles, merged over the built-ins
+ * @returns {CapabilityProfile[]}
+ */
+export function listProfiles(custom = {}) {
+  /** @type {Record<string, CapabilityProfile>} */
+  const merged = {};
+  for (const [name, profile] of Object.entries(BUILT_IN_PROFILES)) {
+    merged[name] = { ...profile };
+  }
+  for (const [name, profile] of Object.entries(custom ?? {})) {
+    const base = merged[name];
+    merged[name] = {
+      name,
+      allows: profile.allows ?? base?.allows ?? [],
+      description: profile.description ?? base?.description ?? "",
+      ...(profile.pinned ?? base?.pinned ?? false ? { pinned: true } : {}),
+      ...(base?.builtIn ? { builtIn: true } : {}),
+    };
+  }
+
+  return Object.values(merged).sort((left, right) => {
+    if (Boolean(left.pinned) !== Boolean(right.pinned)) return left.pinned ? -1 : 1;
+    return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+  });
+}
+
+/**
+ * Change which profiles are offered first.
+ *
+ * Returns the custom-profile map to store. A built-in is not modified in place
+ * — the override is recorded alongside it, so an upgrade that changes what
+ * `trusted` grants still reaches a user who only ever repinned it.
+ *
+ * @param {Record<string, Partial<CapabilityProfile>>} custom
+ * @param {string} name
+ * @param {boolean} pinned
+ */
+export function setPinned(custom, name, pinned) {
+  const existing = custom?.[name] ?? {};
+  return { ...custom, [name]: { ...existing, pinned } };
 }

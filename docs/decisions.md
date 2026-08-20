@@ -100,3 +100,24 @@ An unknown profile name resolves to `trusted` rather than to nothing. Failing
 shut would mean a peer that silently stops working after a config edit or a
 version bump — a failure indistinguishable from a network problem, which is the
 worst way for this to break.
+
+## Profiles are an ordered list, with `trusted` pinned
+
+**Decided.** Profiles are offered pinned-first then alphabetically, `trusted`
+pinned by default, and the pinning is the user's to change. Users may define
+their own profiles alongside the built-ins.
+
+Pinning grants nothing. It is worth thinking about anyway, because **whatever is
+at the top of a list is what gets chosen by someone moving quickly**. Pin the
+profile that should apply without thought — and be wary of pinning a permissive
+one, since the risk is not that pinning confers power but that it decides what
+people pick. `trusted` is pinned because it is the honest answer nearly every
+time: these are your own machines.
+
+The rest sort alphabetically so the order does not shift as profiles are added,
+which would move the target under someone's cursor between releases.
+
+An override records only what the user changed. Repinning `trusted` does not
+copy what it grants, so a later version that narrows it still reaches everyone
+who merely moved it up the list — the alternative is a security change that
+silently skips the users who customised anything.

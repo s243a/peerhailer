@@ -20,7 +20,7 @@ import { hostname } from "node:os";
 
 import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
-import { BUILT_IN_PROFILES } from "../src/profiles.js";
+import { listProfiles, setPinned } from "../src/profiles.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
 import { defaultStatePath, loadState, saveState } from "../src/state.js";
@@ -89,7 +89,10 @@ const directory = createDirectory({
     publicKey: identity.publicKey,
   },
 });
-const persist = () => saveState(directory.snapshot(), statePath);
+// Profiles ride alongside the directory: they are configuration about peers,
+// and splitting them into another file would mean two things to keep in step.
+const persist = () =>
+  saveState({ ...directory.snapshot(), ...(stored.profiles ? { profiles: stored.profiles } : {}) }, statePath);
 
 // The identity and the name have to survive the process, or every hail
 // introduces a machine nobody has heard of. Written on first sight rather than
@@ -216,9 +219,22 @@ switch (command) {
   }
 
   case "profiles": {
-    for (const profile of Object.values(BUILT_IN_PROFILES)) {
-      log(`${profile.name.padEnd(10)} ${(profile.allows.join(", ") || "nothing").padEnd(22)} ${profile.description}`);
+    const [action, target] = rest;
+    if (action === "pin" || action === "unpin") {
+      if (!target) fail(`usage: hail profiles ${action} <name>`);
+      stored.profiles = setPinned(stored.profiles ?? {}, target, action === "pin");
+      saveState({ ...directory.snapshot(), profiles: stored.profiles }, statePath);
+      log(`${target} is ${action === "pin" ? "pinned to the top" : "unpinned"}`);
+      break;
     }
+
+    for (const profile of listProfiles(stored.profiles)) {
+      const mark = profile.pinned ? "*" : " ";
+      log(
+        `${mark} ${profile.name.padEnd(10)} ${(profile.allows.join(", ") || "nothing").padEnd(22)} ${profile.description}`,
+      );
+    }
+    log("\n  * offered first.  hail profiles pin|unpin <name>");
     break;
   }
 
@@ -232,7 +248,7 @@ switch (command) {
         "  hail add <name> [address]    admit a peer  (--transport lan|tailscale|... --profile trusted --key <pem>)",
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
-        "  hail profiles                what each capability profile grants",
+        "  hail profiles [pin|unpin N]  what each profile grants, and which is offered first",
         "  hail forget <name>           remove a peer, admitted or not",
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",

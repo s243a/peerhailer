@@ -20,7 +20,7 @@ import {
   verifyPayload,
 } from "../src/identity.js";
 import { makePeerRecord, signRecord, verifyRecord } from "../src/peerRecord.js";
-import { allows, resolveProfile } from "../src/profiles.js";
+import { allows, listProfiles, resolveProfile, setPinned } from "../src/profiles.js";
 
 const scratch = () => join(mkdtempSync(join(tmpdir(), "ph-id-")), "identity.json");
 
@@ -120,4 +120,34 @@ test("an unknown profile name falls back rather than failing shut", () => {
   // A peer that silently stops working after a config edit looks exactly like a
   // network problem, which is the worst way for this to fail.
   assert.equal(resolveProfile("typo-profile").name, "trusted");
+});
+
+test("trusted is offered first out of the box", () => {
+  const listed = listProfiles();
+  assert.equal(listed[0].name, "trusted");
+  assert.equal(listed[0].pinned, true);
+  // The rest are alphabetical, so the order does not shift as profiles are added.
+  assert.deepEqual(listed.slice(1).map((p) => p.name), ["carrier", "known"]);
+});
+
+test("a user can change what is offered first", () => {
+  const custom = setPinned(setPinned({}, "known", true), "trusted", false);
+  assert.deepEqual(listProfiles(custom).map((p) => p.name), ["known", "carrier", "trusted"]);
+});
+
+test("repinning a built-in does not freeze what it grants", () => {
+  // The override records the pin only, so a later version changing what
+  // `trusted` allows still reaches someone who merely moved it up the list.
+  const custom = setPinned({}, "trusted", false);
+  const trusted = listProfiles(custom).find((p) => p.name === "trusted");
+  assert.deepEqual(trusted.allows, ["hail", "directory"]);
+  assert.notEqual(trusted.pinned, true);
+});
+
+test("a user-defined profile joins the list", () => {
+  const listed = listProfiles({
+    backup: { allows: ["hail"], description: "The backup box.", pinned: true },
+  });
+  assert.equal(listed[0].name, "backup");
+  assert.deepEqual(listed.find((p) => p.name === "backup").allows, ["hail"]);
 });
