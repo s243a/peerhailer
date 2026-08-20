@@ -22,6 +22,7 @@ import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
 import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
+import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
@@ -80,6 +81,7 @@ const identity = loadIdentity(defaultIdentityPath(statePath), {
 
 const directory = createDirectory({
   ...stored,
+  profiles: stored.profiles ?? {},
   self: {
     // The hostname is a better default than a placeholder: it is already the
     // name a person calls this machine, and a fabric full of peers called
@@ -93,14 +95,15 @@ const directory = createDirectory({
 });
 // Profiles ride alongside the directory: they are configuration about peers,
 // and splitting them into another file would mean two things to keep in step.
-const persist = () =>
-  saveState(
-    {
-      ...directory.snapshot(),
-      ...(stored.profiles ? { profiles: stored.profiles } : {}),
-    },
-    statePath,
-  );
+/**
+ * Write the directory back, keeping everything else in the file.
+ *
+ * Spreading what was read first, so configuration this command knows nothing
+ * about survives it. Rebuilding the file from the directory alone meant adding
+ * a peer silently erased the plugin list — and would erase the next key added
+ * too, in a way nobody would connect to the command they ran.
+ */
+const persist = () => saveState({ ...stored, ...directory.snapshot() }, statePath);
 
 // The identity and the name have to survive the process, or every hail
 // introduces a machine nobody has heard of. Written on first sight rather than
@@ -210,7 +213,7 @@ switch (command) {
       ...(typeof flags.vouches === "string" ? { settings: { vouchesRequired: Number(flags.vouches) } } : {}),
       ...(typeof flags.unknown === "string" ? { unknownProfile: flags.unknown } : {}),
     };
-    saveState({ ...directory.snapshot(), ...stored.trust ? { trust: stored.trust } : {} }, statePath);
+    persist();
     log(`trust model is now ${model}`);
     break;
   }
@@ -241,6 +244,13 @@ switch (command) {
   }
 
   case "daemon": {
+    // Named in the directory file, so a machine's services are part of its
+    // recorded configuration rather than an argument someone has to remember.
+    const plugins = await loadPlugins(stored.plugins ?? [], { log });
+    // A plugin may suggest profiles, so the directory learns about them before
+    // it is asked whether anybody holds one.
+    const profiles = { ...collectProfiles(plugins), ...(stored.profiles ?? {}) };
+    directory.useProfiles(profiles);
     const diagnostics = createDiagnostics();
     // A window opened at launch still closes itself. `--debug` is for starting
     // a daemon you are about to debug, not for leaving one open.
@@ -252,8 +262,9 @@ switch (command) {
     const daemon = createDaemon({
       directory,
       identity,
-      profiles: stored.profiles ?? {},
+      profiles,
       diagnostics,
+      plugins,
       log,
     });
     const port = Number(flags.port ?? 8787);
@@ -288,6 +299,34 @@ switch (command) {
     break;
   }
 
+  case "plugins": {
+    const [action, specifier] = rest;
+    if (action === "add" || action === "remove") {
+      if (!specifier) fail(`usage: hail plugins ${action} <module>`);
+      const current = stored.plugins ?? [];
+      stored.plugins =
+        action === "add"
+          ? [...new Set([...current, specifier])]
+          : current.filter((entry) => entry !== specifier);
+      persist();
+      log(`${action === "add" ? "added" : "removed"} ${specifier}`);
+      break;
+    }
+
+    const configured = stored.plugins ?? [];
+    if (configured.length === 0) {
+      log("no plugins configured.  hail plugins add <module>");
+      break;
+    }
+    // Loaded to report them, so what is listed is what would actually run.
+    for (const plugin of await loadPlugins(configured, { log: () => {} })) {
+      const routes = (plugin.routes ?? []).map((r) => `${r.method} ${r.path} [${r.capability}]`);
+      log(`${plugin.name.padEnd(12)} ${plugin.description ?? ""}`);
+      for (const route of routes) log(`  ${route}`);
+    }
+    break;
+  }
+
   case "profiles": {
     const [action, target] = rest;
     if (action === "reject") {
@@ -296,7 +335,7 @@ switch (command) {
         fail("usage: hail profiles reject <name> deny|drop");
       }
       stored.profiles = setRejection(stored.profiles ?? {}, name, style);
-      saveState({ ...directory.snapshot(), profiles: stored.profiles }, statePath);
+      persist();
       log(
         style === "drop"
           ? `${name} peers are now closed on without a reply`
@@ -308,7 +347,7 @@ switch (command) {
     if (action === "pin" || action === "unpin") {
       if (!target) fail(`usage: hail profiles ${action} <name>`);
       stored.profiles = setPinned(stored.profiles ?? {}, target, action === "pin");
-      saveState({ ...directory.snapshot(), profiles: stored.profiles }, statePath);
+      persist();
       log(`${target} is ${action === "pin" ? "pinned to the top" : "unpinned"}`);
       break;
     }
@@ -335,6 +374,7 @@ switch (command) {
         "  hail add <name> [address]    admit a peer  (--transport lan|tailscale|... --profile trusted --key <pem>)",
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
+        "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... pin|unpin <name>       change which profile is offered first",
         "    ... reject <name> deny|drop  answer a refused peer, or close on it",

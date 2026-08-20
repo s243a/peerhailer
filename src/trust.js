@@ -60,18 +60,34 @@ const DIRECT = {
  */
 export const TRUST_MODELS = {
   direct: DIRECT,
-  "web-of-trust": {
-    name: "web-of-trust",
+  /**
+   * Vouching, sketched — **not a trust model you should rely on**.
+   *
+   * Kept because the interface is the point and an example makes it legible,
+   * and named `sketch` so nobody mistakes it for a design. Two colluding peers
+   * meet a threshold of two, which is the whole of the Sybil problem in one
+   * line: on a network anyone can join, counting vouches counts identities, and
+   * identities are free.
+   *
+   * A real one needs something identities cannot be minted around. Freenet's
+   * answer is instructive: vouching *or* solving a puzzle, the second being
+   * what an open network needs and the first sufficing for a closed one. That
+   * is a design, not a parameter, and it is not attempted here.
+   *
+   * Most fabrics of personally-owned machines want neither. `direct` — you
+   * decide, or the answer is no — is the honest default for a closed network,
+   * and a closed network is usually what this is.
+   */
+  "vouch-sketch": {
+    name: "vouch-sketch",
     describe:
-      "A peer vouched for by enough peers you already trust inherits a profile. Introductions carry weight; they never carry your decision.",
+      "EXPERIMENTAL, gameable: counts vouches, which counts identities. Fine on a network nobody can join freely; worthless on one anybody can.",
     derive: ({ vouchedBy, directory, settings }) => {
       const needed = Number(settings.vouchesRequired ?? 2);
-      // Only peers that can hail us count as vouchers. A peer we granted
-      // nothing to is one whose opinion we already decided not to act on.
       const credible = vouchedBy.filter((name) => directory.allowsCapability(name, "hail"));
       if (credible.length < needed) return null;
-      // Never the full profile the voucher holds: an introduction is grounds for
-      // a smaller grant, or trust becomes transitive by arithmetic.
+      // Never the voucher's own profile: an introduction is grounds for a
+      // smaller grant, or trust becomes transitive by arithmetic.
       return typeof settings.vouchedProfile === "string" ? settings.vouchedProfile : "known";
     },
   },

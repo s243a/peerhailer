@@ -143,12 +143,21 @@ one is defeated by picking another. Where no key is held the name is all there
 is, and the CLI says so rather than implying a protection it cannot give.
 
 **Trust models decide only the silence.** `direct` is the default and answers
-"nothing" for anyone unassigned. `web-of-trust` grants a profile to peers enough
-credible peers vouched for — where credible means peers we already granted
-something to, so a peer we ignored cannot launder trust by making introductions.
-A vouched peer never inherits the voucher's profile: it lands in a smaller one,
-because otherwise trust becomes transitive by arithmetic, which the design
-refuses everywhere else.
+"nothing" for anyone unassigned, which is the honest answer for a network nobody
+can join freely — and that is usually what this is.
+
+The interface is pluggable; the shipped example is not a design. `vouch-sketch`
+counts vouches, and counting vouches counts identities: two colluding peers meet
+any threshold on a network anyone can join, which is the Sybil problem in one
+line. It is named and described as experimental so nobody mistakes it for
+something to rely on.
+
+A real model needs something identities cannot be minted around. Freenet's
+answer is instructive — vouching *or* solving a puzzle, the second being what an
+open network needs and the first sufficing for a closed one. That is a design,
+not a parameter, and deliberately not attempted here: it is too early to pick
+one, and shipping a weak one under a confident name is worse than shipping
+none.
 
 **Unknown is a real profile, not a special case.** It grants nothing by default,
 and a fabric that wants to answer strangers can grant it something without the
@@ -205,3 +214,40 @@ aid, not an audit log.
 The report carries this node's clock, because a hail refused as stale is usually
 two machines disagreeing about the time — invisible from either end until
 something says so.
+
+## Everything else is a plugin
+
+**Decided.** The core is a directory, a hello protocol, and who may ask for
+what. Tunnels, file transfer and the rest are plugins, loaded by explicit
+configuration.
+
+The reason is inheritance. A project embedding this to find its own machines
+should not acquire a file-transfer service because somebody else wanted one.
+What belongs in the core is what every peer must agree on to talk at all; what
+belongs in a plugin is a service some peers offer and others have never heard
+of. A peer that does not load the tunnel plugin has no tunnel capability to
+grant, and says the same nothing it says to any other request it will not serve.
+
+Tunnels stay a plugin even though they are wanted, because there are many
+possible implementations and the core should not pick one.
+
+**A plugin never sees an unauthenticated request.** Every route declares the
+capability it requires, and the daemon checks identity and capability before the
+handler is reached. A plugin cannot opt out, cannot grant itself a capability,
+and cannot be reached by a peer nobody admitted. A route declaring no capability
+is refused at load — that is the one mistake this arrangement exists to prevent,
+and load time is the last place to catch it.
+
+**A plugin's profiles are suggestions.** Loading one changes what this machine
+*can* offer, never who may use it. No peer holds a plugin's profile until
+somebody assigns it.
+
+**Loaded by name, never by scanning a directory.** A tool whose job is deciding
+who may talk to your machines should not execute code because it appeared on
+disk. A plugin that fails to load is reported and skipped rather than fatal: a
+broken tunnel must not stop a machine answering hails, which was its job before
+any plugin existed.
+
+**Two plugins cannot claim one path.** The conflict is refused rather than
+resolved by order, since the winner would otherwise depend on configuration
+order — which nobody would think to check.

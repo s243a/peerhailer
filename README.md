@@ -72,7 +72,7 @@ by the trust model, then the **unknown** default:
 
 ```bash
 hail block mallory      # denied everything, matched on key so renaming will not help
-hail trust web-of-trust # peers vouched for by peers you trust get a small profile
+hail trust              # which model is in force, and what each does
 hail trust              # what the models do, and which is in force
 ```
 
@@ -81,10 +81,12 @@ machine cannot see gets debugged as a network fault. The reply never says *which
 rule refused; that goes to your log. `hail profiles reject <name> drop` closes on
 a peer without a reply instead, which is what `blocked` already does.
 
-`direct` is the default model: if you did not decide about a peer, it gets
-nothing. `web-of-trust` fills that silence from introductions — but a vouched
-peer lands in a *smaller* profile than its voucher, because otherwise trust is
-transitive by arithmetic.
+`direct` is the default and probably the only one you want: if you did not
+decide about a peer, it gets nothing. Trust models are a pluggable way to fill
+that silence, and the one shipped example (`vouch-sketch`) is labelled
+experimental because counting vouches counts identities — two colluding peers
+meet any threshold on a network anyone can join. A real model needs something
+identities cannot be minted around, which is a design rather than a setting.
 
 Knowing a machine exists and letting it use your services are different grants,
 and relaying — which spends your bandwidth and exposure on someone else's
@@ -166,6 +168,35 @@ It is JavaScript with JSDoc types rather than TypeScript, and type-checked by
 `tsc` in strict mode all the same — `npm run typecheck` — with declarations
 emitted for consumers by `npm run types`. The reasoning, and what would reverse
 it, is in [docs/decisions.md](./docs/decisions.md).
+
+## Plugins
+
+The core finds machines and decides who may ask for what. Everything else —
+tunnels, file transfer — is a plugin, so a project embedding this does not
+inherit services it never wanted.
+
+```bash
+hail plugins add ./my-plugin.js
+hail plugins                       # what is loaded, and the routes it serves
+```
+
+A plugin declares routes and the capability each requires:
+
+```js
+export default {
+  name: "echo",
+  capabilities: ["echo"],
+  profiles: { echoer: { allows: ["hail", "echo"], description: "May echo." } },
+  routes: [{ method: "POST", path: "/echo", capability: "echo", handler: ({ body, caller }) => ... }],
+};
+```
+
+**A plugin never sees an unauthenticated request.** Identity and capability are
+checked by the core before the handler runs; a route declaring no capability is
+refused at load. Its profiles are suggestions — loading a plugin changes what
+this machine can offer, never who may use it.
+
+Plugins load by name from your configuration, never by scanning a directory.
 
 ## What it does not do
 

@@ -20,8 +20,17 @@
  */
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 import { sameKey } from "./identity.js";
-import { allows, DEFAULT_PROFILE, resolveProfile } from "./profiles.js";
+import { allows, DEFAULT_PROFILE, listProfiles, resolveProfile } from "./profiles.js";
 import { profileFor } from "./trust.js";
+
+/**
+ * Profiles by name — built-ins merged with whatever was customised.
+ *
+ * @param {Record<string, any>} custom
+ */
+function asRecord(custom) {
+  return Object.fromEntries(listProfiles(custom).map((profile) => [profile.name, profile]));
+}
 
 /**
  * @param {{
@@ -29,6 +38,7 @@ import { profileFor } from "./trust.js";
  *   admitted?: any[],
  *   candidates?: any[],
  *   blocklist?: {names?: string[], keys?: string[]},
+ *   profiles?: Record<string, any>,
  *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string},
  *   now?: () => number,
  * }} [state]
@@ -56,6 +66,16 @@ export function createDirectory(state = {}) {
     names: [...(state.blocklist?.names ?? [])],
     keys: [...(state.blocklist?.keys ?? [])],
   };
+  /**
+   * Profiles this directory resolves against.
+   *
+   * Built-ins plus whatever the user defined and any a plugin suggested. Held
+   * here because a capability check that does not know about a profile silently
+   * falls back to the default — a peer would appear to hold a grant it does
+   * not, or be refused one it does, with nothing to say why.
+   */
+  let profileSet = asRecord(state.profiles ?? {});
+
   const trust = {
     model: state.trust?.model ?? "direct",
     settings: state.trust?.settings ?? {},
@@ -180,7 +200,7 @@ export function createDirectory(state = {}) {
       // reachability we chose not to use.
       peers: [...admitted.values()]
         .filter((record) => !profileFor({ peer: record, directory: api, blocklist }).profile.includes("blocked"))
-        .filter((record) => allows(record.profile, "hail"))
+        .filter((record) => allows(record.profile, "hail", profileSet))
         .map((record) => publicRecord(record))
         .filter(Boolean),
     };
@@ -239,7 +259,7 @@ export function createDirectory(state = {}) {
       if (!record && !candidate) {
         // A caller we have never heard of still gets whatever the unknown
         // profile grants — nothing, unless someone changed that deliberately.
-        return allows(trust.unknownProfile, capability);
+        return allows(trust.unknownProfile, capability, profileSet);
       }
       const { profile } = profileFor({
         peer: record ?? candidate?.record ?? { name },
@@ -250,10 +270,21 @@ export function createDirectory(state = {}) {
         unknownProfile: trust.unknownProfile,
         vouchedBy: candidate?.heardFrom ?? [],
       });
-      return allows(profile, capability);
+      return allows(profile, capability, profileSet);
     },
     /** @param {string} name */
-    profileFor: (name) => resolveProfile(admitted.get(name)?.profile),
+    profileFor: (name) => resolveProfile(admitted.get(name)?.profile, profileSet),
+    /**
+     * Replace the profiles this directory resolves against.
+     *
+     * Used once plugins are loaded, since a plugin may suggest profiles and the
+     * directory is built before it is known which plugins there are.
+     *
+     * @param {Record<string, any>} custom
+     */
+    useProfiles: (custom) => {
+      profileSet = asRecord(custom);
+    },
     /**
      * Deny a peer everything, by key where we have one.
      *

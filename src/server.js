@@ -24,6 +24,7 @@ import { createServer } from "node:http";
 
 import { verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
+import { collectRoutes } from "./plugins.js";
 import { DIAGNOSTICS, HAIL, rejectionFor } from "./profiles.js";
 
 const MAX_BODY = 1_000_000;
@@ -59,10 +60,18 @@ function readBody(request) {
  *   identity: {publicKey: string, privateKey: string},
  *   profiles?: Record<string, any>,
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
+ *   plugins?: import("./plugins.js").Plugin[],
  *   log?: (message: string) => void,
  * }} options
  */
-export function createDaemon({ directory, identity, profiles = {}, diagnostics, log = () => {} }) {
+export function createDaemon({
+  directory,
+  identity,
+  profiles = {},
+  diagnostics,
+  plugins = [],
+  log = () => {},
+}) {
   /**
    * Turn a caller away, in the style its profile calls for.
    *
@@ -171,10 +180,28 @@ export function createDaemon({ directory, identity, profiles = {}, diagnostics, 
       : debugRefusal(`${claim.name} has no ${capability} capability`, claim.name);
   };
 
+  // Resolved once: a route table that changes per request is one nobody can
+  // reason about, and conflicts are worth refusing at startup rather than
+  // resolving by whichever plugin happened to be listed first.
+  const pluginRoutes = collectRoutes(plugins, { log });
+
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
+      const pluginRoute = pluginRoutes.get(`${request.method} ${url.pathname}`);
+      if (pluginRoute) {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        // Authentication and capability happen here, in the core, before the
+        // plugin is reached. A plugin cannot opt out of this, which is what
+        // makes loading one a smaller decision than writing one.
+        const caller = authenticate(body, pluginRoute.capability);
+        if (!caller) return turnAway(response, rejectionProfile(body));
+
+        const result = await pluginRoute.handler({ body, caller, directory, identity, log });
+        return send(response, 200, result ?? {});
+      }
+
       if (url.pathname === "/hail" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         const caller = authenticate(body);

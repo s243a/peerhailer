@@ -29,7 +29,7 @@ test("an assignment beats what a model would derive", () => {
   const decision = profileFor({
     peer: { name: "sol", profile: "known" },
     directory: directoryStub,
-    model: "web-of-trust",
+    model: "vouch-sketch",
     vouchedBy: ["a", "b", "c"],
   });
   // A person decided; a heuristic does not get to overrule them quietly.
@@ -43,11 +43,11 @@ test("a peer nobody assigned gets nothing under the direct model", () => {
   assert.match(decision.reason, /no opinion/);
 });
 
-test("web-of-trust derives a profile once enough credible peers vouch", () => {
+test("the vouch sketch derives a profile once enough credible peers vouch", () => {
   const thin = profileFor({
     peer: { name: "luna" },
     directory: directoryStub,
-    model: "web-of-trust",
+    model: "vouch-sketch",
     vouchedBy: ["sol"],
   });
   assert.equal(thin.profile, "unknown", "one voucher is not a web");
@@ -55,11 +55,11 @@ test("web-of-trust derives a profile once enough credible peers vouch", () => {
   const enough = profileFor({
     peer: { name: "luna" },
     directory: directoryStub,
-    model: "web-of-trust",
+    model: "vouch-sketch",
     vouchedBy: ["sol", "mars"],
   });
   assert.equal(enough.profile, "known");
-  assert.match(enough.reason, /web-of-trust/);
+  assert.match(enough.reason, /vouch-sketch/);
 });
 
 test("vouches from peers granted nothing do not count", () => {
@@ -68,7 +68,7 @@ test("vouches from peers granted nothing do not count", () => {
   const decision = profileFor({
     peer: { name: "luna" },
     directory: { allowsCapability: () => false },
-    model: "web-of-trust",
+    model: "vouch-sketch",
     vouchedBy: ["ignored", "also-ignored", "still-ignored"],
   });
   assert.equal(decision.profile, "unknown");
@@ -78,7 +78,7 @@ test("a vouched peer never inherits the voucher's profile", () => {
   const decision = profileFor({
     peer: { name: "luna" },
     directory: directoryStub,
-    model: "web-of-trust",
+    model: "vouch-sketch",
     vouchedBy: ["sol", "mars"],
   });
   // Otherwise trust is transitive by arithmetic, which the design refuses.
