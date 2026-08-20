@@ -76,6 +76,11 @@ hail trust web-of-trust # peers vouched for by peers you trust get a small profi
 hail trust              # what the models do, and which is in force
 ```
 
+Refusals answer by default — `{"error": "denied"}` — because a refusal your own
+machine cannot see gets debugged as a network fault. The reply never says *which*
+rule refused; that goes to your log. `hail profiles reject <name> drop` closes on
+a peer without a reply instead, which is what `blocked` already does.
+
 `direct` is the default model: if you did not decide about a peer, it gets
 nothing. `web-of-trust` fills that silence from introductions — but a vouched
 peer lands in a *smaller* profile than its voucher, because otherwise trust is

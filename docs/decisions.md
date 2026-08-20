@@ -153,3 +153,26 @@ refuses everywhere else.
 **Unknown is a real profile, not a special case.** It grants nothing by default,
 and a fabric that wants to answer strangers can grant it something without the
 code growing a branch for it.
+
+## A refusal answers, unless you say otherwise
+
+**Decided.** `deny` is the default rejection style, configurable per profile,
+with `blocked` set to `drop`.
+
+Silence is a bad default for a refusal. The peer on the other end is usually
+your own machine, and its operator is usually you — a refusal nobody can see
+gets debugged as a network fault, at length, in the wrong place. Answering costs
+little in a fabric whose peers already know each other exists.
+
+What the answer must not do is say *which* rule refused. Unknown peer, bad
+signature, wrong key, missing capability and blocked all return the same
+`denied`, or the reply becomes an oracle for working out which one to attack.
+The real reason goes to this machine's log, where the person who needs it is.
+
+`blocked` drops instead, because a peer you blocked is one you have already
+decided to stop talking to, and a reply is something it can act on.
+
+Note what `drop` does not achieve. The connection was accepted before the
+decision was made, so it hides the refusal rather than this machine. Being
+genuinely unfindable means refusing before accepting, which needs a transport
+that can — the argument for UDP in the covert-mode design.

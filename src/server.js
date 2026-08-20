@@ -24,7 +24,7 @@ import { createServer } from "node:http";
 
 import { verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
-import { HAIL } from "./profiles.js";
+import { HAIL, rejectionFor } from "./profiles.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -57,12 +57,38 @@ function readBody(request) {
  * @param {{
  *   directory: ReturnType<typeof import("./directory.js").createDirectory>,
  *   identity: {publicKey: string, privateKey: string},
+ *   profiles?: Record<string, any>,
  *   log?: (message: string) => void,
  * }} options
  */
-export function createDaemon({ directory, identity, log = () => {} }) {
+export function createDaemon({ directory, identity, profiles = {}, log = () => {} }) {
   /**
-   * Every failure looks like this. Same status, same body, same shape.
+   * Turn a caller away, in the style its profile calls for.
+   *
+   * `deny` answers, because a refusal a peer cannot see is one its operator
+   * debugs as a network fault. `drop` closes without a reply, for peers that
+   * should learn nothing — note the connection was already accepted by then, so
+   * this hides the refusal rather than this machine. Being genuinely unfindable
+   * needs a transport that can refuse before accepting.
+   *
+   * The reply never says *which* rule refused. Unknown peer, bad signature,
+   * wrong key, missing capability and blocked all read alike, or the answer
+   * becomes an oracle for working out which one to attack.
+   *
+   * @param {import("node:http").ServerResponse} response
+   * @param {string} [profileName]
+   */
+  const turnAway = (response, profileName) => {
+    if (rejectionFor(profileName, profiles) === "drop") {
+      response.destroy();
+      return;
+    }
+    response.writeHead(403, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "denied" }));
+  };
+
+  /**
+   * For paths that are not part of the protocol at all.
    *
    * @param {import("node:http").ServerResponse} response
    */
@@ -93,6 +119,22 @@ export function createDaemon({ directory, identity, log = () => {} }) {
   const debugRefusal = (reason) => {
     log(`[hail] refused: ${reason}`);
     return null;
+  };
+
+  /**
+   * Which profile decides how a caller is turned away.
+   *
+   * A caller we can identify is refused in its own profile's style — a blocked
+   * peer is dropped, an unauthorized one is told. A caller we cannot identify
+   * falls to `unknown`, which answers by default.
+   *
+   * @param {any} body
+   */
+  const rejectionProfile = (body) => {
+    const name = body?.from?.name;
+    return typeof name === "string"
+      ? directory.effectiveProfile(name).profile
+      : directory.trust().unknownProfile;
   };
 
   /**
@@ -133,7 +175,7 @@ export function createDaemon({ directory, identity, log = () => {} }) {
       if (url.pathname === "/hail" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         const caller = authenticate(body);
-        if (!caller) return nothingHere(response);
+        if (!caller) return turnAway(response, rejectionProfile(body));
 
         const answer = directory.hailResponse();
         log(`[hail] ${caller.name} answered with ${answer.peers.length} peers`);

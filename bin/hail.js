@@ -20,7 +20,7 @@ import { hostname } from "node:os";
 
 import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
-import { listProfiles, setPinned } from "../src/profiles.js";
+import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
@@ -240,7 +240,7 @@ switch (command) {
   }
 
   case "daemon": {
-    const daemon = createDaemon({ directory, identity, log });
+    const daemon = createDaemon({ directory, identity, profiles: stored.profiles ?? {}, log });
     const port = Number(flags.port ?? 8787);
     // Binding beyond loopback exposes an API that can admit peers, so it has to
     // be asked for by name rather than arrived at by default.
@@ -275,6 +275,21 @@ switch (command) {
 
   case "profiles": {
     const [action, target] = rest;
+    if (action === "reject") {
+      const [, name, style] = rest;
+      if (!name || (style !== "deny" && style !== "drop")) {
+        fail("usage: hail profiles reject <name> deny|drop");
+      }
+      stored.profiles = setRejection(stored.profiles ?? {}, name, style);
+      saveState({ ...directory.snapshot(), profiles: stored.profiles }, statePath);
+      log(
+        style === "drop"
+          ? `${name} peers are now closed on without a reply`
+          : `${name} peers are now told they were denied`,
+      );
+      break;
+    }
+
     if (action === "pin" || action === "unpin") {
       if (!target) fail(`usage: hail profiles ${action} <name>`);
       stored.profiles = setPinned(stored.profiles ?? {}, target, action === "pin");
@@ -285,11 +300,13 @@ switch (command) {
 
     for (const profile of listProfiles(stored.profiles)) {
       const mark = profile.pinned ? "*" : " ";
+      const reject = (profile.onReject ?? "deny") === "drop" ? "drop" : "deny";
       log(
-        `${mark} ${profile.name.padEnd(10)} ${(profile.allows.join(", ") || "nothing").padEnd(22)} ${profile.description}`,
+        `${mark} ${profile.name.padEnd(10)} ${(profile.allows.join(", ") || "nothing").padEnd(22)} ${reject.padEnd(5)} ${profile.description}`,
       );
     }
     log("\n  * offered first.  hail profiles pin|unpin <name>");
+    log("  deny|drop is how a refused peer is answered.  hail profiles reject <name> deny|drop");
     break;
   }
 
@@ -303,7 +320,9 @@ switch (command) {
         "  hail add <name> [address]    admit a peer  (--transport lan|tailscale|... --profile trusted --key <pem>)",
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
-        "  hail profiles [pin|unpin N]  what each profile grants, and which is offered first",
+        "  hail profiles                what each profile grants, and how it refuses",
+        "    ... pin|unpin <name>       change which profile is offered first",
+        "    ... reject <name> deny|drop  answer a refused peer, or close on it",
         "  hail forget <name>           remove a peer, admitted or not",
         "  hail block|unblock <name>    deny a peer everything, by key where we hold one",
         "  hail trust [model]           how peers you have not assigned are treated",

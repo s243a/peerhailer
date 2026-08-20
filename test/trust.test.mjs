@@ -10,6 +10,7 @@ import { test } from "node:test";
 
 import { createDirectory } from "../src/directory.js";
 import { generateIdentity } from "../src/identity.js";
+import { listProfiles, rejectionFor, setRejection } from "../src/profiles.js";
 import { isBlocked, profileFor, resolveTrustModel } from "../src/trust.js";
 
 const directoryStub = { allowsCapability: () => true };
@@ -143,4 +144,26 @@ test("a caller we have never heard of gets the unknown profile", () => {
 
 test("an unknown model name falls back rather than failing shut", () => {
   assert.equal(resolveTrustModel("nonsense").name, "direct");
+});
+
+test("a refusal answers by default, and a blocked peer is dropped", () => {
+  // Answering is the default because a refusal a peer cannot see gets debugged
+  // as a network fault by whoever is on the other end.
+  assert.equal(rejectionFor("unknown"), "deny");
+  assert.equal(rejectionFor("known"), "deny");
+  assert.equal(rejectionFor("trusted"), "deny");
+  // A peer you blocked is one you already decided to stop talking to.
+  assert.equal(rejectionFor("blocked"), "drop");
+});
+
+test("the rejection style is the user's to change per profile", () => {
+  const custom = setRejection({}, "unknown", "drop");
+  assert.equal(rejectionFor("unknown", custom), "drop");
+  assert.equal(rejectionFor("known", custom), "deny", "one profile at a time");
+});
+
+test("changing the style does not change what a profile grants", () => {
+  const custom = setRejection({}, "trusted", "drop");
+  const trusted = listProfiles(custom).find((p) => p.name === "trusted");
+  assert.deepEqual(trusted.allows, ["hail", "directory"]);
 });

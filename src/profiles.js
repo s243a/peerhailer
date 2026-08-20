@@ -28,14 +28,28 @@ export const ENROL = "enrol";
 export const RELAY = "relay";
 
 /**
+ * How a peer in this profile is turned away.
+ *
+ * `deny` answers, which is honest and lets an operator on the other end see
+ * that they were refused rather than that something broke. `drop` closes
+ * without a reply, for peers that should not learn anything at all.
+ *
+ * @typedef {"deny" | "drop"} RejectionStyle
+ */
+
+/**
  * @typedef {{
  *   name: string,
  *   allows: string[],
  *   description: string,
+ *   onReject?: RejectionStyle,
  *   pinned?: boolean,
  *   builtIn?: boolean,
  * }} CapabilityProfile
  */
+
+/** Answering is the default: a silent refusal is indistinguishable from a fault. */
+export const DEFAULT_REJECTION = "deny";
 
 /** The always-present fallback, so resolution can never yield nothing. */
 const TRUSTED = {
@@ -76,6 +90,9 @@ export const BUILT_IN_PROFILES = {
   blocked: {
     name: "blocked",
     builtIn: true,
+    // Dropped rather than answered. A peer you blocked is one you have already
+    // decided to stop talking to, and telling it so is a reply it can act on.
+    onReject: "drop",
     // Not assignable; produced by the blocklist. Present so a peer's effective
     // profile always names something a person can look up.
     allows: [],
@@ -143,6 +160,9 @@ export function listProfiles(custom = {}) {
       name,
       allows: profile.allows ?? base?.allows ?? [],
       description: profile.description ?? base?.description ?? "",
+      ...(profile.onReject ?? base?.onReject
+        ? { onReject: profile.onReject ?? base?.onReject ?? DEFAULT_REJECTION }
+        : {}),
       ...(profile.pinned ?? base?.pinned ?? false ? { pinned: true } : {}),
       ...(base?.builtIn ? { builtIn: true } : {}),
     };
@@ -168,4 +188,25 @@ export function listProfiles(custom = {}) {
 export function setPinned(custom, name, pinned) {
   const existing = custom?.[name] ?? {};
   return { ...custom, [name]: { ...existing, pinned } };
+}
+
+/**
+ * How to turn away a peer in this profile.
+ *
+ * @param {string | undefined} profileName
+ * @param {Record<string, Partial<CapabilityProfile>>} [custom]
+ * @returns {RejectionStyle}
+ */
+export function rejectionFor(profileName, custom = {}) {
+  const merged = listProfiles(custom).find((profile) => profile.name === profileName);
+  return merged?.onReject ?? DEFAULT_REJECTION;
+}
+
+/**
+ * @param {Record<string, Partial<CapabilityProfile>>} custom
+ * @param {string} name
+ * @param {RejectionStyle} style
+ */
+export function setRejection(custom, name, style) {
+  return { ...custom, [name]: { ...(custom?.[name] ?? {}), onReject: style } };
 }
