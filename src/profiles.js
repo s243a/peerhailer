@@ -26,6 +26,15 @@ export const DIRECTORY = "directory";
 export const ENROL = "enrol";
 /** Reserved for relaying: may ask us to carry traffic for it. */
 export const RELAY = "relay";
+/**
+ * May ask why things are failing — and only while this node is in debug mode.
+ *
+ * Held apart from every default profile on purpose. Diagnostics answer the
+ * question every other refusal deliberately refuses to answer: *which* rule
+ * turned you away. That is exactly the oracle withheld from a refusal, so it
+ * takes two keys to open — the grant, and a window an operator opened.
+ */
+export const DIAGNOSTICS = "diagnostics";
 
 /**
  * How a peer in this profile is turned away.
@@ -103,6 +112,14 @@ export const BUILT_IN_PROFILES = {
     builtIn: true,
     allows: [HAIL, DIRECTORY, RELAY],
     description: "A trusted peer that may also ask this machine to relay for it.",
+  },
+  operator: {
+    name: "operator",
+    builtIn: true,
+    // The machine you debug from. Diagnostics are not in `trusted` because
+    // most trusted peers have no business asking why others were refused.
+    allows: [HAIL, DIRECTORY, DIAGNOSTICS],
+    description: "A trusted peer that may also read diagnostics, in debug mode.",
   },
 };
 

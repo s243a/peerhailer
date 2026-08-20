@@ -21,6 +21,7 @@ import { hostname } from "node:os";
 import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
 import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
+import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
@@ -240,7 +241,21 @@ switch (command) {
   }
 
   case "daemon": {
-    const daemon = createDaemon({ directory, identity, profiles: stored.profiles ?? {}, log });
+    const diagnostics = createDiagnostics();
+    // A window opened at launch still closes itself. `--debug` is for starting
+    // a daemon you are about to debug, not for leaving one open.
+    if (flags.debug) {
+      const forMs = typeof flags.debug === "string" ? Number(flags.debug) * 60_000 : DEFAULT_WINDOW_MS;
+      const until = diagnostics.open(Number.isFinite(forMs) ? forMs : DEFAULT_WINDOW_MS);
+      log(`[diagnostics] window open until ${new Date(until).toISOString()}`);
+    }
+    const daemon = createDaemon({
+      directory,
+      identity,
+      profiles: stored.profiles ?? {},
+      diagnostics,
+      log,
+    });
     const port = Number(flags.port ?? 8787);
     // Binding beyond loopback exposes an API that can admit peers, so it has to
     // be asked for by name rather than arrived at by default.
@@ -328,6 +343,7 @@ switch (command) {
         "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",
+        "    ... --debug [minutes]      open a diagnostics window that closes itself",
         "",
         "  --state <path>               use a different directory file",
       ].join("\n"),

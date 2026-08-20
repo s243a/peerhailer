@@ -176,3 +176,32 @@ Note what `drop` does not achieve. The connection was accepted before the
 decision was made, so it hides the refusal rather than this machine. Being
 genuinely unfindable means refusing before accepting, which needs a transport
 that can — the argument for UDP in the covert-mode design.
+
+## Diagnostics need two keys, and the window closes itself
+
+**Decided.** A `diagnostics` capability, answered only when the caller holds it
+*and* this node is inside a debug window an operator opened. The window expires
+on its own.
+
+This endpoint answers the question every other refusal deliberately refuses:
+which rule turned you away. That oracle is worth having — without it an operator
+sees `denied` and guesses, usually from the wrong machine — and it is worth
+locking twice, because either lock alone rots. A grant left on a peer would
+answer forever. A mode with no grant would answer anyone. Both together mean a
+deliberate act on this machine *and* a decision already made about that peer.
+
+The window expires because a debug mode nobody remembers to turn off is a
+permanent one, and this one is permanent in the worst way: quiet, and only
+interesting to somebody else.
+
+`diagnostics` is not in `trusted`. Most peers you trust have no business asking
+why others were refused, so it lives in `operator` — the machine you debug from.
+
+Refusals are recorded whether or not the window is open, since the useful
+question is "why did that fail a minute ago", asked after the failure and too
+late to have turned recording on. The history is bounded: this is a debugging
+aid, not an audit log.
+
+The report carries this node's clock, because a hail refused as stale is usually
+two machines disagreeing about the time — invisible from either end until
+something says so.

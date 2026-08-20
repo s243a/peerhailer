@@ -90,6 +90,21 @@ Knowing a machine exists and letting it use your services are different grants,
 and relaying — which spends your bandwidth and exposure on someone else's
 traffic — is not inherited by being a peer at all.
 
+## When something will not connect
+
+Refusals say `denied` and nothing else, on purpose. To find out *which* rule
+refused, two things must both be true: the asking peer holds the `diagnostics`
+capability, and the node is inside a debug window.
+
+```bash
+hail add ops --key-file ops.pub --profile operator   # on the node
+hail daemon --debug 15                               # a window that closes itself
+```
+
+The report carries the node's clock, every peer's effective profile with the
+reason for it, and recent refusals — which are recorded whether or not the
+window is open, since you always want to know why something failed a minute ago.
+
 ## Three rules it will not bend
 
 **Records carry no credentials.** A record travels to every peer that asks, so
