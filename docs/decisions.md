@@ -288,3 +288,38 @@ What works instead is what T3 already accepts: a pairing URL, or an address to
 paste. If the integration is worth tightening later, the right shape is a plugin
 on the T3 side reading peerhailer's local API — not this side reaching into
 another application's private storage.
+
+## Grants are minted, never stored
+
+**Decided.** A grant is a short-lived signed assertion naming one subject key
+and one set of capabilities. It is not kept in the directory, not replicated,
+and worthless once it expires.
+
+This completes the rule the directory already follows. Records carry no
+credentials, which is right and leaves a gap: sometimes a peer must prove to a
+*third* machine that it is allowed something — that `luna` may relay through
+`mars`, on `sol`'s say-so — and that machine has never heard of it.
+
+Three properties keep this from becoming a bearer token by accident:
+
+**A grant names its subject by key.** It authorises that machine, not whoever
+holds the bytes, and the presenter must sign the request with the key the grant
+names. Intercepting one gains nothing.
+
+**A grant cannot widen.** An issuer may only delegate what it holds, checked
+twice: at minting, against what the issuer is allowed to pass on, and at
+verification, against what the checking machine grants that issuer. Re-minting
+may only narrow, and a child cannot outlive its parent.
+
+**A grant expires, and briefly.** Five minutes by default, an hour at most.
+Anything long-lived is a credential in all but name, and a credential is the
+thing this design keeps refusing to store.
+
+The issuer must also hold `delegate`, which no default profile grants. A peer
+that can delegate introduces capability to machines you never admitted —
+bounded by what it holds, which is a real bound and still wider than being able
+to act itself.
+
+A grant is a way *in*, not merely an extra capability: a peer nobody admitted
+can be let through on one, which is the whole point and why the checks above are
+where the weight sits.

@@ -27,6 +27,14 @@ export const ENROL = "enrol";
 /** Reserved for relaying: may ask us to carry traffic for it. */
 export const RELAY = "relay";
 /**
+ * May issue grants this machine will honour.
+ *
+ * Off by default, like relaying. A peer that can delegate can introduce
+ * capability to machines you never admitted — bounded by what it holds, which
+ * is a real bound and still a wider one than being able to act itself.
+ */
+export const DELEGATE = "delegate";
+/**
  * May ask why things are failing — and only while this node is in debug mode.
  *
  * Held apart from every default profile on purpose. Diagnostics answer the

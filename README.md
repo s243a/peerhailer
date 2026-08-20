@@ -169,6 +169,23 @@ It is JavaScript with JSDoc types rather than TypeScript, and type-checked by
 emitted for consumers by `npm run types`. The reasoning, and what would reverse
 it, is in [docs/decisions.md](./docs/decisions.md).
 
+## Grants
+
+Records carry no credentials, so what a peer presents is made when it asks. A
+grant is a short-lived signed assertion naming one machine's key and one set of
+capabilities — enough for a peer to prove to a *third* machine that it is
+allowed something, on the say-so of a peer that third machine already trusts.
+
+```
+luna, no grant                  403   mars has never admitted luna
+luna, with sol's grant          200   sol may delegate; luna signed as itself
+mallory replaying that grant    403   the grant names luna's key, not mallory's
+```
+
+A grant cannot widen what its issuer holds, cannot outlive an hour, and is
+useless to anyone but the machine it names. Issuing one requires the `delegate`
+capability, which no default profile grants.
+
 ## A page to look at it
 
 ```bash

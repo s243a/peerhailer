@@ -22,10 +22,11 @@
  */
 import { createServer } from "node:http";
 
-import { verifyPayload } from "./identity.js";
+import { sameKey, verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes } from "./plugins.js";
-import { DIAGNOSTICS, HAIL, listProfiles, rejectionFor } from "./profiles.js";
+import { verifyGrant } from "./grants.js";
+import { DELEGATE, DIAGNOSTICS, HAIL, listProfiles, rejectionFor } from "./profiles.js";
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 
@@ -153,40 +154,93 @@ export function createDaemon({
   };
 
   /**
-   * Who is calling, if anyone we know.
+   * Does a grant in this request carry the capability?
    *
-   * The caller signs its own name and a timestamp; we check that against the
-   * key we hold for that name. A name alone proves nothing — the key is the
-   * identity — and a profile without the hail capability is turned away just
-   * the same as a stranger.
+   * The issuer must be a peer this machine admitted *and* one it allows to
+   * delegate — a grant is only worth what its issuer could have given, and an
+   * issuer nobody trusts to delegate could otherwise mint capability from
+   * nothing.
    *
    * @param {any} body
-   * @param {string} [capability] what the caller must hold, beyond being known
+   * @param {string | null | undefined} presenterKey
+   * @param {string} capability
+   */
+  const grantAllows = (body, presenterKey, capability) => {
+    const envelope = body?.grant;
+    if (!envelope) return null;
+
+    const checked = verifyGrant(envelope, { presenterKey: presenterKey ?? null, capability });
+    if (!checked.ok) {
+      debugRefusal(`grant refused: ${checked.error}`, body?.from?.name ?? "unnamed");
+      return null;
+    }
+
+    const issuer = directory.getByKey(checked.grant.issuerKey);
+    if (!issuer) {
+      debugRefusal(`grant issued by an unknown peer`, body?.from?.name ?? "unnamed");
+      return null;
+    }
+    if (!directory.allowsCapability(issuer.name, DELEGATE)) {
+      debugRefusal(`${issuer.name} may not delegate`, body?.from?.name ?? "unnamed");
+      return null;
+    }
+    // And never more than the issuer itself holds here.
+    if (!directory.allowsCapability(issuer.name, capability)) {
+      debugRefusal(`${issuer.name} cannot delegate ${capability}, not holding it`, body?.from?.name ?? "unnamed");
+      return null;
+    }
+    return checked.grant;
+  };
+
+  /**
+   * Who is calling, if anyone we know, and may they ask for this?
+   *
+   * Identity is proved by signature. The capability comes either from the
+   * profile this machine assigns that peer, or from a grant it presents — which
+   * is checked against the key it just authenticated with, so a grant
+   * authorises a machine rather than whoever is carrying it.
+   *
+   * @param {any} body
+   * @param {string} [capability]
    */
   const authenticate = (body, capability = HAIL) => {
     const claim = body?.from;
     if (typeof claim?.name !== "string") return debugRefusal("no name in claim");
 
     const known = directory.get(claim.name);
-    if (!known?.publicKey) return debugRefusal(`unknown or keyless peer ${claim.name}`, claim.name);
-    if (!verifyPayload(claim, body?.signature, known.publicKey)) {
+    // Two ways to be someone here. Either this machine admitted you and holds
+    // your key, or you carry a grant naming your key — which is how a peer
+    // nobody admitted can still be let in, on the say-so of one who was.
+    const presenterKey = known?.publicKey ?? body?.grant?.grant?.subjectKey ?? null;
+    if (!presenterKey) {
+      return debugRefusal(`unknown peer ${claim.name}, and no grant naming a key`, claim.name);
+    }
+    if (!verifyPayload(claim, body?.signature, presenterKey)) {
       return debugRefusal(`signature from ${claim.name} did not verify`, claim.name);
     }
+    if (known?.publicKey && body?.grant && !sameKey(presenterKey, known.publicKey)) {
+      return debugRefusal(`${claim.name} presented a key we do not hold for it`, claim.name);
+    }
 
-    // Replay is bounded rather than prevented: a signed hail is a request to be
-    // told who we know, so a stale one costs the same as a fresh one. The window
-    // exists so a captured request cannot be useful indefinitely.
+    // Replay is bounded rather than prevented: a signed hail asks to be told
+    // who we know, so a stale one costs what a fresh one costs. The window
+    // exists so a captured request is not useful indefinitely.
     const age = Math.abs(Date.now() - (Number(claim.at) || 0));
     if (!Number.isFinite(age) || age > FRESHNESS_MS) return debugRefusal(`stale hail from ${claim.name}`, claim.name);
 
-    return directory.allowsCapability(claim.name, capability)
-      ? known
-      : debugRefusal(`${claim.name} has no ${capability} capability`, claim.name);
+    if (known && directory.allowsCapability(claim.name, capability)) return known;
+
+    const viaGrant = grantAllows(body, presenterKey, capability);
+    if (viaGrant) {
+      log(`[grant] ${claim.name} used ${viaGrant.issuer}'s grant for ${capability}`);
+      return known ?? { name: claim.name, publicKey: presenterKey, viaGrant: viaGrant.issuer };
+    }
+    return debugRefusal(`${claim.name} has no ${capability} capability`, claim.name);
   };
 
   // Resolved once: a route table that changes per request is one nobody can
-  // reason about, and conflicts are worth refusing at startup rather than
-  // resolving by whichever plugin happened to be listed first.
+  // reason about, and a conflict is worth refusing at startup rather than
+  // settling by whichever plugin happened to be listed first.
   const pluginRoutes = collectRoutes(plugins, { log });
 
   const server = createServer(async (request, response) => {
