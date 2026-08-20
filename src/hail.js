@@ -26,13 +26,16 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * Addresses are tried in order — most recently successful first — because the
  * route that worked last time is the one most likely to work now.
  *
- * @returns {Promise<{ok: true, address: object, response: object} | {ok: false, error: string}>}
+ * @param {any} record
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number}} [options]
+ * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
  */
 export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const peer = makePeerRecord(record);
   if (!peer) return { ok: false, error: "not a usable peer record" };
   if (peer.addresses.length === 0) return { ok: false, error: `no known address for ${peer.name}` };
 
+  /** @type {string[]} */
   const failures = [];
   for (const address of peer.addresses) {
     const controller = new AbortController();
@@ -51,7 +54,7 @@ export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_
       return { ok: true, address, response: await response.json() };
     } catch (cause) {
       // A refusal and a timeout are both just "not here"; the next address may be.
-      failures.push(`${address.value}: ${cause?.message ?? cause}`);
+      failures.push(`${address.value}: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
       clearTimeout(timer);
     }
@@ -71,9 +74,14 @@ export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_
  * Records are re-read as the pass proceeds, because an earlier peer may have
  * supplied the address that makes a later one reachable — the case where a
  * machine moved and someone else noticed first.
+ *
+ * @param {ReturnType<typeof import("./directory.js").createDirectory>} directory
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number}} [options]
  */
 export async function walk(directory, options = {}) {
+  /** @type {{name: string, via: any}[]} */
   const reached = [];
+  /** @type {{name: string, error: string}[]} */
   const unreachable = [];
 
   for (const stale of directory.listAdmitted()) {

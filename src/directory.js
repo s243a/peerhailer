@@ -21,14 +21,18 @@
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 
 /**
- * @param {{ self: object, admitted?: object[], candidates?: object[], now?: () => number }} [state]
+ * @param {{ self?: any, admitted?: any[], candidates?: any[], now?: () => number }} [state]
  */
 export function createDirectory(state = {}) {
-  const self = makePeerRecord(state.self ?? { name: "unnamed" });
+  const self = makePeerRecord(state.self ?? { name: "unnamed" }) ?? {
+    name: "unnamed",
+    addresses: [],
+    lastSeen: null,
+  };
   const now = state.now ?? (() => Date.now());
   /** @type {Map<string, import("./peerRecord.js").PeerRecord>} */
   const admitted = new Map();
-  /** @type {Map<string, { record: object, heardFrom: string[] }>} */
+  /** @type {Map<string, { record: import("./peerRecord.js").PeerRecord, heardFrom: string[] }>} */
   const candidates = new Map();
 
   for (const peer of state.admitted ?? []) {
@@ -40,17 +44,26 @@ export function createDirectory(state = {}) {
     if (record) candidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
   }
 
-  /** Admit a peer: the deliberate act that gossip is not allowed to perform. */
+  /**
+   * Admit a peer: the deliberate act that gossip is not allowed to perform.
+   *
+   * @param {any} peer
+   * @returns {import("./peerRecord.js").PeerRecord | null}
+   */
   function admit(peer) {
     const record = makePeerRecord(peer);
     if (!record) return null;
-    const merged = mergePeerRecord(admitted.get(record.name) ?? null, record);
+    const merged = mergePeerRecord(admitted.get(record.name) ?? null, record) ?? record;
     admitted.set(merged.name, merged);
     candidates.delete(merged.name);
     return merged;
   }
 
-  /** Forget a peer entirely, admitted or not. Revocation has to be simple. */
+  /**
+   * Forget a peer entirely, admitted or not. Revocation has to be simple.
+   *
+   * @param {string} name
+   */
   function forget(name) {
     return admitted.delete(name) || candidates.delete(name);
   }
@@ -62,8 +75,12 @@ export function createDirectory(state = {}) {
    * route is worth having. Names we do not know become candidates, tagged with
    * who mentioned them so a person deciding later can see where a lead came
    * from. Nothing here admits anybody.
+   *
+   * @param {string} sourceName who told us
+   * @param {any} peers what they said they know
    */
   function learnFrom(sourceName, peers) {
+    /** @type {{merged: string[], candidates: string[]}} */
     const learned = { merged: [], candidates: [] };
     for (const peer of Array.isArray(peers) ? peers : []) {
       const record = makePeerRecord(peer);
@@ -71,7 +88,8 @@ export function createDirectory(state = {}) {
 
       const known = admitted.get(record.name);
       if (known) {
-        admitted.set(record.name, mergePeerRecord(known, record));
+        const merged = mergePeerRecord(known, record);
+        if (merged) admitted.set(record.name, merged);
         learned.merged.push(record.name);
         continue;
       }
@@ -80,7 +98,7 @@ export function createDirectory(state = {}) {
       const heardFrom = new Set(existing?.heardFrom ?? []);
       if (sourceName) heardFrom.add(sourceName);
       candidates.set(record.name, {
-        record: existing ? mergePeerRecord(existing.record, record) : record,
+        record: (existing ? mergePeerRecord(existing.record, record) : record) ?? record,
         heardFrom: [...heardFrom],
       });
       if (!existing) learned.candidates.push(record.name);
@@ -88,7 +106,12 @@ export function createDirectory(state = {}) {
     return learned;
   }
 
-  /** Note that a route worked. The only way an address earns its position. */
+  /**
+   * Note that a route worked. The only way an address earns its position.
+   *
+   * @param {string} name
+   * @param {{transport: string, value: string} | undefined} address
+   */
   function markReachable(name, address) {
     const record = admitted.get(name);
     if (!record) return null;
@@ -100,6 +123,9 @@ export function createDirectory(state = {}) {
     // Re-made rather than merged: merging with nothing returns what it was
     // given, and the point of stamping a route is to reorder them.
     const updated = makePeerRecord({ ...record, addresses: stamped, lastSeen: now() });
+    // makePeerRecord only returns null for a nameless record, which this cannot
+    // be — but a silent null here would erase a peer, so it is checked.
+    if (!updated) return record;
     admitted.set(name, updated);
     return updated;
   }
@@ -125,6 +151,7 @@ export function createDirectory(state = {}) {
     learnFrom,
     markReachable,
     hailResponse,
+    /** @param {string} name */
     get: (name) => admitted.get(name) ?? null,
     listAdmitted: () => [...admitted.values()],
     listCandidates: () =>

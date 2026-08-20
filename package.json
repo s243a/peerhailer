@@ -4,15 +4,35 @@
   "description": "Peer presence and discovery over a hello protocol, transport-neutral and credential-free.",
   "type": "module",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/s243a/peerhailer.git" },
-  "bin": { "hail": "bin/hail.js" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/s243a/peerhailer.git"
+  },
+  "bin": {
+    "hail": "bin/hail.js"
+  },
   "exports": {
     ".": "./src/index.js",
     "./directory": "./src/directory.js",
     "./hail": "./src/hail.js",
     "./server": "./src/server.js"
   },
-  "files": ["bin", "src", "README.md"],
-  "engines": { "node": ">=20" },
-  "scripts": { "test": "node --test test/*.test.mjs" }
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "types": "tsc"
+  },
+  "types": "types/index.d.ts",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  }
 }

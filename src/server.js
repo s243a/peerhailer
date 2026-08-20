@@ -25,7 +25,12 @@ import { timingSafeEqual } from "node:crypto";
 
 const MAX_BODY = 1_000_000;
 
-/** Constant time, so a rejection cannot be turned into a guessing game. */
+/**
+ * Constant time, so a rejection cannot be turned into a guessing game.
+ *
+ * @param {unknown} given
+ * @param {string | undefined} expected
+ */
 function secretMatches(given, expected) {
   if (!expected) return true;
   if (typeof given !== "string") return false;
@@ -34,9 +39,14 @@ function secretMatches(given, expected) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * @param {import("node:http").IncomingMessage} request
+ * @returns {Promise<string>}
+ */
 function readBody(request) {
   return new Promise((resolve, reject) => {
     let size = 0;
+    /** @type {Buffer[]} */
     const chunks = [];
     request.on("data", (chunk) => {
       size += chunk.length;
@@ -54,18 +64,27 @@ function readBody(request) {
 
 /**
  * @param {{
- *   directory: object,
+ *   directory: ReturnType<typeof import("./directory.js").createDirectory>,
  *   token?: string,
  *   log?: (message: string) => void,
  * }} options
  */
 export function createDaemon({ directory, token, log = () => {} }) {
-  /** Every failure looks like this. Same status, same body, same shape. */
+  /**
+   * Every failure looks like this. Same status, same body, same shape.
+   *
+   * @param {import("node:http").ServerResponse} response
+   */
   const nothingHere = (response) => {
     response.writeHead(404, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: "not found" }));
   };
 
+  /**
+   * @param {import("node:http").ServerResponse} response
+   * @param {number} status
+   * @param {unknown} payload
+   */
   const send = (response, status, payload) => {
     response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify(payload));
@@ -106,7 +125,7 @@ export function createDaemon({ directory, token, log = () => {} }) {
 
       return nothingHere(response);
     } catch (cause) {
-      log(`[daemon] ${url.pathname} failed: ${cause?.message ?? cause}`);
+      log(`[daemon] ${url.pathname} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       return nothingHere(response);
     }
   });
@@ -117,7 +136,8 @@ export function createDaemon({ directory, token, log = () => {} }) {
     listen: ({ port = 8787, host = "127.0.0.1" } = {}) =>
       new Promise((resolve) => {
         server.listen(port, host, () => {
-          const address = server.address();
+          // A TCP listen always yields AddressInfo; the union covers pipes.
+          const address = /** @type {import("node:net").AddressInfo} */ (server.address());
           log(`[daemon] listening on http://${host}:${address.port}`);
           resolve({ port: address.port, host });
         });

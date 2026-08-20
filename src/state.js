@@ -15,6 +15,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+/** @param {NodeJS.ProcessEnv} [env] */
 export function defaultStatePath(env = process.env) {
   const base =
     env.PEERHAILER_HOME ??
@@ -23,12 +24,18 @@ export function defaultStatePath(env = process.env) {
   return join(base, "peerhailer", "directory.json");
 }
 
+/**
+ * @param {string} [path]
+ * @param {{log?: (message: string) => void}} [options]
+ * @returns {any}
+ */
 export function loadState(path = defaultStatePath(), { log = () => {} } = {}) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (cause) {
-    if (cause?.code !== "ENOENT") {
-      log(`[state] ignoring unreadable ${path}: ${cause?.message ?? cause}`);
+    const code = /** @type {NodeJS.ErrnoException} */ (cause)?.code;
+    if (code !== "ENOENT") {
+      log(`[state] ignoring unreadable ${path}: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
     return {};
   }
@@ -39,6 +46,9 @@ export function loadState(path = defaultStatePath(), { log = () => {} } = {}) {
  *
  * A directory truncated by a crash mid-write is a machine that has quietly
  * forgotten every peer it knew; rename is atomic on the platforms this runs on.
+ *
+ * @param {unknown} state
+ * @param {string} [path]
  */
 export function saveState(state, path = defaultStatePath()) {
   mkdirSync(dirname(path), { recursive: true });

@@ -79,9 +79,15 @@ const directory = createDirectory({ self: { name: "here" }, admitted });
 const { reached, candidates } = await walk(directory);
 ```
 
-No framework, no build step, and no dependencies outside Node. The daemon runs
-on machines with nothing else installed, which are usually the ones most worth
-reaching.
+No framework and no dependencies outside Node. The daemon runs on machines with
+nothing else installed, which are usually the ones most worth reaching.
+
+It is JavaScript with JSDoc types rather than TypeScript, and type-checked by
+`tsc` in strict mode all the same — `npm run typecheck` — with declarations
+emitted for consumers by `npm run types`. The point of the arrangement is that
+the file you edit is the file that runs. This daemon's bad day is silence, and
+diagnosing that usually means editing something on a remote machine and
+restarting it; a build step in that loop is a step in the wrong place.
 
 ## What it does not do
 
