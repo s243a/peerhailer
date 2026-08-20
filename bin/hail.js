@@ -21,6 +21,7 @@ import { hostname } from "node:os";
 import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
 import { listProfiles, setPinned } from "../src/profiles.js";
+import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
 import { defaultStatePath, loadState, saveState } from "../src/state.js";
@@ -92,7 +93,13 @@ const directory = createDirectory({
 // Profiles ride alongside the directory: they are configuration about peers,
 // and splitting them into another file would mean two things to keep in step.
 const persist = () =>
-  saveState({ ...directory.snapshot(), ...(stored.profiles ? { profiles: stored.profiles } : {}) }, statePath);
+  saveState(
+    {
+      ...directory.snapshot(),
+      ...(stored.profiles ? { profiles: stored.profiles } : {}),
+    },
+    statePath,
+  );
 
 // The identity and the name have to survive the process, or every hail
 // introduces a machine nobody has heard of. Written on first sight rather than
@@ -106,9 +113,10 @@ const publicKeyFromFlags = () => {
 };
 
 const describe = (peer) => {
+  const effective = directory.effectiveProfile(peer.name);
   const routes = peer.addresses.map((a) => `${a.transport}:${a.value}`).join(", ") || "no address";
   const seen = peer.lastSeen ? new Date(peer.lastSeen).toISOString() : "never";
-  const profile = peer.profile ? `[${peer.profile}]` : "";
+  const profile = `[${effective.profile}]`;
   const key = peer.publicKey ? fingerprint(peer.publicKey).slice(0, 14) : "no key";
   return `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})`;
 };
@@ -156,6 +164,53 @@ switch (command) {
     if (!admitted) fail("a name is required");
     persist();
     log(`admitted ${describe(admitted)}`);
+    break;
+  }
+
+  case "block": {
+    const [name] = rest;
+    if (!name) fail("usage: hail block <name>");
+    const peer = directory.get(name) ?? { name };
+    directory.block(peer);
+    persist();
+    log(
+      peer.publicKey
+        ? `blocked ${name} by key — renaming will not get it back in`
+        : `blocked ${name} by name (no key held for it, so a rename would)`,
+    );
+    break;
+  }
+
+  case "unblock": {
+    const [name] = rest;
+    if (!name) fail("usage: hail unblock <name>");
+    directory.unblock(name);
+    persist();
+    log(`unblocked ${name}`);
+    break;
+  }
+
+  case "trust": {
+    const [model] = rest;
+    if (!model) {
+      const current = directory.trust();
+      log(`model: ${current.model}`);
+      log(`unknown peers: ${current.unknownProfile}`);
+      log("");
+      for (const entry of Object.values(TRUST_MODELS)) {
+        log(`  ${entry.name.padEnd(14)} ${entry.describe}`);
+      }
+      break;
+    }
+    if (!TRUST_MODELS[model]) fail(`unknown trust model: ${model}`);
+    stored.trust = {
+      ...(stored.trust ?? {}),
+      model,
+      ...(typeof flags.vouches === "string" ? { settings: { vouchesRequired: Number(flags.vouches) } } : {}),
+      ...(typeof flags.unknown === "string" ? { unknownProfile: flags.unknown } : {}),
+    };
+    saveState({ ...directory.snapshot(), ...stored.trust ? { trust: stored.trust } : {} }, statePath);
+    log(`trust model is now ${model}`);
     break;
   }
 
@@ -250,6 +305,8 @@ switch (command) {
         "  hail id                      print this machine's public key",
         "  hail profiles [pin|unpin N]  what each profile grants, and which is offered first",
         "  hail forget <name>           remove a peer, admitted or not",
+        "  hail block|unblock <name>    deny a peer everything, by key where we hold one",
+        "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",
         "",

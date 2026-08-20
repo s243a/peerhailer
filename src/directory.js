@@ -21,9 +21,17 @@
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 import { sameKey } from "./identity.js";
 import { allows, DEFAULT_PROFILE, resolveProfile } from "./profiles.js";
+import { profileFor } from "./trust.js";
 
 /**
- * @param {{ self?: any, admitted?: any[], candidates?: any[], now?: () => number }} [state]
+ * @param {{
+ *   self?: any,
+ *   admitted?: any[],
+ *   candidates?: any[],
+ *   blocklist?: {names?: string[], keys?: string[]},
+ *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string},
+ *   now?: () => number,
+ * }} [state]
  */
 export function createDirectory(state = {}) {
   const self = makePeerRecord(state.self ?? { name: "unnamed" }) ?? {
@@ -44,6 +52,16 @@ export function createDirectory(state = {}) {
       admitted.set(record.name, { ...record, profile: peer.profile ?? DEFAULT_PROFILE });
     }
   }
+  const blocklist = {
+    names: [...(state.blocklist?.names ?? [])],
+    keys: [...(state.blocklist?.keys ?? [])],
+  };
+  const trust = {
+    model: state.trust?.model ?? "direct",
+    settings: state.trust?.settings ?? {},
+    unknownProfile: state.trust?.unknownProfile ?? "unknown",
+  };
+
   for (const peer of state.candidates ?? []) {
     const record = makePeerRecord(peer);
     if (record) candidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
@@ -161,13 +179,14 @@ export function createDirectory(state = {}) {
       // where to find a machine we deliberately do not answer would hand out a
       // reachability we chose not to use.
       peers: [...admitted.values()]
+        .filter((record) => !profileFor({ peer: record, directory: api, blocklist }).profile.includes("blocked"))
         .filter((record) => allows(record.profile, "hail"))
         .map((record) => publicRecord(record))
         .filter(Boolean),
     };
   }
 
-  return {
+  const api = {
     self,
     admit,
     forget,
@@ -188,21 +207,88 @@ export function createDirectory(state = {}) {
     getByKey: (publicKey) =>
       [...admitted.values()].find((record) => sameKey(record.publicKey, publicKey)) ?? null,
     /**
+     * The profile a peer effectively has, and why.
+     *
+     * Not simply what was assigned: a blocklist entry overrides it, and a peer
+     * nobody assigned may still be derived a profile by the trust model. The
+     * reason comes back too, because "why can this machine do that" is asked
+     * when something has already gone wrong.
+     *
+     * @param {string} name
+     */
+    effectiveProfile: (name) => {
+      const record = admitted.get(name);
+      const candidate = candidates.get(name);
+      return profileFor({
+        peer: record ?? candidate?.record ?? { name },
+        directory: api,
+        blocklist,
+        model: trust.model,
+        settings: trust.settings,
+        unknownProfile: trust.unknownProfile,
+        vouchedBy: candidate?.heardFrom ?? [],
+      });
+    },
+    /**
      * @param {string} name
      * @param {string} capability
      */
     allowsCapability: (name, capability) => {
       const record = admitted.get(name);
-      return record ? allows(record.profile, capability) : false;
+      const candidate = candidates.get(name);
+      if (!record && !candidate) {
+        // A caller we have never heard of still gets whatever the unknown
+        // profile grants — nothing, unless someone changed that deliberately.
+        return allows(trust.unknownProfile, capability);
+      }
+      const { profile } = profileFor({
+        peer: record ?? candidate?.record ?? { name },
+        directory: api,
+        blocklist,
+        model: trust.model,
+        settings: trust.settings,
+        unknownProfile: trust.unknownProfile,
+        vouchedBy: candidate?.heardFrom ?? [],
+      });
+      return allows(profile, capability);
     },
     /** @param {string} name */
     profileFor: (name) => resolveProfile(admitted.get(name)?.profile),
+    /**
+     * Deny a peer everything, by key where we have one.
+     *
+     * Blocking by name alone is defeated by renaming, so the key is what is
+     * recorded when there is one — a peer cannot rename its way back in.
+     *
+     * @param {{name?: string, publicKey?: string | null}} peer
+     */
+    block: (peer) => {
+      if (peer?.publicKey && !blocklist.keys.includes(peer.publicKey)) {
+        blocklist.keys.push(peer.publicKey);
+      } else if (peer?.name && !blocklist.names.includes(peer.name)) {
+        blocklist.names.push(peer.name);
+      }
+      return { names: [...blocklist.names], keys: [...blocklist.keys] };
+    },
+    /** @param {string} name */
+    unblock: (name) => {
+      const record = admitted.get(name) ?? candidates.get(name)?.record ?? null;
+      blocklist.names = blocklist.names.filter((entry) => entry !== name);
+      if (record?.publicKey) {
+        blocklist.keys = blocklist.keys.filter((key) => key !== record.publicKey);
+      }
+      return { names: [...blocklist.names], keys: [...blocklist.keys] };
+    },
+    blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
+    trust: () => ({ ...trust }),
     listAdmitted: () => [...admitted.values()],
     listCandidates: () =>
       [...candidates.entries()].map(([name, entry]) => ({ ...entry.record, name, heardFrom: entry.heardFrom })),
     /** Everything worth writing to disk, in the shape the constructor accepts. */
     snapshot: () => ({
       self,
+      blocklist: { names: [...blocklist.names], keys: [...blocklist.keys] },
+      trust: { ...trust },
       admitted: [...admitted.values()],
       candidates: [...candidates.entries()].map(([name, entry]) => ({
         ...entry.record,
@@ -211,4 +297,8 @@ export function createDirectory(state = {}) {
       })),
     }),
   };
+
+  // Returned after construction so a trust model can consult the directory it
+  // is deciding for — `web-of-trust` has to ask which vouchers are credible.
+  return api;
 }

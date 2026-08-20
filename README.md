@@ -65,6 +65,22 @@ hail add phone --key-file phone.pub --profile known
 hail profiles
 ```
 
+### How a peer gets its profile
+
+Four sources, in a fixed order — **blocked**, then **assigned**, then **derived**
+by the trust model, then the **unknown** default:
+
+```bash
+hail block mallory      # denied everything, matched on key so renaming will not help
+hail trust web-of-trust # peers vouched for by peers you trust get a small profile
+hail trust              # what the models do, and which is in force
+```
+
+`direct` is the default model: if you did not decide about a peer, it gets
+nothing. `web-of-trust` fills that silence from introductions — but a vouched
+peer lands in a *smaller* profile than its voucher, because otherwise trust is
+transitive by arithmetic.
+
 Knowing a machine exists and letting it use your services are different grants,
 and relaying — which spends your bandwidth and exposure on someone else's
 traffic — is not inherited by being a peer at all.

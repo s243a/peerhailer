@@ -127,12 +127,18 @@ test("trusted is offered first out of the box", () => {
   assert.equal(listed[0].name, "trusted");
   assert.equal(listed[0].pinned, true);
   // The rest are alphabetical, so the order does not shift as profiles are added.
-  assert.deepEqual(listed.slice(1).map((p) => p.name), ["carrier", "known"]);
+  assert.deepEqual(listed.slice(1).map((p) => p.name), ["blocked", "carrier", "known", "unknown"]);
 });
 
 test("a user can change what is offered first", () => {
   const custom = setPinned(setPinned({}, "known", true), "trusted", false);
-  assert.deepEqual(listProfiles(custom).map((p) => p.name), ["known", "carrier", "trusted"]);
+  assert.deepEqual(listProfiles(custom).map((p) => p.name), [
+    "known",
+    "blocked",
+    "carrier",
+    "trusted",
+    "unknown",
+  ]);
 });
 
 test("repinning a built-in does not freeze what it grants", () => {

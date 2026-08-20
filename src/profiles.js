@@ -64,6 +64,23 @@ export const BUILT_IN_PROFILES = {
     allows: [],
     description: "Recorded, but granted nothing. Useful for one-way reachability.",
   },
+  unknown: {
+    name: "unknown",
+    builtIn: true,
+    // What a peer gets when nobody has said anything about it. Empty by
+    // default, and a real profile rather than a special case so that a fabric
+    // wanting to answer strangers can grant it something without new machinery.
+    allows: [],
+    description: "Peers you hold no opinion about. Granted nothing by default.",
+  },
+  blocked: {
+    name: "blocked",
+    builtIn: true,
+    // Not assignable; produced by the blocklist. Present so a peer's effective
+    // profile always names something a person can look up.
+    allows: [],
+    description: "Denied everything, whatever else says otherwise.",
+  },
   carrier: {
     name: "carrier",
     builtIn: true,

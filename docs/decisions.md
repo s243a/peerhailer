@@ -121,3 +121,35 @@ An override records only what the user changed. Repinning `trusted` does not
 copy what it grants, so a later version that narrows it still reaches everyone
 who merely moved it up the list — the alternative is a security change that
 silently skips the users who customised anything.
+
+## A peer's profile is decided, not just assigned
+
+**Decided.** Four sources, in a fixed order:
+
+1. **Blocked** — denied everything, whatever else says otherwise.
+2. **Assigned** — a profile a person chose for this peer.
+3. **Derived** — what the trust model concludes, for peers nobody assigned.
+4. **Unknown** — the default for peers we hold no opinion about.
+
+Deny is checked first so blocking never has to out-argue another rule.
+Assignment beats derivation because a person deciding should not be quietly
+overruled by a heuristic — derivation only fills a silence. The decision carries
+its reason, since "why can this machine do that" is the question asked once
+something has already gone wrong, and reconstructing it from four sources
+afterwards is how authorization becomes folklore.
+
+**Blocking matches on the key.** A name is a label a peer chooses, so blocking
+one is defeated by picking another. Where no key is held the name is all there
+is, and the CLI says so rather than implying a protection it cannot give.
+
+**Trust models decide only the silence.** `direct` is the default and answers
+"nothing" for anyone unassigned. `web-of-trust` grants a profile to peers enough
+credible peers vouched for — where credible means peers we already granted
+something to, so a peer we ignored cannot launder trust by making introductions.
+A vouched peer never inherits the voucher's profile: it lands in a smaller one,
+because otherwise trust becomes transitive by arithmetic, which the design
+refuses everywhere else.
+
+**Unknown is a real profile, not a special case.** It grants nothing by default,
+and a fabric that wants to answer strangers can grant it something without the
+code growing a branch for it.
