@@ -169,6 +169,18 @@ It is JavaScript with JSDoc types rather than TypeScript, and type-checked by
 emitted for consumers by `npm run types`. The reasoning, and what would reverse
 it, is in [docs/decisions.md](./docs/decisions.md).
 
+## A page to look at it
+
+```bash
+hail daemon --port 8787     # then open http://127.0.0.1:8787/
+```
+
+One self-contained page, served by the daemon on loopback: every peer with the
+profile that *actually applies* and the reason for it, everything heard of but
+not admitted, and buttons for the decisions that are safe to take quickly.
+Loopback only — a page that can admit and block should not be reachable from
+elsewhere.
+
 ## Plugins
 
 The core finds machines and decides who may ask for what. Everything else —

@@ -25,7 +25,9 @@ import { createServer } from "node:http";
 import { verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes } from "./plugins.js";
-import { DIAGNOSTICS, HAIL, rejectionFor } from "./profiles.js";
+import { DIAGNOSTICS, HAIL, listProfiles, rejectionFor } from "./profiles.js";
+import { fingerprint } from "./identity.js";
+import { renderPage } from "./ui.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -61,6 +63,7 @@ function readBody(request) {
  *   profiles?: Record<string, any>,
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
+ *   onChange?: () => void,
  *   log?: (message: string) => void,
  * }} options
  */
@@ -70,6 +73,7 @@ export function createDaemon({
   profiles = {},
   diagnostics,
   plugins = [],
+  onChange,
   log = () => {},
 }) {
   /**
@@ -228,25 +232,59 @@ export function createDaemon({
         return send(response, 200, diagnostics.report({ self: directory.self, directory, caller: caller.name }));
       }
 
+      if (url.pathname === "/" && request.method === "GET") {
+        // Same loopback address as the API it reads. A page that can admit
+        // peers has no business being reachable from anywhere else.
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end(
+          renderPage({ name: directory.self.name, fingerprint: fingerprint(identity.publicKey) }),
+        );
+        return;
+      }
+
+      if (url.pathname === "/api/profiles" && request.method === "GET") {
+        return send(response, 200, listProfiles(profiles));
+      }
+
+      if (url.pathname === "/api/block" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        if (typeof body?.name !== "string") return send(response, 400, { error: "a name is required" });
+        const peer = directory.get(body.name) ?? { name: body.name };
+        const list = body.blocked === false ? directory.unblock(body.name) : directory.block(peer);
+        onChange?.();
+        return send(response, 200, list);
+      }
+
       if (url.pathname === "/api/peers" && request.method === "GET") {
         return send(response, 200, {
           self: directory.self,
-          admitted: directory.listAdmitted(),
+          // The effective profile travels with each peer: what was assigned is
+          // not always what applies, and the page would otherwise show a grant
+          // a blocked peer does not have.
+          admitted: directory.listAdmitted().map((peer) => ({
+            ...peer,
+            effective: directory.effectiveProfile(peer.name),
+          })),
           candidates: directory.listCandidates(),
         });
       }
 
       if (url.pathname === "/api/peers" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
-        const admitted = directory.admit(body);
-        return admitted
-          ? send(response, 200, admitted)
-          : send(response, 400, { error: "a name is required" });
+        const admitted = directory.admit(
+          body,
+          ...(typeof body?.profile === "string" ? [{ profile: body.profile }] : []),
+        );
+        if (!admitted) return send(response, 400, { error: "a name is required" });
+        onChange?.();
+        return send(response, 200, admitted);
       }
 
       if (url.pathname === "/api/peers" && request.method === "DELETE") {
         const name = url.searchParams.get("name");
-        return send(response, 200, { forgotten: name ? directory.forget(name) : false });
+        const forgotten = name ? directory.forget(name) : false;
+        if (forgotten) onChange?.();
+        return send(response, 200, { forgotten });
       }
 
       return nothingHere(response);

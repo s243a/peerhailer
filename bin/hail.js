@@ -265,13 +265,17 @@ switch (command) {
       profiles,
       diagnostics,
       plugins,
+      // The page can admit and block, so those changes have to reach disk the
+      // same way the CLI's do — otherwise a restart forgets what someone did.
+      onChange: persist,
       log,
     });
     const port = Number(flags.port ?? 8787);
     // Binding beyond loopback exposes an API that can admit peers, so it has to
     // be asked for by name rather than arrived at by default.
     const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
-    await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
+    const listening = await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
+    log(`[ui] http://${listening.host}:${listening.port}`);
     const stop = async () => {
       persist();
       await daemon.close();

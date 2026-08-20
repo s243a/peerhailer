@@ -251,3 +251,40 @@ any plugin existed.
 **Two plugins cannot claim one path.** The conflict is refused rather than
 resolved by order, since the winner would otherwise depend on configuration
 order — which nobody would think to check.
+
+## The GUI is one file the daemon serves
+
+**Decided.** A single self-contained page on the same loopback address as the
+local API. No build step, no framework, no external requests.
+
+A GUI earns its place here for a specific reason rather than convenience: "who
+can reach me", "why is that peer refused" and "what did I actually grant" are
+awkward to hold in your head and trivial to read from a table. The page shows
+each peer's *effective* profile with the reason for it, which is the four-source
+precedence made visible.
+
+Loopback, because the page can admit and block. A page that can change who may
+talk to your machines has no business being reachable from anywhere else.
+
+Read-mostly on purpose. It offers the actions that are safe to take quickly —
+admit, change a profile, block, forget — and each is the same call the CLI
+makes. Anything whose consequences deserve thought stays where thought is
+easier.
+
+## Writing into T3's peer list, and why it does not
+
+**Not done.** peerhailer hands over an address; it does not write T3's saved
+environments.
+
+The mechanism will not support it honestly. T3's saved environments are a
+desktop-only registry, and the bearer token in each record is encrypted with
+Electron's `safeStorage`, which is backed by the OS keychain. An outside process
+cannot produce that blob, so the entry it could write is one without a usable
+token — the user still pairs by hand, having gained nothing, while peerhailer
+writes an undocumented versioned file that the desktop app may rewrite
+underneath it.
+
+What works instead is what T3 already accepts: a pairing URL, or an address to
+paste. If the integration is worth tightening later, the right shape is a plugin
+on the T3 side reading peerhailer's local API — not this side reaching into
+another application's private storage.
