@@ -323,3 +323,40 @@ to act itself.
 A grant is a way *in*, not merely an extra capability: a peer nobody admitted
 can be let through on one, which is the whole point and why the checks above are
 where the weight sits.
+
+## The hello protocol is a plugin too
+
+**Decided.** `/hail` and `/diagnostics` are bundled plugins, not core routes.
+The core is the directory, identity, profiles, trust and grants — a model, with
+no server behaviour of its own.
+
+The point was never modularity for its own sake. It is that **answering is a
+service**. A project embedding this to keep track of its own machines should not
+begin answering the network because it imported a library, and should not have
+to find a switch to turn that off. A host with no plugins loaded serves nothing:
+`POST /hail` returns 404 because no plugin claimed that path.
+
+The CLI is opinionated where the library is not. `hail daemon` loads the hello
+and diagnostics plugins, because a daemon that answers no hails is not a daemon.
+Someone composing their own host loads whichever they want.
+
+Both routes were already capability-gated, which is why this was a move rather
+than a redesign: the plugin contract *is* what the core was doing.
+
+**A plugin refuses without deciding how a refusal looks.** Returning `refuse()`
+hands the decision back to the host, so a refusal from a plugin is
+indistinguishable from any other — a plugin cannot accidentally reveal which
+rule turned a caller away.
+
+## peerhailer as a T3 plugin
+
+**Not possible as a drop-in, and worth stating why.** T3 has no plugin system.
+Providers are a static array (`BUILT_IN_DRIVERS`) resolved at build time, with
+each driver's service requirements satisfied by the runtime layer's type. There
+is no runtime loading of code anywhere in it.
+
+So integration means changing T3, which is a fork patch rather than a plugin —
+and the right shape for that patch is T3 reading peerhailer's local HTTP API,
+writing its own storage through its own code. That keeps the dependency pointing
+the way it should: peerhailer knows nothing about T3, and T3 needs only an
+address.

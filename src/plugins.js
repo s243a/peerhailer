@@ -45,7 +45,7 @@
  *     directory: any,
  *     identity: {publicKey: string, privateKey: string},
  *     log: (message: string) => void,
- *   }) => Promise<unknown> | unknown,
+ *   }) => Promise<any> | any,
  * }} PluginRoute
  */
 
@@ -65,6 +65,18 @@
  */
 
 import { pathToFileURL } from "node:url";
+
+/**
+ * What a handler returns to refuse rather than answer.
+ *
+ * A plugin cannot write the response itself — the host owns that, so a refusal
+ * looks identical whether it came from the core or from here, and a plugin
+ * cannot accidentally reveal which rule refused.
+ */
+export const REFUSE = Symbol.for("peerhailer.refuse");
+
+/** @param {string} [reason] recorded here, never sent */
+export const refuse = (reason) => ({ [REFUSE]: true, reason });
 
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE", "PATCH"]);
 

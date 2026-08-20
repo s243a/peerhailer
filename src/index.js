@@ -9,6 +9,11 @@
 export { createDirectory } from "./directory.js";
 export { hailPeer, walk } from "./hail.js";
 export { createDaemon } from "./server.js";
+export { collectProfiles, collectRoutes, loadPlugins, refuse, validatePlugin } from "./plugins.js";
+export { default as hailPlugin } from "./builtin/hailPlugin.js";
+export { createDiagnosticsPlugin } from "./builtin/diagnosticsPlugin.js";
+export { createDiagnostics } from "./diagnostics.js";
+export { attenuate, mintGrant, verifyGrant } from "./grants.js";
 export {
   makePeerRecord,
   mergePeerRecord,

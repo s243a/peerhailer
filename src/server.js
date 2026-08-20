@@ -24,7 +24,7 @@ import { createServer } from "node:http";
 
 import { sameKey, verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
-import { collectRoutes } from "./plugins.js";
+import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
 import { DELEGATE, DIAGNOSTICS, HAIL, listProfiles, rejectionFor } from "./profiles.js";
 import { fingerprint } from "./identity.js";
@@ -257,33 +257,13 @@ export function createDaemon({
         if (!caller) return turnAway(response, rejectionProfile(body));
 
         const result = await pluginRoute.handler({ body, caller, directory, identity, log });
-        return send(response, 200, result ?? {});
-      }
-
-      if (url.pathname === "/hail" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
-        const caller = authenticate(body);
-        if (!caller) return turnAway(response, rejectionProfile(body));
-
-        const answer = directory.hailResponse();
-        log(`[hail] ${caller.name} answered with ${answer.peers.length} peers`);
-        return send(response, 200, { ...answer, signed: signRecord(directory.self, identity.privateKey) });
-      }
-
-      if (url.pathname === "/diagnostics" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
-        const claimed = body?.from?.name;
-        // Identity is checked the same way as a hail; the capability and the
-        // window are what differ. Both must hold, and a caller that fails
-        // either is told nothing more than any other refusal.
-        const caller = authenticate(body, DIAGNOSTICS);
-        if (!caller) return turnAway(response, rejectionProfile(body));
-        if (!diagnostics?.isOpen()) {
-          debugRefusal(`${claimed} asked for diagnostics while the window was shut`, claimed);
+        if (result && result[REFUSE]) {
+          // The plugin decided against it; the host still owns how that looks,
+          // so a refusal from a plugin is indistinguishable from any other.
+          if (result.reason) log(`[${pluginRoute.plugin}] refused: ${result.reason}`);
           return turnAway(response, rejectionProfile(body));
         }
-        log(`[diagnostics] answered ${caller.name}`);
-        return send(response, 200, diagnostics.report({ self: directory.self, directory, caller: caller.name }));
+        return send(response, 200, result ?? {});
       }
 
       if (url.pathname === "/" && request.method === "GET") {

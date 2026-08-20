@@ -95,3 +95,38 @@ test("a plugin's profiles are suggestions, and say where they came from", () => 
   // Loading a plugin changes what this machine can offer, never who may use it:
   // no peer holds `echoer` until somebody assigns it.
 });
+
+test("the hello protocol is itself a plugin", async () => {
+  const { default: hailPlugin } = await import("../src/builtin/hailPlugin.js");
+  // Answering is a service, not a property of importing the library.
+  const checked = validatePlugin(hailPlugin);
+  assert.equal(checked.ok, true);
+  assert.deepEqual([...collectRoutes([hailPlugin]).keys()], ["POST /hail"]);
+  assert.equal(collectRoutes([hailPlugin]).get("POST /hail").capability, "hail");
+});
+
+test("a host with no plugins serves no protocol", async () => {
+  const { createDaemon } = await import("../src/server.js");
+  const { createDirectory } = await import("../src/directory.js");
+
+  const daemon = createDaemon({
+    directory: createDirectory({ self: { name: "app" } }),
+    identity: { publicKey: "x", privateKey: "y" },
+  });
+  const { port } = await daemon.listen({ port: 0 });
+  try {
+    // The payoff of the split: embedding the directory opens nothing.
+    const response = await fetch(`http://127.0.0.1:${port}/hail`, { method: "POST", body: "{}" });
+    assert.equal(response.status, 404);
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("a plugin refuses without deciding how that looks", async () => {
+  const { refuse, REFUSE } = await import("../src/plugins.js");
+  const refusal = refuse("because");
+  // The host owns the response, so a plugin cannot reveal which rule refused.
+  assert.equal(refusal[REFUSE], true);
+  assert.equal(refusal.reason, "because");
+});

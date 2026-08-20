@@ -209,6 +209,12 @@ hail plugins add ./my-plugin.js
 hail plugins                       # what is loaded, and the routes it serves
 ```
 
+The hello protocol is itself a plugin, which is the point rather than a
+flourish: **answering is a service**. Embed the core and you get the directory,
+identity, trust and grants with no server behaviour — a host with nothing loaded
+returns 404 for `/hail`. The `hail` CLI loads the hello and diagnostics plugins,
+because a daemon that answers no hails is not a daemon.
+
 A plugin declares routes and the capability each requires:
 
 ```js

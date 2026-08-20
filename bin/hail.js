@@ -22,6 +22,8 @@ import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
 import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
+import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
+import hailPlugin from "../src/builtin/hailPlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -246,12 +248,20 @@ switch (command) {
   case "daemon": {
     // Named in the directory file, so a machine's services are part of its
     // recorded configuration rather than an argument someone has to remember.
-    const plugins = await loadPlugins(stored.plugins ?? [], { log });
-    // A plugin may suggest profiles, so the directory learns about them before
-    // it is asked whether anybody holds one.
+    const diagnostics = createDiagnostics();
+    // The CLI is opinionated where the library is not: a daemon that answers no
+    // hails is not a daemon. Someone composing their own host loads whichever
+    // of these they want, and opens no endpoints by default.
+    const plugins = [
+      hailPlugin,
+      createDiagnosticsPlugin(diagnostics),
+      ...(await loadPlugins(stored.plugins ?? [], { log })),
+    ];
+    // Profiles a plugin suggests have to be known before anyone is asked
+    // whether they hold one — bundled plugins included, which is where the
+    // `operator` profile comes from.
     const profiles = { ...collectProfiles(plugins), ...(stored.profiles ?? {}) };
     directory.useProfiles(profiles);
-    const diagnostics = createDiagnostics();
     // A window opened at launch still closes itself. `--debug` is for starting
     // a daemon you are about to debug, not for leaving one open.
     if (flags.debug) {
