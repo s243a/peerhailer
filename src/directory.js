@@ -275,6 +275,30 @@ export function createDirectory(state = {}) {
     /** @param {string} name */
     profileFor: (name) => resolveProfile(admitted.get(name)?.profile, profileSet),
     /**
+     * Take on state written by somebody else.
+     *
+     * The daemon serves from a long-lived directory while mutations are applied
+     * to the file. After one lands, this brings the two back together — without
+     * it the page would keep showing what was true before the change it just
+     * made.
+     *
+     * @param {any} state
+     */
+    adopt: (state) => {
+      admitted.clear();
+      candidates.clear();
+      for (const peer of state?.admitted ?? []) {
+        const record = makePeerRecord(peer);
+        if (record) admitted.set(record.name, { ...record, profile: peer.profile ?? DEFAULT_PROFILE });
+      }
+      for (const peer of state?.candidates ?? []) {
+        const record = makePeerRecord(peer);
+        if (record) candidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
+      }
+      blocklist.names = [...(state?.blocklist?.names ?? [])];
+      blocklist.keys = [...(state?.blocklist?.keys ?? [])];
+    },
+    /**
      * Replace the profiles this directory resolves against.
      *
      * Used once plugins are loaded, since a plugin may suggest profiles and the

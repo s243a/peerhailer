@@ -24,7 +24,7 @@ looking.
 
 | What | Why it matters |
 | --- | --- |
-| **Concurrent writes** | Confirmed broken: a peer added by the CLI while the daemon runs is erased by the daemon's next write. Data loss, silent, trivially reachable. |
+| ~~Concurrent writes~~ | **Fixed.** Changes now lock the file and read inside the lock; the daemon adopts the result. Six tests, and the original reproduction passes. |
 | State file corruption | Truncated or malformed JSON should cost the directory, not the daemon. |
 | Address roaming | A peer that moves should be re-found via another peer, and the stale address retired. |
 | npm packaging | Install from a tarball, confirm `hail` runs and the exports resolve. |

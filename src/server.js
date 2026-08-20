@@ -64,7 +64,7 @@ function readBody(request) {
  *   profiles?: Record<string, any>,
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
- *   onChange?: () => void,
+ *   applyChange?: (mutate: (directory: any) => any) => any,
  *   log?: (message: string) => void,
  * }} options
  */
@@ -74,7 +74,7 @@ export function createDaemon({
   profiles = {},
   diagnostics,
   plugins = [],
-  onChange,
+  applyChange,
   log = () => {},
 }) {
   /**
@@ -238,6 +238,22 @@ export function createDaemon({
     return debugRefusal(`${claim.name} has no ${capability} capability`, claim.name);
   };
 
+  /**
+   * Change the directory, durably.
+   *
+   * A host that persists supplies this, and is expected to apply the mutation
+   * to *current* state rather than to whatever it loaded at startup. That
+   * matters because this daemon is not the only writer: someone at a terminal
+   * changes the same file, and a change applied to a stale copy silently
+   * discards theirs.
+   *
+   * Without one, changes are in-memory only — which is right for an embedder
+   * that has its own storage, or none.
+   *
+   * @param {(directory: any) => any} mutate
+   */
+  const change = (mutate) => (applyChange ? applyChange(mutate) : mutate(directory));
+
   // Resolved once: a route table that changes per request is one nobody can
   // reason about, and a conflict is worth refusing at startup rather than
   // settling by whichever plugin happened to be listed first.
@@ -283,9 +299,11 @@ export function createDaemon({
       if (url.pathname === "/api/block" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         if (typeof body?.name !== "string") return send(response, 400, { error: "a name is required" });
-        const peer = directory.get(body.name) ?? { name: body.name };
-        const list = body.blocked === false ? directory.unblock(body.name) : directory.block(peer);
-        onChange?.();
+        const list = change((peers) =>
+          body.blocked === false
+            ? peers.unblock(body.name)
+            : peers.block(peers.get(body.name) ?? { name: body.name }),
+        );
         return send(response, 200, list);
       }
 
@@ -305,19 +323,16 @@ export function createDaemon({
 
       if (url.pathname === "/api/peers" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
-        const admitted = directory.admit(
-          body,
-          ...(typeof body?.profile === "string" ? [{ profile: body.profile }] : []),
+        const admitted = change((peers) =>
+          peers.admit(body, ...(typeof body?.profile === "string" ? [{ profile: body.profile }] : [])),
         );
         if (!admitted) return send(response, 400, { error: "a name is required" });
-        onChange?.();
         return send(response, 200, admitted);
       }
 
       if (url.pathname === "/api/peers" && request.method === "DELETE") {
         const name = url.searchParams.get("name");
-        const forgotten = name ? directory.forget(name) : false;
-        if (forgotten) onChange?.();
+        const forgotten = name ? change((peers) => peers.forget(name)) : false;
         return send(response, 200, { forgotten });
       }
 

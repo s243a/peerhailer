@@ -11,7 +11,7 @@
  *
  * @module state
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -56,4 +56,84 @@ export function saveState(state, path = defaultStatePath()) {
   writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   renameSync(temporary, path);
   return path;
+}
+
+/** Long enough for any honest write, short enough that a crash is not permanent. */
+const LOCK_STALE_MS = 10_000;
+const LOCK_RETRY_MS = 25;
+
+/**
+ * Hold an exclusive lock on the directory file while something changes it.
+ *
+ * Two writers is not a theoretical problem here: the daemon persists what the
+ * page did, the CLI persists what a person typed, and both write the whole
+ * file. Without this, a peer added at the terminal disappears the next time the
+ * daemon saves — silently, and with nothing to suggest where it went.
+ *
+ * An exclusive create is the lock, because it is atomic on every filesystem
+ * this runs on and needs no dependency. A lock older than a few seconds is
+ * assumed to belong to a process that died holding it, since the alternative is
+ * a tool that stays broken until somebody finds a file they have never heard
+ * of.
+ *
+ * @template T
+ * @param {string} path
+ * @param {() => T} change
+ * @returns {T}
+ */
+export function withStateLock(path, change) {
+  const lockPath = `${path}.lock`;
+  mkdirSync(dirname(path), { recursive: true });
+
+  const deadline = Date.now() + LOCK_STALE_MS * 2;
+  for (;;) {
+    try {
+      closeSync(openSync(lockPath, "wx"));
+      break;
+    } catch (cause) {
+      if (/** @type {NodeJS.ErrnoException} */ (cause)?.code !== "EEXIST") throw cause;
+      let age = 0;
+      try {
+        age = Date.now() - statSync(lockPath).mtimeMs;
+      } catch {
+        continue; // it went away between failing and asking; try again
+      }
+      if (age > LOCK_STALE_MS) {
+        rmSync(lockPath, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        // Better to write and risk a lost update than to refuse forever over a
+        // lock this process cannot explain.
+        break;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
+    }
+  }
+
+  try {
+    return change();
+  } finally {
+    rmSync(lockPath, { force: true });
+  }
+}
+
+/**
+ * Apply a change to whatever is on disk *now*.
+ *
+ * The read happens inside the lock, so a mutation is applied to current state
+ * rather than to whatever this process happened to load minutes ago. That is
+ * the difference between two writers cooperating and the last one winning.
+ *
+ * @param {string} path
+ * @param {(state: any) => any} mutate
+ * @param {{log?: (message: string) => void}} [options]
+ */
+export function updateState(path, mutate, { log = () => {} } = {}) {
+  return withStateLock(path, () => {
+    const current = loadState(path, { log });
+    const next = mutate(current);
+    saveState(next, path);
+    return next;
+  });
 }

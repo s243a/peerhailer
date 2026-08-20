@@ -360,3 +360,28 @@ and the right shape for that patch is T3 reading peerhailer's local HTTP API,
 writing its own storage through its own code. That keeps the dependency pointing
 the way it should: peerhailer knows nothing about T3, and T3 needs only an
 address.
+
+## The file arbitrates between writers, not the daemon
+
+**Decided.** Every change locks the directory file, reads it *inside* the lock,
+applies the change to what is there, and writes. The daemon does the same, then
+adopts the result.
+
+There are two writers by design. The daemon persists what the page did; a person
+at a terminal persists what they typed. Both were writing the whole file from
+their own copy, so a peer added at the terminal vanished at the daemon's next
+save — silently, with nothing to connect the loss to the command that caused it.
+
+The daemon could have been made the sole writer, with the CLI talking to it.
+That is rejected because *the daemon is optional*: a tool for reaching machines
+that must itself be running before it will answer is one that fails exactly when
+it is needed. So the file arbitrates, and both writers cooperate through it.
+
+Locking is an exclusive create, atomic everywhere this runs and needing no
+dependency. A lock older than ten seconds is assumed to belong to a process that
+died holding it — the alternative is a tool that stays broken until somebody
+finds a file they have never heard of.
+
+Reading inside the lock is the part that actually fixes it. Locking alone
+prevents interleaved writes and does nothing about a change computed from state
+loaded minutes ago, which was the original bug wearing a different hat.

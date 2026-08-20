@@ -28,7 +28,7 @@ import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
-import { defaultStatePath, loadState, saveState } from "../src/state.js";
+import { defaultStatePath, loadState, updateState } from "../src/state.js";
 
 const log = (message) => process.stdout.write(`${message}\n`);
 const fail = (message) => {
@@ -100,12 +100,21 @@ const directory = createDirectory({
 /**
  * Write the directory back, keeping everything else in the file.
  *
- * Spreading what was read first, so configuration this command knows nothing
- * about survives it. Rebuilding the file from the directory alone meant adding
- * a peer silently erased the plugin list — and would erase the next key added
- * too, in a way nobody would connect to the command they ran.
+ * Two things are being protected here. Configuration this command knows nothing
+ * about survives, because the file read inside the lock is spread first —
+ * rebuilding from the directory alone once erased the plugin list. And the read
+ * happens *inside* the lock, so a change lands on top of whatever a daemon or
+ * another terminal wrote a moment ago rather than replacing it.
+ *
+ * The peers this process knows still win for peer data: they are what the
+ * command was about. Anything else on disk is left alone.
  */
-const persist = () => saveState({ ...stored, ...directory.snapshot() }, statePath);
+const persist = () =>
+  updateState(
+    statePath,
+    (onDisk) => ({ ...onDisk, ...stored, ...directory.snapshot() }),
+    { log: (m) => process.stderr.write(`${m}\n`) },
+  );
 
 // The identity and the name have to survive the process, or every hail
 // introduces a machine nobody has heard of. Written on first sight rather than
@@ -275,9 +284,24 @@ switch (command) {
       profiles,
       diagnostics,
       plugins,
-      // The page can admit and block, so those changes have to reach disk the
-      // same way the CLI's do — otherwise a restart forgets what someone did.
-      onChange: persist,
+      // The page can admit and block, so those changes reach disk the same way
+      // the CLI's do — applied to what is on disk now, then adopted in memory,
+      // so a change made at a terminal is not discarded by the next save here.
+      applyChange: (mutate) => {
+        let result;
+        const next = updateState(
+          statePath,
+          (onDisk) => {
+            const fresh = createDirectory({ ...onDisk, profiles: onDisk.profiles ?? {} });
+            fresh.useProfiles({ ...collectProfiles(plugins), ...(onDisk.profiles ?? {}) });
+            result = mutate(fresh);
+            return { ...onDisk, ...fresh.snapshot() };
+          },
+          { log },
+        );
+        directory.adopt(next);
+        return result;
+      },
       log,
     });
     const port = Number(flags.port ?? 8787);
