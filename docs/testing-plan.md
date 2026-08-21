@@ -27,7 +27,7 @@ looking.
 | ~~Concurrent writes~~ | **Fixed.** Changes now lock the file and read inside the lock; the daemon adopts the result. Six tests, and the original reproduction passes. |
 | State file corruption | Truncated or malformed JSON should cost the directory, not the daemon. |
 | Address roaming | A peer that moves should be re-found via another peer, and the stale address retired. |
-| npm packaging | Install from a tarball, confirm `hail` runs and the exports resolve. |
+| ~~npm packaging~~ | **Fixed.** Two bugs: declarations were never packed, and the `exports` map shadowed the `types` field so a consumer resolved `any`. Verified by installing the tarball and typechecking against it. |
 | Windows paths | `~` expansion, the mode-600 identity file, and the state directory. |
 
 ## Stage 1 — things a person has to look at (you)

@@ -12,14 +12,31 @@
     "hail": "bin/hail.js"
   },
   "exports": {
-    ".": "./src/index.js",
-    "./directory": "./src/directory.js",
-    "./hail": "./src/hail.js",
-    "./server": "./src/server.js"
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./directory": {
+      "types": "./types/directory.d.ts",
+      "default": "./src/directory.js"
+    },
+    "./hail": {
+      "types": "./types/hail.d.ts",
+      "default": "./src/hail.js"
+    },
+    "./server": {
+      "types": "./types/server.d.ts",
+      "default": "./src/server.js"
+    },
+    "./plugins": {
+      "types": "./types/plugins.d.ts",
+      "default": "./src/plugins.js"
+    }
   },
   "files": [
     "bin",
     "src",
+    "types",
     "README.md"
   ],
   "engines": {
@@ -28,7 +45,8 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "types": "tsc"
+    "types": "tsc",
+    "prepack": "tsc"
   },
   "types": "types/index.d.ts",
   "devDependencies": {

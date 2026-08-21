@@ -166,8 +166,10 @@ nothing else installed, which are usually the ones most worth reaching.
 
 It is JavaScript with JSDoc types rather than TypeScript, and type-checked by
 `tsc` in strict mode all the same — `npm run typecheck` — with declarations
-emitted for consumers by `npm run types`. The reasoning, and what would reverse
-it, is in [docs/decisions.md](./docs/decisions.md).
+generated at pack time, so a TypeScript consumer gets real types rather than
+`any`. Those declarations reference Node's, so such a consumer needs
+`@types/node`, which a Node project has anyway. The reasoning, and what would
+reverse it, is in [docs/decisions.md](./docs/decisions.md).
 
 ## Grants
 
