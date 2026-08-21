@@ -96,7 +96,8 @@ async function refresh() {
             '<td class="muted">' + esc(peer.effective?.reason ?? "") + '</td>' +
             '<td>' + addressesOf(peer) + '</td>' +
             '<td class="row-actions">' +
-              '<button data-block="' + esc(peer.name) + '">' + (peer.effective?.profile === "blocked" ? "unblock" : "block") + '</button>' +
+              '<button data-block="' + esc(peer.name) + '" data-blocked="' + (peer.effective?.profile === "blocked") + '">' +
+                (peer.effective?.profile === "blocked" ? "unblock" : "block") + '</button>' +
               '<button data-forget="' + esc(peer.name) + '">forget</button>' +
             '</td></tr>';
         }).join("") + '</table>'
@@ -122,7 +123,10 @@ document.addEventListener("click", async (event) => {
   try {
     if (admit) await api("/api/peers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: admit }) });
     if (forget) await api("/api/peers?name=" + encodeURIComponent(forget), { method: "DELETE" });
-    if (block) await api("/api/block", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: block, blocked: target.textContent === "block" }) });
+    // What to send comes from the row's data, not the button's own label: a
+    // refresh landing between render and click would otherwise invert the
+    // action, and the row would look unchanged because it did the opposite.
+    if (block) await api("/api/block", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: block, blocked: target.dataset.blocked !== "true" }) });
     await refresh();
   } catch (cause) {
     $("error").textContent = String(cause.message ?? cause);
