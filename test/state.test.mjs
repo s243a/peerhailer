@@ -113,3 +113,28 @@ test("addresses do not accumulate without bound", () => {
   // What has worked is never dropped for something that never has.
   assert.equal(peer.addresses[0].value, "http://works:8787");
 });
+
+test("eviction keeps diversity, not just recency", () => {
+  // A machine that moves between networks is reachable at each, alternately
+  // and indefinitely. Evicting the route it is not using right now guarantees a
+  // slow rediscovery every time it moves back — and an overlay address is the
+  // one that must survive, since it is how the peer is reached from elsewhere.
+  const directory = createDirectory({ self: { name: "here" }, now: () => 500 });
+  directory.admit({
+    name: "laptop",
+    addresses: [{ transport: "tailscale", value: "http://100.64.1.9:8787" }],
+  });
+  directory.markReachable("laptop", { transport: "tailscale", value: "http://100.64.1.9:8787" });
+
+  for (let i = 0; i < 40; i += 1) {
+    directory.admit({ name: "laptop", addresses: [{ transport: "lan", value: `http://10.0.${i}.5:8787` }] });
+  }
+
+  const held = directory.get("laptop").addresses;
+  assert.ok(
+    held.some((address) => address.transport === "tailscale"),
+    "a busy network must not crowd out the only route from elsewhere",
+  );
+  const lanCount = held.filter((address) => address.transport === "lan").length;
+  assert.ok(lanCount <= 3, "and one transport cannot fill the list");
+});

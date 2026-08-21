@@ -385,3 +385,31 @@ finds a file they have never heard of.
 Reading inside the lock is the part that actually fixes it. Locking alone
 prevents interleaved writes and does nothing about a change computed from state
 loaded minutes ago, which was the original bug wearing a different hat.
+
+## Stale addresses are kept, and never believed
+
+**Decided.** A peer's routes are bounded per transport rather than only by
+recency, and a hail is believed only when the reply is signed by the key held
+for that peer.
+
+Two failures pull in opposite directions, and an earlier version had both.
+
+**Evicting by recency alone loses working routes.** A machine that moves between
+home and office is reachable at each, alternately and indefinitely. Dropping the
+one it is not using right now guarantees a slow rediscovery every time it moves
+back — and worse, a laptop that joins many networks accumulates enough LAN
+leases to crowd out the overlay address that is the only way to reach it from
+anywhere else. So eviction keeps a few routes per transport, and the least
+recently useful within a transport goes first.
+
+**Keeping an address is only safe because identity is a key.** A DHCP lease
+expires and that address may now be a different machine — one that would answer
+a hail perfectly well. Until this was fixed the reply was taken at face value:
+the stranger was marked reachable as the peer, its route earned a success, and
+the peers it named were merged into the directory. Anyone inheriting an address
+could seed names into a neighbour's directory.
+
+The hail reply carries a signed record, and now it is checked against the key
+held for that peer. Which is what makes a stale address cost a timeout rather
+than a wrong answer — and therefore what makes keeping stale addresses a
+reasonable thing to do at all.

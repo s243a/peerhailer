@@ -110,6 +110,16 @@ export async function walk(directory, options = {}) {
       continue;
     }
 
+    // Something answered; that is not the same as the peer answering. An
+    // address outlives its lease, and the machine holding it next is a
+    // stranger — one who would otherwise be marked reachable as this peer and
+    // have its directory merged into ours. The reply is signed, so check it.
+    const proof = verifyRecord(result.response?.signed, peer.publicKey ?? null);
+    if (!proof.ok) {
+      unreachable.push({ name: peer.name, error: `answered by someone else: ${proof.error}` });
+      continue;
+    }
+
     directory.markReachable(peer.name, result.address);
     reached.push({ name: peer.name, via: result.address });
     directory.learnFrom(
