@@ -143,3 +143,41 @@ test("a profile whose name merely contains 'blocked' is not blocked", () => {
   const shared = directory.hailResponse().peers.map((peer) => peer.name);
   assert.ok(shared.includes("mars"), "`unblocked` contains `blocked` as a substring, but is not it");
 });
+
+test("where a peer lands depends on how it arrived", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+
+  // Typed in: an assertion that you know the machine.
+  directory.admit({ name: "sol", addresses: [{ transport: "lan", value: "10.0.0.2:7645" }] });
+  assert.equal(directory.get("sol").profile, "trusted");
+
+  // Heard of: someone else's say-so about a machine never contacted.
+  directory.admit({ name: "mars", profile: "trusted" });
+  directory.learnFrom("mars", [{ name: "phobos", addresses: [] }]);
+  assert.ok(directory.listCandidates().some((c) => c.name === "phobos"));
+  directory.admit({ name: "phobos" });
+  assert.equal(directory.get("phobos").profile, "known", "a lead is not trust");
+
+  // An explicit choice still wins, and both defaults are configurable.
+  const strict = createDirectory({
+    self: { name: "me" },
+    trust: { admitProfile: "known", candidateProfile: "unknown" },
+  });
+  strict.admit({ name: "luna" });
+  assert.equal(strict.get("luna").profile, "known");
+  strict.admit({ name: "deimos", profile: "carrier" });
+  assert.equal(strict.get("deimos").profile, "carrier");
+});
+
+test("gossip is taken only from peers allowed to introduce", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.admit({ name: "sol", profile: "trusted" });
+  directory.admit({ name: "quiet", profile: "known" });
+
+  assert.equal(directory.allowsCapability("sol", "introduce"), true);
+  assert.equal(
+    directory.allowsCapability("quiet", "introduce"),
+    false,
+    "recorded but granted nothing must not include seeding our candidate list",
+  );
+});

@@ -26,7 +26,14 @@ import { sameKey, verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
-import { DELEGATE, DIAGNOSTICS, HAIL, listProfiles, rejectionFor } from "./profiles.js";
+import {
+  BLOCKED_PROFILE,
+  DELEGATE,
+  DIAGNOSTICS,
+  HAIL,
+  listProfiles,
+  rejectionFor,
+} from "./profiles.js";
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 
@@ -137,22 +144,7 @@ export function createDaemon({
     return null;
   };
 
-  /**
-   * Which profile decides how a caller is turned away.
-   *
-   * A caller we can identify is refused in its own profile's style — a blocked
-   * peer is dropped, an unauthorized one is told. A caller we cannot identify
-   * falls to `unknown`, which answers by default.
-   *
-   * @param {any} body
-   */
-  const rejectionProfile = (body) => {
-    const name = body?.from?.name;
-    return typeof name === "string"
-      ? directory.effectiveProfile(name).profile
-      : directory.trust().unknownProfile;
-  };
-
+  
   /**
    * Does a grant in this request carry the capability?
    *
@@ -203,7 +195,15 @@ export function createDaemon({
    * @param {any} body
    * @param {string} [capability]
    */
-  const authenticate = (body, capability = HAIL) => {
+  /**
+   * Who this is, if they proved it. Capability is a separate question, asked
+   * after — because *how* we refuse must depend on what we can prove, never on
+   * what the caller claims.
+   *
+   * @param {any} body
+   * @returns {{name: string, key: string, known: any} | null}
+   */
+  const identify = (body) => {
     const claim = body?.from;
     if (typeof claim?.name !== "string") return debugRefusal("no name in claim");
 
@@ -228,14 +228,50 @@ export function createDaemon({
     const age = Math.abs(Date.now() - (Number(claim.at) || 0));
     if (!Number.isFinite(age) || age > FRESHNESS_MS) return debugRefusal(`stale hail from ${claim.name}`, claim.name);
 
-    if (known && directory.allowsCapability(claim.name, capability)) return known;
+    return { name: claim.name, key: presenterKey, known: known ?? null };
+  };
 
-    const viaGrant = grantAllows(body, presenterKey, capability);
+  /**
+   * Whether a proven caller may do this particular thing.
+   *
+   * @param {any} body
+   * @param {string} [capability]
+   */
+  const authenticate = (body, capability = HAIL) => {
+    const proven = identify(body);
+    if (!proven) return null;
+    const { name, key, known } = proven;
+
+    if (known && directory.allowsCapability(name, capability)) return known;
+
+    const viaGrant = grantAllows(body, key, capability);
     if (viaGrant) {
-      log(`[grant] ${claim.name} used ${viaGrant.issuer}'s grant for ${capability}`);
-      return known ?? { name: claim.name, publicKey: presenterKey, viaGrant: viaGrant.issuer };
+      log(`[grant] ${name} used ${viaGrant.issuer}'s grant for ${capability}`);
+      return known ?? { name, publicKey: key, viaGrant: viaGrant.issuer };
     }
-    return debugRefusal(`${claim.name} has no ${capability} capability`, claim.name);
+    return debugRefusal(`${name} has no ${capability} capability`, name);
+  };
+
+  /**
+   * How to refuse: from what we proved, never from what was claimed.
+   *
+   * `rejectionProfile` used to resolve the *claimed* name before any signature
+   * was checked, which handed anyone a one-bit question they had not earned —
+   * a silent close meant "that name is blocked here", a 403 meant it was not.
+   * Names could be enumerated with no credential at all.
+   *
+   * A caller who proves nothing is dropped, identically every time, which is
+   * what `drop` is for: the peer you most want to be invisible to is the one
+   * who cannot say who they are. A caller who proves who they are gets the
+   * style their own profile calls for — a real peer with a real misconfiguration
+   * should see a refusal rather than debug a phantom network fault.
+   *
+   * @param {any} body
+   */
+  const refusalStyle = (body) => {
+    const proven = identify(body);
+    if (!proven) return BLOCKED_PROFILE;
+    return directory.effectiveProfile(proven.name).profile;
   };
 
   /**
@@ -270,14 +306,14 @@ export function createDaemon({
         // plugin is reached. A plugin cannot opt out of this, which is what
         // makes loading one a smaller decision than writing one.
         const caller = authenticate(body, pluginRoute.capability);
-        if (!caller) return turnAway(response, rejectionProfile(body));
+        if (!caller) return turnAway(response, refusalStyle(body));
 
         const result = await pluginRoute.handler({ body, caller, directory, identity, log });
         if (result && result[REFUSE]) {
           // The plugin decided against it; the host still owns how that looks,
           // so a refusal from a plugin is indistinguishable from any other.
           if (result.reason) log(`[${pluginRoute.plugin}] refused: ${result.reason}`);
-          return turnAway(response, rejectionProfile(body));
+          return turnAway(response, refusalStyle(body));
         }
         return send(response, 200, result ?? {});
       }

@@ -20,7 +20,16 @@
  */
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 import { sameKey } from "./identity.js";
-import { allows, BLOCKED_PROFILE, DEFAULT_PROFILE, listProfiles, resolveProfile } from "./profiles.js";
+import {
+  allows,
+  ADMIT_PROFILE,
+  BLOCKED_PROFILE,
+  CANDIDATE_PROFILE,
+  DEFAULT_PROFILE,
+  INTRODUCE,
+  listProfiles,
+  resolveProfile,
+} from "./profiles.js";
 import { profileFor } from "./trust.js";
 
 /**
@@ -39,7 +48,8 @@ function asRecord(custom) {
  *   candidates?: any[],
  *   blocklist?: {names?: string[], keys?: string[]},
  *   profiles?: Record<string, any>,
- *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string},
+ *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string,
+ *           admitProfile?: string, candidateProfile?: string},
  *   now?: () => number,
  * }} [state]
  */
@@ -80,6 +90,10 @@ export function createDirectory(state = {}) {
     model: state.trust?.model ?? "direct",
     settings: state.trust?.settings ?? {},
     unknownProfile: state.trust?.unknownProfile ?? "unknown",
+    // Where a peer lands when nobody said otherwise. Two of them, because
+    // typing an address and acting on a peer's say-so are different acts.
+    admitProfile: state.trust?.admitProfile ?? ADMIT_PROFILE,
+    candidateProfile: state.trust?.candidateProfile ?? CANDIDATE_PROFILE,
   };
 
   for (const peer of state.candidates ?? []) {
@@ -102,9 +116,13 @@ export function createDirectory(state = {}) {
     if (!record) return null;
     const existing = admitted.get(record.name) ?? null;
     const merged = mergePeerRecord(existing, record) ?? record;
+    // A name we only heard of gets the candidate default; one being added
+    // outright gets the admit default. An explicit choice beats both, and an
+    // existing peer keeps what it already had.
+    const fallback = candidates.has(record.name) ? trust.candidateProfile : trust.admitProfile;
     const withProfile = {
       ...merged,
-      profile: profile ?? peer?.profile ?? existing?.profile ?? DEFAULT_PROFILE,
+      profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
     };
     admitted.set(withProfile.name, withProfile);
     candidates.delete(withProfile.name);

@@ -165,5 +165,5 @@ test("the rejection style is the user's to change per profile", () => {
 test("changing the style does not change what a profile grants", () => {
   const custom = setRejection({}, "trusted", "drop");
   const trusted = listProfiles(custom).find((p) => p.name === "trusted");
-  assert.deepEqual(trusted.allows, ["hail", "directory"]);
+  assert.deepEqual(trusted.allows, ["hail", "directory", "introduce"]);
 });

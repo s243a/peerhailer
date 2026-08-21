@@ -151,7 +151,7 @@ test("repinning a built-in does not freeze what it grants", () => {
   // `trusted` allows still reaches someone who merely moved it up the list.
   const custom = setPinned({}, "trusted", false);
   const trusted = listProfiles(custom).find((p) => p.name === "trusted");
-  assert.deepEqual(trusted.allows, ["hail", "directory"]);
+  assert.deepEqual(trusted.allows, ["hail", "directory", "introduce"]);
   assert.notEqual(trusted.pinned, true);
 });
 

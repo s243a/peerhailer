@@ -22,6 +22,16 @@
 export const HAIL = "hail";
 /** Let this peer see our directory in full, not just what a hail returns. */
 export const DIRECTORY = "directory";
+
+/**
+ * May tell this machine about peers it has not met.
+ *
+ * `DIRECTORY` governs what we hand out; this governs what we take in, and the
+ * two were the same permission by omission — any peer we could reach could put
+ * names, addresses and keys into our candidate list. Whose leads are worth
+ * following is a judgement about that peer, so it is a capability.
+ */
+export const INTRODUCE = "introduce";
 /** Reserved for the covert channel: may enrol a transport with us. */
 export const ENROL = "enrol";
 /** Reserved for relaying: may ask us to carry traffic for it. */
@@ -75,8 +85,8 @@ const TRUSTED = {
   // exposure on someone else's traffic, and enrolment changes how it is
   // reachable — both are grants worth making on purpose rather than
   // inheriting by being a peer at all.
-  allows: [HAIL, DIRECTORY],
-  description: "Your own machines. May hail, and see who else you know.",
+  allows: [HAIL, DIRECTORY, INTRODUCE],
+  description: "Your own machines. May hail, see who else you know, and introduce peers.",
   // Pinned because it is the answer nearly every time, and a list whose common
   // case is buried gets scrolled past. Pinning is presentation only — see
   // listProfiles for why that still matters.
@@ -118,7 +128,7 @@ export const BUILT_IN_PROFILES = {
   carrier: {
     name: "carrier",
     builtIn: true,
-    allows: [HAIL, DIRECTORY, RELAY],
+    allows: [HAIL, DIRECTORY, INTRODUCE, RELAY],
     description: "A trusted peer that may also ask this machine to relay for it.",
   },
   operator: {
@@ -126,7 +136,7 @@ export const BUILT_IN_PROFILES = {
     builtIn: true,
     // The machine you debug from. Diagnostics are not in `trusted` because
     // most trusted peers have no business asking why others were refused.
-    allows: [HAIL, DIRECTORY, DIAGNOSTICS],
+    allows: [HAIL, DIRECTORY, INTRODUCE, DIAGNOSTICS],
     description: "A trusted peer that may also read diagnostics, in debug mode.",
   },
 };
@@ -138,6 +148,17 @@ export const DEFAULT_PROFILE = "trusted";
  * by substring lets a profile called `unblocked` match it.
  */
 export const BLOCKED_PROFILE = "blocked";
+
+/**
+ * Where a peer lands when nobody said otherwise, by *how* it arrived.
+ *
+ * Typing an address is an assertion that you know the machine. Clicking admit
+ * on a name a peer mentioned is acting on someone else's say-so about a machine
+ * you have never contacted, and the two deserve different answers — the GUI
+ * warns that a lead is not trust, then used to grant `trusted` anyway.
+ */
+export const ADMIT_PROFILE = "trusted";
+export const CANDIDATE_PROFILE = "known";
 
 /**
  * Resolve a profile by name, falling back to the default.

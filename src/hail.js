@@ -17,6 +17,7 @@
  */
 import { signPayload } from "./identity.js";
 import { makePeerRecord, orderForDialing, verifyRecord } from "./peerRecord.js";
+import { INTRODUCE } from "./profiles.js";
 
 /**
  * What a hail says about itself.
@@ -129,10 +130,16 @@ export async function walk(directory, options = {}) {
     // open to being impersonated at a stale address on every later hail.
     if (!peer.publicKey && proof.key) directory.bindKey(peer.name, proof.key);
     reached.push({ name: peer.name, via: result.address });
-    directory.learnFrom(
-      peer.name,
-      Array.isArray(result.response?.peers) ? result.response.peers : [],
-    );
+    // Whose leads we follow is a judgement about the peer, not a property of
+    // having reached it. Without this, any peer we could hail could put names,
+    // addresses and keys into our candidate list — and a key that enters as
+    // gossip is the key we would bind on admitting that name.
+    if (directory.allowsCapability(peer.name, INTRODUCE)) {
+      directory.learnFrom(
+        peer.name,
+        Array.isArray(result.response?.peers) ? result.response.peers : [],
+      );
+    }
   }
 
   return { reached, unreachable, candidates: directory.listCandidates() };
