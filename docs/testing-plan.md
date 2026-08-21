@@ -25,10 +25,15 @@ looking.
 | What | Why it matters |
 | --- | --- |
 | ~~Concurrent writes~~ | **Fixed.** Changes now lock the file and read inside the lock; the daemon adopts the result. Six tests, and the original reproduction passes. |
-| State file corruption | Truncated or malformed JSON should cost the directory, not the daemon. |
-| Address roaming | A peer that moves should be re-found via another peer, and the stale address retired. |
+| ~~State file corruption~~ | **Covered.** Malformed JSON yields an empty directory and a warning; a write still lands. |
+| ~~Address roaming~~ | **Works**, and exposed a leak: routes accumulated without bound, so a laptop that joins many networks would try dozens of dead addresses before calling a peer unreachable. Capped, keeping what has worked. |
 | ~~npm packaging~~ | **Fixed.** Two bugs: declarations were never packed, and the `exports` map shadowed the `types` field so a consumer resolved `any`. Verified by installing the tarball and typechecking against it. |
-| Windows paths | `~` expansion, the mode-600 identity file, and the state directory. |
+| ~~Windows paths~~ | **Two findings.** State now follows `APPDATA` rather than a dotted directory nobody there would look in; and mode 600 buys little on Windows, where the ACL decides — documented rather than asserted, with `PEERHAILER_HOME` as the answer for anyone wanting a chosen ACL. |
+
+**Stage 0 is done.** Four fixes came out of it — two data-loss bugs, an unbounded
+route list, and a package that shipped no usable types — none of which the
+existing tests would ever have found, because they all live at seams the tests
+do not cross.
 
 ## Stage 1 — things a person has to look at (you)
 

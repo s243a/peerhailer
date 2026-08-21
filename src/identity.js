@@ -18,6 +18,13 @@
  * read, diffed and pasted into a bug report; a secret in a file people are
  * invited to `cat` is a secret with a short life.
  *
+ * The file is written mode 600, and that is worth less on Windows than it reads
+ * as: NTFS permissions come from the inherited ACL, and Node's chmod there sets
+ * little more than the read-only flag. On Windows the key is protected by the
+ * user profile being private, which it normally is and which is not the same
+ * guarantee. Anyone who needs a stronger one should keep the state directory
+ * somewhere with an ACL they chose, via PEERHAILER_HOME.
+ *
  * @module identity
  */
 import {

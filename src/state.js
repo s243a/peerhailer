@@ -20,6 +20,10 @@ export function defaultStatePath(env = process.env) {
   const base =
     env.PEERHAILER_HOME ??
     env.XDG_CONFIG_HOME ??
+    // Windows keeps per-user application data in APPDATA; a dotted directory in
+    // the profile root works but is not where anything else on that system
+    // looks, which matters when somebody has to find this file to fix it.
+    env.APPDATA ??
     join(env.HOME ?? env.USERPROFILE ?? homedir(), ".config");
   return join(base, "peerhailer", "directory.json");
 }

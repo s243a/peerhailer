@@ -69,7 +69,11 @@ test("an identity is generated once and kept private", () => {
   assert.equal(first.created, true);
   assert.equal(second.created, false);
   assert.equal(first.publicKey, second.publicKey, "the identity must survive a restart");
-  assert.equal(statSync(path).mode & 0o077, 0, "no group or world access to a private key");
+  if (process.platform !== "win32") {
+    // Mode bits mean little on Windows, where the ACL decides; the module says
+    // so rather than this asserting something the platform will not honour.
+    assert.equal(statSync(path).mode & 0o077, 0, "no group or world access to a private key");
+  }
   assert.ok(!readFileSync(path, "utf8").includes("BEGIN PUBLIC KEY\\nMCowBQ\\n"));
 });
 
