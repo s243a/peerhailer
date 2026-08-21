@@ -116,10 +116,13 @@ export function createDirectory(state = {}) {
     if (!record) return null;
     const existing = admitted.get(record.name) ?? null;
     const merged = mergePeerRecord(existing, record) ?? record;
-    // A name we only heard of gets the candidate default; one being added
-    // outright gets the admit default. An explicit choice beats both, and an
-    // existing peer keeps what it already had.
-    const fallback = candidates.has(record.name) ? trust.candidateProfile : trust.admitProfile;
+    // Typing an address asserts you know the machine; acting on a name a peer
+    // mentioned does not. A gossiped name promoted with an address of your own
+    // is the first act, not the second — so the test is whether *this* call
+    // brought one, not whether the name was ever heard of.
+    const heardOf = candidates.has(record.name);
+    const broughtAddress = record.addresses.length > 0;
+    const fallback = heardOf && !broughtAddress ? trust.candidateProfile : trust.admitProfile;
     const withProfile = {
       ...merged,
       profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
@@ -340,6 +343,16 @@ export function createDirectory(state = {}) {
       }
       blocklist.names = [...(state?.blocklist?.names ?? [])];
       blocklist.keys = [...(state?.blocklist?.keys ?? [])];
+      // Including trust: a running daemon adopting new state was keeping its
+      // old defaults, so changing where admitted peers land had no effect
+      // until restart.
+      if (state?.trust) {
+        trust.model = state.trust.model ?? trust.model;
+        trust.settings = state.trust.settings ?? trust.settings;
+        trust.unknownProfile = state.trust.unknownProfile ?? trust.unknownProfile;
+        trust.admitProfile = state.trust.admitProfile ?? trust.admitProfile;
+        trust.candidateProfile = state.trust.candidateProfile ?? trust.candidateProfile;
+      }
     },
     /**
      * Replace the profiles this directory resolves against.

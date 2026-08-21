@@ -200,6 +200,14 @@ export function createDaemon({
    * after — because *how* we refuse must depend on what we can prove, never on
    * what the caller claims.
    *
+   * One channel remains, and is left open knowingly: a claimed name that hits
+   * `admitted` with a key costs a signature check, one that misses returns at
+   * once. Status is uniform — every unproven caller is dropped — but the time
+   * taken still says whether a name is in this directory. Tens of microseconds,
+   * measurable across loopback and lost in the jitter of any real network, so
+   * it is recorded rather than defended against. Verify it on two machines
+   * before treating it as either real or theoretical.
+   *
    * @param {any} body
    * @returns {{name: string, key: string, known: any} | null}
    */
@@ -218,7 +226,11 @@ export function createDaemon({
     if (!verifyPayload(claim, body?.signature, presenterKey)) {
       return debugRefusal(`signature from ${claim.name} did not verify`, claim.name);
     }
-    if (known?.publicKey && body?.grant && !sameKey(presenterKey, known.publicKey)) {
+    // Compare the grant's own subject against the key we hold. Comparing
+    // `presenterKey` could never fail: it *is* the held key whenever we have
+    // one, so the old form was a check that never fired.
+    const grantSubject = body?.grant?.grant?.subjectKey;
+    if (known?.publicKey && grantSubject && !sameKey(grantSubject, known.publicKey)) {
       return debugRefusal(`${claim.name} presented a key we do not hold for it`, claim.name);
     }
 
@@ -234,11 +246,14 @@ export function createDaemon({
   /**
    * Whether a proven caller may do this particular thing.
    *
+   * Takes the identity rather than deriving it, so one request costs one
+   * verification and leaves one trace.
+   *
+   * @param {{name: string, key: string, known: any} | null} proven
    * @param {any} body
    * @param {string} [capability]
    */
-  const authenticate = (body, capability = HAIL) => {
-    const proven = identify(body);
+  const authenticate = (proven, body, capability = HAIL) => {
     if (!proven) return null;
     const { name, key, known } = proven;
 
@@ -266,13 +281,15 @@ export function createDaemon({
    * style their own profile calls for — a real peer with a real misconfiguration
    * should see a refusal rather than debug a phantom network fault.
    *
-   * @param {any} body
+   * Takes an already-proven identity rather than a body: verifying twice
+   * charged every failed hail two entries in a fifty-deep diagnostics history,
+   * halving what a person could actually read back, and paid for a second
+   * signature check to learn nothing new.
+   *
+   * @param {{name: string} | null} proven
    */
-  const refusalStyle = (body) => {
-    const proven = identify(body);
-    if (!proven) return BLOCKED_PROFILE;
-    return directory.effectiveProfile(proven.name).profile;
-  };
+  const refusalStyle = (proven) =>
+    proven ? directory.effectiveProfile(proven.name).profile : BLOCKED_PROFILE;
 
   /**
    * Change the directory, durably.
@@ -305,15 +322,18 @@ export function createDaemon({
         // Authentication and capability happen here, in the core, before the
         // plugin is reached. A plugin cannot opt out of this, which is what
         // makes loading one a smaller decision than writing one.
-        const caller = authenticate(body, pluginRoute.capability);
-        if (!caller) return turnAway(response, refusalStyle(body));
+        // Identity is established once. Whether it suffices, and how to refuse
+        // if it does not, are both answered from that one result.
+        const proven = identify(body);
+        const caller = authenticate(proven, body, pluginRoute.capability);
+        if (!caller) return turnAway(response, refusalStyle(proven));
 
         const result = await pluginRoute.handler({ body, caller, directory, identity, log });
         if (result && result[REFUSE]) {
           // The plugin decided against it; the host still owns how that looks,
           // so a refusal from a plugin is indistinguishable from any other.
           if (result.reason) log(`[${pluginRoute.plugin}] refused: ${result.reason}`);
-          return turnAway(response, refusalStyle(body));
+          return turnAway(response, refusalStyle(proven));
         }
         return send(response, 200, result ?? {});
       }

@@ -181,3 +181,28 @@ test("gossip is taken only from peers allowed to introduce", () => {
     "recorded but granted nothing must not include seeding our candidate list",
   );
 });
+
+test("promoting a heard-of name with your own address is an assertion, not a lead", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.admit({ name: "mars", profile: "trusted" });
+  directory.learnFrom("mars", [{ name: "phobos", addresses: [] }, { name: "deimos", addresses: [] }]);
+
+  // Clicking admit on a name someone mentioned: still only their say-so.
+  directory.admit({ name: "phobos" });
+  assert.equal(directory.get("phobos").profile, "known");
+
+  // Typing an address for it is your own claim about the machine.
+  directory.admit({ name: "deimos", addresses: [{ transport: "lan", value: "10.0.0.5:7645" }] });
+  assert.equal(directory.get("deimos").profile, "trusted");
+});
+
+test("adopting state carries the trust defaults, not just the peers", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  assert.equal(directory.trust().candidateProfile, "known");
+
+  // A daemon reloading state used to keep its old defaults, so changing where
+  // admitted peers land did nothing until restart.
+  directory.adopt({ admitted: [], candidates: [], trust: { candidateProfile: "unknown" } });
+  assert.equal(directory.trust().candidateProfile, "unknown");
+  assert.equal(directory.trust().admitProfile, "trusted", "unset fields keep their value");
+});
