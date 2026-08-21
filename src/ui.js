@@ -40,7 +40,9 @@ export function renderPage(self) {
   select { font: inherit; font-size: .82rem; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: .4rem; padding: .15rem; }
   .empty { opacity: .55; font-style: italic; padding: .5rem 0; }
   .row-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
-  #error { color: #b00; margin-top: 1rem; }
+  /* The only colour on the page that does not derive from currentColor, so
+     the only one that can end up dark red on a dark background. */
+  #error { color: #b00; color: light-dark(#b00, #ff9b9b); margin-top: 1rem; }
 </style>
 </head>
 <body>

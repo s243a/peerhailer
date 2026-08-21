@@ -124,6 +124,10 @@ export async function walk(directory, options = {}) {
     }
 
     directory.markReachable(peer.name, result.address);
+    // First verified contact is where trust-on-first-use ends. Without this the
+    // key was verified and discarded, so a peer admitted without one stayed
+    // open to being impersonated at a stale address on every later hail.
+    if (!peer.publicKey && proof.key) directory.bindKey(peer.name, proof.key);
     reached.push({ name: peer.name, via: result.address });
     directory.learnFrom(
       peer.name,

@@ -134,6 +134,12 @@ export const BUILT_IN_PROFILES = {
 export const DEFAULT_PROFILE = "trusted";
 
 /**
+ * The one profile that means "no". Named, because comparing against the string
+ * by substring lets a profile called `unblocked` match it.
+ */
+export const BLOCKED_PROFILE = "blocked";
+
+/**
  * Resolve a profile by name, falling back to the default.
  *
  * An unknown profile name resolves to `trusted` rather than to nothing, because

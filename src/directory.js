@@ -20,7 +20,7 @@
  */
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
 import { sameKey } from "./identity.js";
-import { allows, DEFAULT_PROFILE, listProfiles, resolveProfile } from "./profiles.js";
+import { allows, BLOCKED_PROFILE, DEFAULT_PROFILE, listProfiles, resolveProfile } from "./profiles.js";
 import { profileFor } from "./trust.js";
 
 /**
@@ -186,6 +186,30 @@ export function createDirectory(state = {}) {
   }
 
   /**
+   * Bind a key to a peer on first verified contact.
+   *
+   * A peer admitted without a key is trusted on first use, and stays that way
+   * until something writes the key back. Nothing did: `walk` verified a signed
+   * reply and threw the key away, so every hail was another first contact and
+   * the window never closed.
+   *
+   * A key already held is never replaced — rotation is a deliberate act, not
+   * something a peer performs by answering differently tomorrow.
+   *
+   * @param {string} name
+   * @param {string | null | undefined} publicKey
+   */
+  function bindKey(name, publicKey) {
+    const record = admitted.get(name);
+    if (!record || record.publicKey) return record ?? null;
+    const bound = makePeerRecord({ ...record, publicKey });
+    if (!bound || !bound.publicKey) return record;
+    const kept = { ...bound, profile: record.profile };
+    admitted.set(name, kept);
+    return kept;
+  }
+
+  /**
    * What this machine will tell a peer that asks.
    *
    * Admitted peers only. Passing on candidates would relay hearsay we never
@@ -199,7 +223,7 @@ export function createDirectory(state = {}) {
       // where to find a machine we deliberately do not answer would hand out a
       // reachability we chose not to use.
       peers: [...admitted.values()]
-        .filter((record) => !profileFor({ peer: record, directory: api, blocklist }).profile.includes("blocked"))
+        .filter((record) => profileFor({ peer: record, directory: api, blocklist }).profile !== BLOCKED_PROFILE)
         .filter((record) => allows(record.profile, "hail", profileSet))
         .map((record) => publicRecord(record))
         .filter(Boolean),
@@ -212,6 +236,7 @@ export function createDirectory(state = {}) {
     forget,
     learnFrom,
     markReachable,
+    bindKey,
     hailResponse,
     /** @param {string} name */
     /** @param {string} name */

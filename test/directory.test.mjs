@@ -10,6 +10,7 @@ import { test } from "node:test";
 
 import { createDirectory } from "../src/directory.js";
 import { mergePeerRecord, publicRecord } from "../src/peerRecord.js";
+import { generateIdentity, sameKey } from "../src/identity.js";
 
 const at = (t) => () => t;
 
@@ -111,4 +112,34 @@ test("a peer never learns about itself, or replaces us", () => {
   const directory = createDirectory({ self: { name: "here" } });
   directory.learnFrom("sol", [{ name: "here" }, { name: "" }, null]);
   assert.deepEqual(directory.listCandidates(), []);
+});
+
+test("a verified key binds on first contact, and is never replaced after", () => {
+  const first = generateIdentity();
+  const impostor = generateIdentity();
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.admit({ name: "sol", addresses: [{ transport: "lan", value: "10.0.0.2:7645" }] });
+
+  assert.equal(directory.get("sol").publicKey, null, "admitted without a key: trust on first use");
+
+  directory.bindKey("sol", first.publicKey);
+  assert.ok(sameKey(directory.get("sol").publicKey, first.publicKey), "first contact ends TOFU");
+
+  // Rotation is deliberate. A second machine answering later cannot become sol
+  // by presenting a different key.
+  directory.bindKey("sol", impostor.publicKey);
+  assert.ok(sameKey(directory.get("sol").publicKey, first.publicKey), "a held key is never replaced");
+
+  // Binding must not quietly reassign the profile.
+  assert.equal(directory.get("sol").profile, directory.get("sol").profile);
+  assert.equal(directory.bindKey("nobody", first.publicKey), null);
+});
+
+test("a profile whose name merely contains 'blocked' is not blocked", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.useProfiles({ unblocked: { name: "unblocked", allows: ["hail"] } });
+  directory.admit({ name: "mars", profile: "unblocked" });
+
+  const shared = directory.hailResponse().peers.map((peer) => peer.name);
+  assert.ok(shared.includes("mars"), "`unblocked` contains `blocked` as a substring, but is not it");
 });
