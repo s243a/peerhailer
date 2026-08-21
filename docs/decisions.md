@@ -432,3 +432,20 @@ since it looks public while behaving like an overlay.
 These are guesses, and they are only allowed to reorder. A wrong guess that
 reorders costs a timeout; a wrong guess that deletes costs the only route to a
 machine.
+
+## What peers share, and how it stays credential-free
+
+Presence alone is inert: the GUI shows machines and addresses with nothing to do
+with any of them. A namespace of what each peer *will answer for* is designed in
+[shared-namespace.md](shared-namespace.md) — addressed by fingerprint rather
+than by position or name, with visibility split from readability so listing a
+service and reading it are separate permissions.
+
+The invariant it has to keep is the one grants already state: the directory
+holds no credentials. It keeps it by making leaves **offers rather than values**
+— reading one is an authorised request answered on demand, never a value that
+lands in a record. A stolen directory still tells an attacker only what exists.
+
+Not built, and blocked on whether admitting a candidate grants `trusted`, since
+that decides what the default visibility can be.
+
