@@ -413,3 +413,22 @@ The hail reply carries a signed record, and now it is checked against the key
 held for that peer. Which is what makes a stale address cost a timeout rather
 than a wrong answer — and therefore what makes keeping stale addresses a
 reasonable thing to do at all.
+
+**Two orders, not one.** Storage is eviction order and always keeps a route that
+has worked above one that has not; dialing order prefers whatever is most likely
+to answer *now*, which after a machine moves is an address reported this morning
+rather than one that worked last week. Conflating them meant a burst of fresh
+reports evicted the only known-good route, which is a worse mistake than trying
+a dead address first.
+
+**Lifetime is guessed from what an address is.** A peer that knows its own
+network may say `stable` or `dynamic` and is believed, since a false claim only
+misorders a dial. Where it says nothing — a phone, or anything that cannot ask
+its network what lease it holds — the shape decides: RFC1918 is where DHCP
+lives, so a day; overlay transports assign per node and keep it until the node
+is removed, so a month; and Tailscale's `100.64/10` is recognised by shape,
+since it looks public while behaving like an overlay.
+
+These are guesses, and they are only allowed to reorder. A wrong guess that
+reorders costs a timeout; a wrong guess that deletes costs the only route to a
+machine.

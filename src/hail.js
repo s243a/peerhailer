@@ -16,7 +16,7 @@
  * @module hail
  */
 import { signPayload } from "./identity.js";
-import { makePeerRecord, verifyRecord } from "./peerRecord.js";
+import { makePeerRecord, orderForDialing, verifyRecord } from "./peerRecord.js";
 
 /**
  * What a hail says about itself.
@@ -53,7 +53,10 @@ export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_
 
   /** @type {string[]} */
   const failures = [];
-  for (const address of peer.addresses) {
+  // Stored order protects routes; this order tries the one most likely to
+  // answer now, which after a machine moves is what somebody reported today
+  // rather than what worked last week.
+  for (const address of orderForDialing(peer.addresses)) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {

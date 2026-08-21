@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createDirectory } from "../src/directory.js";
-import { MAX_ADDRESSES } from "../src/peerRecord.js";
+import { MAX_ADDRESSES, orderForDialing, presumedLifetime } from "../src/peerRecord.js";
 import { defaultStatePath, loadState, saveState, updateState, withStateLock } from "../src/state.js";
 
 const scratch = () => join(mkdtempSync(join(tmpdir(), "ph-state-")), "dir.json");
@@ -137,4 +137,45 @@ test("eviction keeps diversity, not just recency", () => {
   );
   const lanCount = held.filter((address) => address.transport === "lan").length;
   assert.ok(lanCount <= 3, "and one transport cannot fill the list");
+});
+
+test("an address's presumed lifetime follows what it is, not what it is labelled", () => {
+  const day = 24 * 60 * 60_000;
+  // DHCP lives in RFC1918, so those turn over daily.
+  assert.equal(presumedLifetime({ transport: "lan", value: "http://192.168.1.5:8787" }), day);
+  // Tailscale's 100.64/10 looks public and is assigned per node, so a mislabelled
+  // one is still recognised — the shape is better evidence than the label.
+  assert.equal(presumedLifetime({ transport: "lan", value: "http://100.64.1.9:8787" }), 30 * day);
+  assert.equal(presumedLifetime({ transport: "tailscale", value: "http://x:1" }), 30 * day);
+  // And a peer that knows its own network is believed, since it can only
+  // mislead us into trying a route in the wrong order.
+  assert.equal(presumedLifetime({ transport: "lan", value: "http://203.0.113.5:1", stability: "stable" }), 30 * day);
+});
+
+test("after a machine moves, today's report is dialled before last week's success", () => {
+  const now = Date.now();
+  const day = 24 * 60 * 60_000;
+  const ordered = orderForDialing(
+    [
+      { transport: "lan", value: "http://old-home:8787", lastOk: now - 5 * day, learnedAt: null },
+      { transport: "lan", value: "http://reported-today:8787", lastOk: null, learnedAt: now - 3_600_000 },
+    ],
+    now,
+  );
+  assert.equal(ordered[0].value, "http://reported-today:8787");
+});
+
+test("but storage keeps the route that worked, whatever is reported", () => {
+  // Dialing order and eviction order are different questions. A burst of fresh
+  // reports must not evict the one address known to reach this peer.
+  const directory = createDirectory({ self: { name: "here" }, now: () => Date.now() });
+  directory.admit({ name: "laptop", addresses: [{ transport: "lan", value: "http://works:8787" }] });
+  directory.markReachable("laptop", { transport: "lan", value: "http://works:8787" });
+
+  for (let i = 0; i < 20; i += 1) {
+    directory.admit({ name: "laptop", addresses: [{ transport: "lan", value: `http://fresh-${i}:8787` }] });
+  }
+
+  const held = directory.get("laptop").addresses;
+  assert.equal(held[0].value, "http://works:8787", "what has worked is never evicted for what has not");
 });
