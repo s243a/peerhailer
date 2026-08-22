@@ -63,3 +63,36 @@ test("the CLI loads and its common commands run", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the page is off by default, and says so", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "peerhailer-ui-"));
+  const state = join(dir, "directory.json");
+  await hail(state, ["name", "host"]);
+
+  /** Run the daemon briefly and collect what it said on the way up. */
+  const boot = (args) =>
+    new Promise((resolve) => {
+      const child = execFile(process.execPath, [CLI, "--state", state, ...args], () => {});
+      let out = "";
+      child.stdout?.on("data", (chunk) => (out += chunk));
+      child.stderr?.on("data", (chunk) => (out += chunk));
+      setTimeout(() => {
+        child.kill();
+        resolve(out);
+      }, 1500);
+    });
+
+  try {
+    // The control listener exists only for the page — the CLI reads the state
+    // file directly — so no page means no port a browser can reach at all.
+    const quiet = await boot(["daemon", "--port", "0"]);
+    assert.match(quiet, /not served/, "the default is off");
+    assert.match(quiet, /--ui/, "and says how to turn it on, or nobody finds it");
+    assert.doesNotMatch(quiet, /^\[ui\] http/m, "nothing is bound for it");
+
+    const withUi = await boot(["daemon", "--port", "0", "--ui"]);
+    assert.match(withUi, /\[ui\] http:\/\/127\.0\.0\.1:/, "asked for, and served");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

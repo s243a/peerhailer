@@ -420,17 +420,25 @@ switch (command) {
       log,
     });
     const port = Number(flags.port ?? 8787);
-    // Two doors. The page and the local API answer on loopback, because they
-    // hold no authentication of their own; hails answer wherever you say, and
-    // authenticate every caller.
+    // Two doors, and the first one is optional.
     //
-    // `--host` still moves the control door for anyone who means it, and still
-    // exposes an API that can admit peers when they do.
+    // The control listener exists only for the page: the CLI reads the state
+    // file directly and never speaks HTTP. So no page means no port a browser
+    // can reach, which removes the whole cross-origin class rather than
+    // defending against it — see "The page is surface" in docs/decisions.md.
+    //
+    // Opt-in, but said out loud when it is off. A safe default that hides the
+    // feature only produces people who cannot find it.
+    const wantsUi = flags.ui === true || flags.ui === "true";
     const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
-    const listening = await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
-    log(`[ui] http://${listening.host}:${listening.port}`);
-    if (host !== "127.0.0.1" && host !== "localhost") {
-      log(`[daemon] warning: the page and /api/* are on ${host} and hold no authentication`);
+    if (wantsUi) {
+      const listening = await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
+      log(`[ui] http://${listening.host}:${listening.port}`);
+      if (host !== "127.0.0.1" && host !== "localhost") {
+        log(`[daemon] warning: the page and /api/* are on ${host} and hold no authentication`);
+      }
+    } else {
+      log(`[ui] not served — add --ui for a page at http://127.0.0.1:${Number.isFinite(port) ? port : 8787}`);
     }
 
     // `--hail-on wlan0,tailscale0` — interface names, resolved now, because the
@@ -442,6 +450,9 @@ switch (command) {
     }
     if (hosts.length) {
       await daemon.listenHail({ port: Number.isFinite(port) ? port : 8787, hosts });
+    }
+    if (!wantsUi && hosts.length === 0) {
+      log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");
     }
     // Deliberately no persist() here. Every change the daemon makes already
     // went to disk through applyChange, which writes and then re-reads, so its
@@ -587,6 +598,8 @@ switch (command) {
         "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",
+        "    ... --ui                   also serve the page (off by default; it is the only",
+        "                                  reason a browser can reach this daemon at all)",
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",

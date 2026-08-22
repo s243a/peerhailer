@@ -690,10 +690,40 @@ What the page costs, stated plainly:
   expiry to the CLI and forgot the page until it was asked about.
 
 None of that argues for deleting it. Seeing the fabric is genuinely worth
-something, and the tree makes rules visible that prose does not. It argues for
-the page being **opt-in**, so a headless daemon on a server carries none of it —
-the same principle as plugins: people should not inherit features they did not
-ask for.
+something, and the tree makes rules visible that prose does not — most people
+will reach for it over the CLI, and that is a reason to keep it good rather than
+a reason to serve it always.
+
+So it is **opt-in**: `hail daemon --ui`. The control listener exists *only* for
+the page — the CLI reads the state file directly and never speaks HTTP — so
+without it there is no port a browser can reach at all, rather than a port
+serving 404s. A headless daemon carries none of this surface.
+
+Opt-in, and **said out loud**. A daemon started without it prints where the page
+would be and how to ask for it, because a safe default that hides the feature
+only produces people who cannot find it.
+
+### The T3 plugin does not have to open a second one
+
+Making peerhailer a T3 plugin looks like it re-introduces everything above. It
+need not, and the difference is whether T3 embeds the *library* or talks to the
+*daemon*.
+
+Embedded, there is no HTTP at all: T3's server is Node, this package has no
+dependencies, and `createDirectory` is an import. The test named *"a host with no
+plugins serves no protocol"* exists for exactly this — the split between the
+directory and the daemon is what makes embedding open nothing.
+
+Talking to a running daemon is the other shape, and it costs a port plus a
+cross-origin consumer. That is what the `--allow-origin` allowlist is for, and it
+is a worse position than embedding: the same three checks, plus a second process
+to keep running, for a machine T3 is already on.
+
+Either way the *plugin's own* interface is T3's surface rather than this
+project's — rendered in a webview T3 sandboxes, on T3's origin, under whatever
+trust levels its plugin manager settles on. Which is the right place for it: T3
+already had to solve showing a page safely, and solving it twice differently is
+how the two disagree later.
 
 ### Would Electron help?
 
