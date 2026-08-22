@@ -768,3 +768,31 @@ URL the way T3 Code pairs a browser: it authenticates the page rather than
 trusting its position, and it works remotely. That is a bigger decision than a
 flag, and it is not needed while the page is local and optional.
 
+## The same peer, two paths, two answers
+
+A capability is a property of a peer today: `luna` holds `tunnel:acp`, so `luna`
+may drive the agent from anywhere over anything. That is not what an operator
+means — the same machine reached over a tailnet and over a café LAN is not
+equally trustworthy, because the risk is who else is on the wire rather than who
+is at the far end.
+
+Designed in [network-trust.md](network-trust.md), and the whole thing turns on
+one distinction: **a machine knows which of its own listeners received a
+connection, and is merely told everything else.** Since `--hail-on` already opens
+one listener per address, labelling those listeners makes the check a lookup —
+and a TCP connection's arrival interface cannot change mid-life, so checking once
+is checking for good.
+
+Two richer shapes were considered and rejected. Rules travelling with the traffic
+— firewall rules riding along and stopping at any boundary that violates them —
+are enforced by whoever handles the traffic, which is precisely the hop you are
+worried about; they protect against accident and never against intent. Validating
+the whole path asks intermediate hops how trustworthy they are, and a compromised
+one answers whatever helps. The only path facts worth anything already have
+cryptography behind them: the origin signature, and whether the immediate peer
+differs from it.
+
+It composes with TLS rather than competing: the rule is not "untrusted network,
+no tunnels" but "no tunnels *in plaintext*", so pinning a certificate to the
+peer's key restores the capability over the same wire.
+
