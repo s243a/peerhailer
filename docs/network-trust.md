@@ -205,7 +205,9 @@ to look.
 ### 2b. Announce the move, so honest peers learn at once
 
 A machine that notices its own move can tell the peers it talks to, and they may
-demote on it if configured to. This is safe to believe for the reason at the
+demote on it. **Off by default on both sides** — announcing is a choice about
+what you reveal, and acting on it is a choice about how much friction you accept.
+This suits a particular posture rather than everyone. This is safe to believe for the reason at the
 bottom of this section: it only ever costs the announcer something.
 
 It earns its place because it covers a case observation cannot. A laptop that
@@ -258,6 +260,58 @@ The tension does not go away: the peer most worth arming this for is usually you
 own laptop, which is also the one you most want working. The friction lands
 hardest exactly where the protection is most valuable — an argument for trivial
 restoration and a visible reason, not for skipping it.
+
+### Tighter still: downgrade when a peer goes silent
+
+The limitation above — *absence means nothing* — can be turned into a policy
+rather than accepted. If going quiet costs privilege, a compromised machine can
+no longer hide by not announcing, because saying nothing is itself the trigger.
+
+**Much of this already exists.** A grant expires unless renewed, and renewing
+requires contact, so anything grant-carried already downgrades on silence with no
+new mechanism. What is missing is the profile-assigned case: a capability granted
+by a profile survives any amount of quiet.
+
+The cost is that it **ties trust to uptime**, which is a poor proxy for
+integrity. An always-on server keeps everything; a laptop closed overnight is
+demoted by morning; a phone is never trusted at all. That is tolerable when the
+peers holding dangerous capabilities are machines that are supposed to be up, and
+intolerable when they are not — so it belongs to a posture, not to the project.
+
+If built: the timeout should be per capability like the rest, generous enough
+that ordinary sleep does not trip it, and restoration should be one command with
+the reason visible. A privilege that vanishes overnight and takes a person ten
+minutes to find is worse than one that never existed.
+
+### The attack this cannot defend against
+
+If an attacker extracts a machine's **private key**, that machine is spoofable
+completely. Every signature verifies, every check passes, and nothing here is
+being fooled — the fabric is working exactly as designed for what it believes is
+the right peer.
+
+No capability policy helps, because none of it is an authentication question any
+more. What the design can do is three things, and it is worth being clear that
+they are mitigation rather than defence:
+
+**Make extraction hard.** The identity file is mode 600, which is what a
+filesystem offers and no more — and [decisions.md](decisions.md) already records
+that this buys little on Windows, where the ACL decides. Hardware-backed keys, a
+TPM or a secure enclave, are the real answer and are out of scope here; worth
+naming so nobody mistakes a file permission for a boundary.
+
+**Bound what a stolen key is worth.** This is where the capability model pays:
+the attacker gets exactly what that peer held, and nothing else. `tunnel:acp` not
+being part of `trusted` is precisely this — a stolen key from a machine that
+could only hail is worth a directory listing, not a shell.
+
+**Make recovery possible.** `hail block` refuses by key, so blocking survives a
+rename. `hail rotate` replaces a key deliberately. Neither undoes what was done
+with the key before anyone noticed.
+
+There is no detection story, and inventing one would be dishonest: two machines
+holding one key look like one machine to everything in this design. The competing
+key warning does not fire, because there is no competing key.
 
 ### Not this: demoting on a key conflict
 
