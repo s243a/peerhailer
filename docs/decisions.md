@@ -449,3 +449,22 @@ lands in a record. A stolen directory still tells an attacker only what exists.
 Not built, and blocked on whether admitting a candidate grants `trusted`, since
 that decides what the default visibility can be.
 
+## Finding peers, and who gets told you exist
+
+Three ways to learn an address, designed in [discovery.md](discovery.md):
+someone tells you (`hail add`, works now), a peer you trust tells you (`walk`
+plus `INTRODUCE`, works now), or a machine announces itself on the local segment
+(a beacon, not built).
+
+Announcing and listening are separate settings, because a laptop in a café wants
+to find its home server without telling the café it exists — and each is a list
+of interfaces rather than a boolean, since `eth0`, `wlan0`, `tailscale0` and
+`docker0` are not one decision. Both default to none.
+
+Accept policy is a third setting and a different kind of thing: it decides
+whether we parse a caller's bytes, never what they may do. If being on a network
+could confer a capability, joining a café network would hand it to strangers.
+
+Port scanning is deliberately not offered. It is reconnaissance, it trips
+intrusion detection, and `nmap` composes with `hail add` for anyone who wants it.
+
