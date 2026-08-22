@@ -202,6 +202,42 @@ Read at a moment of decision, the same record answers the narrower question too 
 yesterday* — so warning-at-promotion needs no separate mechanism, only somewhere
 to look.
 
+### 2b. Announce the move, so honest peers learn at once
+
+A machine that notices its own move can tell the peers it talks to, and they may
+demote on it if configured to. This is safe to believe for the reason at the
+bottom of this section: it only ever costs the announcer something.
+
+It earns its place because it covers a case observation cannot. A laptop that
+moves to a café and still reaches you **over the tailnet** never arrives on your
+plaintext listener, so nothing is observed and nothing is recorded. Without the
+announcement you would not learn at all.
+
+Three constraints, and the design is wrong without them:
+
+**Never restore on an announcement.** "I am back on a trusted network" is a
+*granting* claim — unverifiable, useful to the claimant, and precisely what a
+compromised machine would say to get its tunnel access back. Demotion may be
+automatic; restoration is a person's act. The same rule read in both directions.
+
+**Absence means nothing.** A compromised machine does not announce, and a peer
+that never announced is indistinguishable from one that never moved. So this is
+timeliness for honest peers layered over the observed fallback, never the only
+mechanism. Treating silence as "still where it was" would be the whole security
+value inverted.
+
+**Signed and fresh.** Without a freshness window the announcement is replayable:
+capture one and re-present it whenever stripping a peer's capabilities is
+convenient. That is the attacker-triggerable demotion rejected below, arriving
+through a different door. The hail protocol's `at` and `FRESHNESS_MS` are the
+existing machinery.
+
+And a cost to weigh rather than dismiss: telling every peer when you change
+network tells them when you travel. Over months that is a movement history held
+by everyone you have ever admitted. Announcing only to peers holding capabilities
+the move would affect is narrower and probably right, since nobody else has a
+decision to make with it.
+
 ### 3. Demote automatically — opt-in, per capability
 
 For people who want it to fail closed. **Off by default**: removing a privilege
