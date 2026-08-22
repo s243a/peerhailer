@@ -540,3 +540,55 @@ diagnostics got `operator`, and a tunnel opens against a grant rather than a
 standing permission, because a session with a lifetime is the closest thing here
 to a credential.
 
+## Assignments and grants are different things
+
+Half a review went on an argument that turned out to be terminological. Two
+objects had one word:
+
+| | Lives | Expires | Answers |
+| --- | --- | --- | --- |
+| **assignment** | here, in the directory | optionally | a peer this machine already admitted |
+| **grant** | nowhere — it travels | always, in minutes | a peer this machine has *never* admitted |
+
+An assignment is a profile on a peer: visible in `hail peers`, revoked by
+`block` or `forget`, and durable by default because re-authorising your own
+phone every five minutes is not security, it is friction.
+
+A grant is a signed assertion carried over the wire so a third machine can be
+told, by one it trusts, that a stranger is allowed something. It is minted on
+demand and stored by nobody. **A non-expiring grant is refused** — at that point
+it is an assignment that lives nowhere, appears in no list, and survives
+`forget`.
+
+The test for which you want: *does the verifier already know this peer?* If yes,
+it is an assignment. Grants exist for exactly the case where it does not.
+
+### Optional expiry belongs on assignments
+
+`--until 7d` raises a peer's profile for a while and then lets it fall back to
+what it held before — a temporary raise, not a temporary existence, with the
+fallback captured when the raise happens rather than guessed at months later.
+
+This is safer than an expiring grant, and it is worth being precise about why:
+**the clock is local.** A grant's expiry is a timestamp one machine writes and
+another believes, inheriting every question about skew. An assignment's expiry
+is checked by the machine that made the decision, against its own clock, when
+the question is asked. Nothing to skew, nothing to trust.
+
+It is resolved on read rather than swept on a timer, because a directory that
+only tells the truth while a daemon is running is worse than one that works it
+out when asked. And it is shown wherever profiles are — `[operator until
+2026-09-01T…]` — since a peer that silently stops working is the same failure as
+a key conflict nobody was told about.
+
+The precedent was already here: `hail daemon --debug [minutes]` opens a
+diagnostics window that closes itself. This generalises it.
+
+### The gap that made an indefinite grant look necessary
+
+`hail profiles` could pin a profile and set its rejection style, and could not
+**define** one. The library took custom profiles; nothing exposed making one, so
+"my phone may use the tunnel and nothing else" meant editing the state file by
+hand. `hail profiles add <name> --allows a,b` closes it. Ergonomics were pushing
+toward the wrong mechanism.
+

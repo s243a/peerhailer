@@ -237,6 +237,56 @@ export function listProfiles(custom = {}) {
  * @param {string} name
  * @param {boolean} pinned
  */
+/**
+ * Define a profile, or change what an existing one grants.
+ *
+ * The library has always taken custom profiles; nothing exposed making one, so
+ * the only way to say "my phone may use the tunnel and nothing else" was to
+ * edit the state file. That gap is why an indefinite *grant* looked like the
+ * available answer to a question a profile should have answered.
+ *
+ * Built-ins are not editable. Renaming what `trusted` means underneath a person
+ * who assigned it would change every peer holding it at once, silently.
+ *
+ * @param {Record<string, any> | undefined} custom
+ * @param {string} name
+ * @param {{allows: string[], description?: string}} definition
+ */
+export function setProfile(custom, name, definition) {
+  if (name in BUILT_IN_PROFILES) {
+    throw new Error(`${name} is built in; choose another name`);
+  }
+  const allows = [...new Set((definition?.allows ?? []).filter((c) => typeof c === "string" && c))];
+  return {
+    ...custom,
+    [name]: {
+      ...(custom?.[name] ?? {}),
+      name,
+      allows,
+      ...(definition?.description ? { description: definition.description } : {}),
+    },
+  };
+}
+
+/**
+ * Remove a profile someone defined. Built-ins stay.
+ *
+ * @param {Record<string, any> | undefined} custom
+ * @param {string} name
+ */
+export function removeProfile(custom, name) {
+  if (!custom || !(name in custom)) return custom ?? {};
+  const { [name]: _gone, ...rest } = custom;
+  return rest;
+}
+
+/**
+ * Move a profile to the top of the list, or let it fall back.
+ *
+ * @param {Record<string, any> | undefined} custom
+ * @param {string} name
+ * @param {boolean} pinned
+ */
 export function setPinned(custom, name, pinned) {
   const existing = custom?.[name] ?? {};
   return { ...custom, [name]: { ...existing, pinned } };

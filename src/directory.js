@@ -68,6 +68,8 @@ export function createDirectory(state = {}) {
    * @typedef {import("./peerRecord.js").PeerRecord & {
    *   profile: string,
    *   conflicts?: {key: string, firstSeen: number, lastSeen: number, count: number, via?: string}[],
+   *   profileUntil?: number,
+   *   profileAfter?: string,
    * }} StoredPeer
    */
   /** @type {Map<string, StoredPeer>} */
@@ -78,7 +80,7 @@ export function createDirectory(state = {}) {
   for (const peer of state.admitted ?? []) {
     const record = makePeerRecord(peer);
     if (record) {
-      admitted.set(record.name, { ...record, profile: peer.profile ?? DEFAULT_PROFILE });
+      admitted.set(record.name, keepOurs(record, { ...peer, profile: peer.profile ?? DEFAULT_PROFILE }));
     }
   }
   const blocklist = {
@@ -116,11 +118,17 @@ export function createDirectory(state = {}) {
    * A peer is admitted *into a profile*, which is what it may then ask for.
    * `trusted` unless another is named — the common case is your own machines.
    *
+   * `until` raises that profile for a while and then lets it fall back to
+   * whatever the peer held before — a temporary raise, not a temporary
+   * existence. The clock is this machine's, checked when the question is asked,
+   * which is what makes it safer than an expiry one machine writes and another
+   * believes.
+   *
    * @param {any} peer
-   * @param {{profile?: string}} [options]
+   * @param {{profile?: string, until?: number}} [options]
    * @returns {(import("./peerRecord.js").PeerRecord & {profile: string}) | null}
    */
-  function admit(peer, { profile } = {}) {
+  function admit(peer, { profile, until } = {}) {
     const record = makePeerRecord(peer);
     if (!record) return null;
     const existing = admitted.get(record.name) ?? null;
@@ -132,10 +140,20 @@ export function createDirectory(state = {}) {
     const heardOf = candidates.has(record.name);
     const broughtAddress = record.addresses.length > 0;
     const fallback = heardOf && !broughtAddress ? trust.candidateProfile : trust.admitProfile;
+    // What it reverts to is captured now, while we still know what it was
+    // raised from. Working it out at expiry means guessing months later.
+    const elevation =
+      until && profile
+        ? { profileUntil: until, profileAfter: asOfNow(existing)?.profile ?? fallback ?? DEFAULT_PROFILE }
+        : existing?.profileUntil
+          ? { profileUntil: existing.profileUntil, ...(existing.profileAfter ? { profileAfter: existing.profileAfter } : {}) }
+          : {};
+
     const withProfile = {
       ...merged,
       profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
       ...(existing?.conflicts?.length ? { conflicts: existing.conflicts } : {}),
+      ...elevation,
     };
     admitted.set(withProfile.name, withProfile);
     candidates.delete(withProfile.name);
@@ -239,6 +257,28 @@ export function createDirectory(state = {}) {
   }
 
   /**
+   * The peer as it stands *now*, with a lapsed elevation already fallen back.
+   *
+   * Resolved on read rather than swept on a timer: a sweep needs something
+   * running, and a directory that only tells the truth while a daemon is up is
+   * worse than one that computes it when asked.
+   *
+   * The clock is ours, which is the whole reason this is safer than an expiring
+   * grant. A grant's expiry is a timestamp one machine writes and another
+   * believes; this one is checked by the machine that made the decision,
+   * against its own clock, at the moment of use.
+   *
+   * @param {any} record
+   */
+  function asOfNow(record) {
+    if (!record?.profileUntil || record.profileUntil > now()) return record;
+    // The elevation lapsed. Reverting to what it was raised *from* is the least
+    // surprising answer: a temporary raise, not a temporary existence.
+    const { profileUntil: _lapsed, profileAfter, ...rest } = record;
+    return { ...rest, profile: profileAfter ?? trust.candidateProfile ?? DEFAULT_PROFILE };
+  }
+
+  /**
    * Re-attach what belongs to us rather than to the peer.
    *
    * `makePeerRecord` builds a record from what a peer says about itself, which
@@ -255,6 +295,8 @@ export function createDirectory(state = {}) {
       ...rebuilt,
       profile: previous?.profile,
       ...(previous?.conflicts?.length ? { conflicts: previous.conflicts } : {}),
+      ...(previous?.profileUntil ? { profileUntil: previous.profileUntil } : {}),
+      ...(previous?.profileAfter ? { profileAfter: previous.profileAfter } : {}),
     };
   }
 
@@ -377,7 +419,7 @@ export function createDirectory(state = {}) {
      * @param {string} name
      */
     effectiveProfile: (name) => {
-      const record = admitted.get(name);
+      const record = asOfNow(admitted.get(name));
       const candidate = candidates.get(name);
       return profileFor({
         peer: record ?? candidate?.record ?? { name },
@@ -394,7 +436,7 @@ export function createDirectory(state = {}) {
      * @param {string} capability
      */
     allowsCapability: (name, capability) => {
-      const record = admitted.get(name);
+      const record = asOfNow(admitted.get(name));
       const candidate = candidates.get(name);
       if (!record && !candidate) {
         // A caller we have never heard of still gets whatever the unknown
@@ -429,7 +471,10 @@ export function createDirectory(state = {}) {
       candidates.clear();
       for (const peer of state?.admitted ?? []) {
         const record = makePeerRecord(peer);
-        if (record) admitted.set(record.name, keepOurs(record, { profile: peer.profile ?? DEFAULT_PROFILE, conflicts: peer.conflicts }));
+        // The whole stored record as `previous`, so keepOurs decides what is ours.
+        // Enumerating fields at each call site meant every new one had to be added
+        // in several places, and an elevation was dropped on load.
+        if (record) admitted.set(record.name, keepOurs(record, { ...peer, profile: peer.profile ?? DEFAULT_PROFILE }));
       }
       for (const peer of state?.candidates ?? []) {
         const record = makePeerRecord(peer);

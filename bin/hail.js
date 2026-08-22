@@ -20,7 +20,7 @@ import { hostname } from "node:os";
 
 import { createDirectory } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
-import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
+import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
@@ -122,6 +122,24 @@ const persist = () =>
 if (!stored.self || stored.self.name !== directory.self.name || !stored.self.publicKey) persist();
 
 /** A key given inline, or read from a file — PEMs are easier to hand over as files. */
+/**
+ * When an elevation should lapse: an ISO date, or a duration like `7d`, `2h`.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function untilFromFlag(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const text = value.trim();
+  const duration = /^(\d+)\s*(m|h|d|w)$/i.exec(text);
+  if (duration) {
+    const units = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+    return Date.now() + Number(duration[1]) * units[duration[2].toLowerCase()];
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 const publicKeyFromFlags = () => {
   const source = typeof flags["key-file"] === "string" ? "key-file" : typeof flags.key === "string" ? "key" : null;
   if (!source) return null;
@@ -150,7 +168,11 @@ const describe = (peer) => {
   const effective = directory.effectiveProfile(peer.name);
   const routes = peer.addresses.map((a) => `${a.transport}:${a.value}`).join(", ") || "no address";
   const seen = peer.lastSeen ? new Date(peer.lastSeen).toISOString() : "never";
-  const profile = `[${effective.profile}]`;
+  const lapses =
+    peer.profileUntil && peer.profileUntil > Date.now()
+      ? ` until ${new Date(peer.profileUntil).toISOString()}`
+      : "";
+  const profile = `[${effective.profile}${lapses}]`;
   const key = peer.publicKey ? fingerprint(peer.publicKey).slice(0, 14) : "no key";
   const line = `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})`;
   // A competing key is the one thing here a person must not scroll past: the
@@ -201,13 +223,21 @@ switch (command) {
     const [name, address] = rest;
     if (!name) fail("usage: hail add <name> [address]");
     const transport = typeof flags.transport === "string" ? flags.transport : "other";
+    // An elevation without a profile to raise to is a no-op the user meant as
+    // something; say so rather than admitting them and quietly ignoring it.
+    const until = "until" in flags ? untilFromFlag(flags.until) : null;
+    if ("until" in flags && until === null) fail("--until wants a date, or a duration like 7d or 2h");
+    if (until && typeof flags.profile !== "string") fail("--until raises a profile: say which with --profile");
+
     const admitted = directory.admit(
       {
         name,
         addresses: address ? [{ transport, value: address, lastOk: null }] : [],
         ...(publicKeyFromFlags() ? { publicKey: publicKeyFromFlags() } : {}),
       },
-      ...(typeof flags.profile === "string" ? [{ profile: flags.profile }] : []),
+      ...(typeof flags.profile === "string"
+        ? [{ profile: flags.profile, ...(until ? { until } : {}) }]
+        : []),
     );
     if (!admitted) fail("a name is required");
     persist();
@@ -426,6 +456,30 @@ switch (command) {
 
   case "profiles": {
     const [action, target] = rest;
+    if (action === "add") {
+      if (!target) fail("usage: hail profiles add <name> --allows hail,directory");
+      const allows = typeof flags.allows === "string" ? flags.allows.split(",").map((c) => c.trim()) : [];
+      if (allows.length === 0) fail("a profile that grants nothing is `known`; use --allows");
+      try {
+        stored.profiles = setProfile(stored.profiles ?? {}, target, {
+          allows,
+          ...(typeof flags.description === "string" ? { description: flags.description } : {}),
+        });
+      } catch (error) {
+        fail(String(error instanceof Error ? error.message : error));
+      }
+      directory.useProfiles({ ...collectProfiles([hailPlugin]), ...stored.profiles });
+      persist();
+      log(`profile ${target} grants ${allows.join(", ")}`);
+      break;
+    }
+    if (action === "remove") {
+      if (!target) fail("usage: hail profiles remove <name>");
+      stored.profiles = removeProfile(stored.profiles ?? {}, target);
+      persist();
+      log(`profile ${target} removed; peers holding it fall back to the default`);
+      break;
+    }
     if (action === "reject") {
       const [, name, style] = rest;
       if (!name || (style !== "deny" && style !== "drop")) {
@@ -469,14 +523,17 @@ switch (command) {
         "  hail status                  what this machine is, and who it knows",
         "  hail peers                   admitted peers, and candidates heard of",
         "  hail add <name> [address]    admit a peer  (--transport lan|tailscale|... --profile trusted --key <pem>)",
+        "    ... --until 7d | <date>    raise its profile for a while, then fall back",
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
+        "    ... add <name> --allows a,b   define one",
+        "    ... remove <name>          and remove it",
         "    ... pin|unpin <name>       change which profile is offered first",
         "    ... reject <name> deny|drop  answer a refused peer, or close on it",
-        "  hail rotate <name> --key-file F  replace the key held for a peer
-  hail forget <name>           remove a peer, admitted or not",
+        "  hail rotate <name> --key-file F  replace the key held for a peer",
+        "  hail forget <name>           remove a peer, admitted or not",
         "  hail block|unblock <name>    deny a peer everything, by key where we hold one",
         "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",
