@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 
 import { createDirectory } from "../src/directory.js";
-import { defaultIdentityPath, fingerprint, loadIdentity } from "../src/identity.js";
+import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { listProfiles, setPinned, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
@@ -123,8 +123,27 @@ if (!stored.self || stored.self.name !== directory.self.name || !stored.self.pub
 
 /** A key given inline, or read from a file — PEMs are easier to hand over as files. */
 const publicKeyFromFlags = () => {
-  if (typeof flags["key-file"] === "string") return readFileSync(flags["key-file"], "utf8").trim();
-  return typeof flags.key === "string" ? flags.key : null;
+  const source = typeof flags["key-file"] === "string" ? "key-file" : typeof flags.key === "string" ? "key" : null;
+  if (!source) return null;
+
+  let raw;
+  if (source === "key-file") {
+    try {
+      raw = readFileSync(String(flags["key-file"]), "utf8");
+    } catch {
+      fail(`--key-file could not be read: ${flags["key-file"]}`);
+    }
+  } else {
+    raw = String(flags.key);
+  }
+
+  // Asking for a key and getting nothing usable is a failed hand-off, not a
+  // request to trust on first use. `--key "$(cat missing.pub)"` yields an empty
+  // string, and admitting keyless there silently grants less checking than was
+  // asked for — the peer reads `no key` in a line nobody re-reads.
+  const key = normalizeKey(raw);
+  if (!key) fail(`--${source} did not contain a usable public key`);
+  return key;
 };
 
 const describe = (peer) => {
