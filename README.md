@@ -107,6 +107,14 @@ The report carries the node's clock, every peer's effective profile with the
 reason for it, and recent refusals — which are recorded whether or not the
 window is open, since you always want to know why something failed a minute ago.
 
+Before reaching for that, the shape of the failure already says a lot. Nothing
+listening looks different from a firewall dropping packets, which looks different
+from this machine refusing you: the first fails at once, the second hangs, and
+the third closes the connection without a word. `docs/cli.md` has the table, and
+the case that catches people out — a peer reachable over Tailscale and not over
+the LAN, because a default-DROP firewall accepts the tunnel's own chain and
+nothing else.
+
 ## Three rules it will not bend
 
 **Records carry no credentials.** A record travels to every peer that asks, so
@@ -136,13 +144,19 @@ transport are separate concerns, so no particular overlay becomes a dependency.
 hail name sol                   # set this machine's name
 hail id                         # print its public key, for handing over
 hail status                     # what this machine is, and who it knows
-hail add luna http://host:8787 --key-file luna.pub    # admit a peer
+hail add luna host:7645 --key-file luna.pub    # admit a peer
 hail profiles                   # what each capability profile grants
 hail walk                       # ask known peers who else they know
 hail peers                      # admitted peers, and candidates heard of
+hail rotate luna --key-file new.pub    # replace a key, deliberately
 hail forget mars                # remove one, admitted or not
-hail daemon --port 8787         # answer hails from other machines
+hail daemon --port 7645 --hail-on wlan0,tailscale0 --ui
 ```
+
+`hail` is available after `npm link` from the checkout; `node bin/hail.js` works
+without it. A walkthrough from clone to two machines talking, including firewall
+diagnosis and what each kind of refusal means, is in
+[docs/cli.md](docs/cli.md).
 
 The directory is plain JSON under `~/.config/peerhailer/`. Small enough to read,
 edit and diff by hand — which matters for a tool whose bad day looks like
@@ -191,14 +205,20 @@ capability, which no default profile grants.
 ## A page to look at it
 
 ```bash
-hail daemon --port 8787     # then open http://127.0.0.1:8787/
+hail daemon --port 7645 --ui     # then open http://127.0.0.1:7645/
 ```
 
-One self-contained page, served by the daemon on loopback: every peer with the
-profile that *actually applies* and the reason for it, everything heard of but
-not admitted, and buttons for the decisions that are safe to take quickly.
-Loopback only — a page that can admit and block should not be reachable from
-elsewhere.
+One self-contained page, served on loopback: every peer with the profile that
+*actually applies* and the reason for it, everything heard of but not admitted,
+buttons for the decisions that are safe to take quickly, and a tree of what this
+machine holds and what a caller would actually receive — gate by gate.
+
+**Off unless asked for.** The control listener exists only for the page, so
+without `--ui` there is no port a browser can reach at all. That matters more
+than it sounds: a page you visit anywhere can send requests to `127.0.0.1`, and
+while the reply is hidden from it, the effect is not. What is served checks the
+content type, the origin and the host for that reason, and cross-origin use is
+an allowlist that starts empty.
 
 ## Plugins
 
