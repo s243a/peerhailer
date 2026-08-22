@@ -206,3 +206,16 @@ test("adopting state carries the trust defaults, not just the peers", () => {
   assert.equal(directory.trust().candidateProfile, "unknown");
   assert.equal(directory.trust().admitProfile, "trusted", "unset fields keep their value");
 });
+
+test("an address you can type is an address that can be dialled", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  // People type host:port. Stored values are used as a URL base, so without
+  // this the peer is reported unreachable — which reads as "it is down".
+  directory.admit({ name: "sol", addresses: [{ transport: "lan", value: "192.168.1.50:7645" }] });
+  assert.equal(directory.get("sol").addresses[0].value, "http://192.168.1.50:7645");
+  assert.doesNotThrow(() => new URL(`${directory.get("sol").addresses[0].value}/hail`));
+
+  // An explicit scheme is never second-guessed.
+  directory.admit({ name: "mars", addresses: [{ transport: "tailscale", value: "https://mars.ts.net" }] });
+  assert.equal(directory.get("mars").addresses[0].value, "https://mars.ts.net");
+});
