@@ -607,3 +607,62 @@ diagnostics window that closes itself. This generalises it.
 hand. `hail profiles add <name> --allows a,b` closes it. Ergonomics were pushing
 toward the wrong mechanism.
 
+## The control API answers only its own page
+
+Binding to loopback keeps the network out. It does nothing about the browser you
+are already running: any page you visit can issue a request to `127.0.0.1`, and
+while the reply is unreadable to it, the **effect** lands. Demonstrated rather
+than argued — one line of `curl` shaped like a browser's simple request admitted
+a peer as `trusted`:
+
+```
+curl -X POST -H 'content-type: text/plain' \
+  -d '{"name":"csrf-demo","profile":"trusted"}' http://127.0.0.1:7645/api/peers
+```
+
+Three checks, none of them authentication. They are the difference between a
+local API and an API every website can reach.
+
+**Content type.** Only `application/json` is accepted for anything with a body.
+`text/plain`, form encodings and the rest are *simple* request types a page may
+send without asking permission first; requiring JSON forces a preflight, and we
+answer no preflight, so the request is never sent.
+
+**Origin.** A request carrying an `Origin` that is not this page's own is
+refused, reads included. Cross-origin reads were already blocked by the browser
+— we send no `Access-Control-Allow-Origin` — but blocking the *reply* still lets
+the request run.
+
+**Host.** Only names this daemon actually bound. Origin and Host agreeing proves
+nothing: a page at `evil.example` whose DNS answers `127.0.0.1` sends both as
+`evil.example`, and a check comparing them to each other calls that same-origin,
+after which the browser hands over the reply. Answering only to names we chose
+is what closes it.
+
+### The order is part of the rule
+
+The guard runs **above every control route**, and that is a requirement rather
+than a tidiness preference:
+
+1. plugin routes — authenticated on their own terms, unaffected
+2. **the guard**, for paths this door serves (`/` and `/api/*`)
+3. control routes
+
+It was written below `/api/peers` GET first, and reads walked straight past it
+while writes were refused — a hole that reads exactly like a working fix. **A
+control route added above the guard is unguarded, silently.** A test covers the
+read path specifically, so moving the guard back down fails the suite rather
+than passing quietly.
+
+It is scoped to paths this door serves so an unknown path still answers "no such
+thing" rather than "refused", which tells a stranger less.
+
+### Cross-origin is an allowlist, and empty
+
+`--allow-origin http://localhost:3000` names an origin that may use the control
+API, and there is no wildcard. A named origin also receives the CORS headers and
+a preflight answer, because an allowlist without them refuses in the browser
+while appearing to permit. The default is empty: the page this daemon serves is
+same-origin and needs nothing, and a page you did not write has no business
+admitting peers.
+

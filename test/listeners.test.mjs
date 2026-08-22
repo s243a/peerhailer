@@ -63,3 +63,77 @@ test("an address that cannot be bound is skipped, not fatal", async () => {
     await daemon.close();
   }
 });
+
+test("the control API refuses what a web page could have sent", async () => {
+  const identity = generateIdentity();
+  const directory = createDirectory({ self: { name: "me", publicKey: identity.publicKey } });
+  directory.admit({ name: "sol", profile: "trusted" });
+
+  const daemon = createDaemon({ directory, identity, plugins: [hailPlugin] });
+  const { port } = await daemon.listen({ port: 0 });
+  const url = `http://127.0.0.1:${port}`;
+
+  try {
+    // A simple request: text/plain is not preflighted, so a page can send it
+    // without asking. This admitted a peer as `trusted` before the guard.
+    const simplePost = await fetch(`${url}/api/peers`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ name: "csrf", profile: "trusted" }),
+    });
+    assert.equal(simplePost.status, 403);
+    assert.equal(directory.get("csrf"), null, "and nothing was admitted");
+
+    // Reads too: the guard has to sit above every control route, not among
+    // them. It was below `/api/peers` GET once, and reads walked past it.
+    const foreignRead = await fetch(`${url}/api/peers`, { headers: { origin: "https://evil.example" } });
+    assert.equal(foreignRead.status, 403, "a page may not read the directory either");
+
+    // Rebinding: Host and Origin agree with each other and with nothing we
+    // bound. Comparing them to each other calls this same-origin.
+    const rebound = await fetch(`${url}/api/peers`, {
+      headers: { host: "evil.example", origin: "http://evil.example" },
+    });
+    assert.equal(rebound.status, 403);
+
+    // The page this daemon serves is unaffected.
+    assert.equal((await fetch(`${url}/api/peers`)).status, 200);
+    assert.equal((await fetch(`${url}/`)).status, 200);
+    const own = await fetch(`${url}/api/peers`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ name: "invited", profile: "known" }),
+    });
+    assert.equal(own.status, 200, "same-origin JSON is how the page talks to it");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("a named origin is allowed, and only that one", async () => {
+  const identity = generateIdentity();
+  const directory = createDirectory({ self: { name: "me", publicKey: identity.publicKey } });
+  const daemon = createDaemon({
+    directory,
+    identity,
+    plugins: [hailPlugin],
+    allowedOrigins: ["http://localhost:3000"],
+  });
+  const { port } = await daemon.listen({ port: 0 });
+  const url = `http://127.0.0.1:${port}`;
+
+  try {
+    const named = await fetch(`${url}/api/peers`, { headers: { origin: "http://localhost:3000" } });
+    assert.equal(named.status, 200);
+    assert.equal(
+      named.headers.get("access-control-allow-origin"),
+      "http://localhost:3000",
+      "an allowlist without the header refuses in the browser while appearing to permit",
+    );
+
+    const other = await fetch(`${url}/api/peers`, { headers: { origin: "http://localhost:3001" } });
+    assert.equal(other.status, 403, "a list of one is a list of one");
+  } finally {
+    await daemon.close();
+  }
+});

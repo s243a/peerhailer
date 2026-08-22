@@ -385,6 +385,14 @@ switch (command) {
       const until = diagnostics.open(Number.isFinite(forMs) ? forMs : DEFAULT_WINDOW_MS);
       log(`[diagnostics] window open until ${new Date(until).toISOString()}`);
     }
+    // Off unless named: a page you did not write should not be able to admit
+    // peers, and the page this daemon serves is same-origin anyway.
+    const allowedOrigins =
+      typeof flags["allow-origin"] === "string"
+        ? flags["allow-origin"].split(",").map((entry) => entry.trim()).filter(Boolean)
+        : [];
+    if (allowedOrigins.length) log(`[api] also answering ${allowedOrigins.join(", ")}`);
+
     const daemon = createDaemon({
       directory,
       identity,
@@ -580,6 +588,7 @@ switch (command) {
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
+        "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",
         "",
         "  --state <path>               use a different directory file",

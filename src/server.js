@@ -83,6 +83,16 @@ export function createDaemon({
   profiles = {},
   diagnostics,
   plugins = [],
+  /**
+   * Origins allowed to use the control API from a browser. Empty by default:
+   * a page you did not write has no business admitting peers, and the common
+   * case is the page this daemon serves itself, which is same-origin.
+   *
+   * Anyone building their own front end names theirs here, and gets the CORS
+   * headers that make it work — an allowlist without them would refuse in the
+   * browser while appearing to permit.
+   */
+  allowedOrigins = [],
   applyChange,
   log = () => {},
 }) {
@@ -330,6 +340,58 @@ export function createDaemon({
   const pluginRoutes = collectRoutes(plugins, { log });
 
   /**
+   * Refuse anything a web page could have sent on your behalf.
+   *
+   * Binding to loopback keeps the network out. It does nothing about the
+   * browser you are already running: any page you visit can issue a request to
+   * `127.0.0.1`, and while the reply is unreadable to it, the *effect* lands.
+   * A `text/plain` POST admitted a peer as `trusted` in one line of `fetch`.
+   *
+   * Two checks, both cheap. Requiring `application/json` makes a state-changing
+   * request non-simple, so a browser must preflight it — and we answer no
+   * preflight, so it is never sent. Refusing a foreign `Origin` covers what is
+   * left, including a page that finds another way to shape the request.
+   *
+   * Neither is authentication. They are the difference between a local API and
+   * an API every website can reach.
+   *
+   * @param {import("node:http").IncomingMessage} request
+   */
+  const cameFromAPage = (request) => {
+    // A hostname we never bound means somebody pointed a name at us.
+    const hostHeader = String(request.headers.host ?? "");
+    const hostname = hostHeader.replace(/:\d+$/, "").toLowerCase();
+    if (!controlNames.has(hostname)) return true;
+
+    const origin = request.headers.origin;
+    if (typeof origin === "string" && origin !== "" && !isOwnOrigin(origin, request)) {
+      return !allowedOrigins.includes(origin);
+    }
+
+    const method = request.method ?? "GET";
+    if (method === "GET" || method === "HEAD") return false;
+
+    // Only `application/json` is preflighted; the simple types are what a page
+    // may send without asking us first.
+    const type = String(request.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    return type !== "application/json";
+  };
+
+  /**
+   * @param {string} origin
+   * @param {import("node:http").IncomingMessage} request
+   */
+  const isOwnOrigin = (origin, request) => {
+    const host = request.headers.host;
+    if (!host) return false;
+    try {
+      return new URL(origin).host === host;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
    * The request handler, told which door this arrived at.
    *
    * `control` serves the page and `/api/*`, which hold no authentication of
@@ -368,6 +430,34 @@ export function createDaemon({
           return turnAway(response, refusalStyle(proven));
         }
         return send(response, 200, result ?? {});
+      }
+
+      const origin = String(request.headers.origin ?? "");
+      const namedOrigin = scope === "control" && origin !== "" && allowedOrigins.includes(origin);
+      if (namedOrigin) {
+        response.setHeader("access-control-allow-origin", origin);
+        response.setHeader("vary", "origin");
+        if (request.method === "OPTIONS") {
+          // The preflight. Answered only for origins someone named; every other
+          // page gets no answer and so never sends the request itself.
+          response.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+          response.setHeader("access-control-allow-headers", "content-type");
+          response.writeHead(204);
+          response.end();
+          return;
+        }
+      }
+
+      // Only what this door actually serves. Guarding everything meant an
+      // unknown path answered "refused" rather than "no such thing", which says
+      // something about this machine that a 404 does not.
+      const controlPath = url.pathname === "/" || url.pathname.startsWith("/api/");
+      if (scope === "control" && controlPath && cameFromAPage(request)) {
+        // Said plainly, because a silent 403 here reads as a bug in the page.
+        log(`[api] refused a cross-origin ${request.method} ${url.pathname}`);
+        return send(response, 403, {
+          error: "refused: send application/json from this page's own origin",
+        });
       }
 
       if (scope === "control" && url.pathname === "/" && request.method === "GET") {
@@ -471,6 +561,20 @@ export function createDaemon({
     }
   };
 
+  /**
+   * Names the control door will answer to.
+   *
+   * Origin and Host agreeing proves nothing on its own: a page at
+   * `evil.example` whose DNS answers `127.0.0.1` sends both as `evil.example`,
+   * and a check that compares them to each other calls that same-origin. What
+   * makes it a rebinding attack is that the browser then treats the reply as
+   * readable — so the directory it wanted is handed over.
+   *
+   * Answering only to names we chose is what closes it: a rebound request
+   * carries the attacker's hostname, which is not one of them.
+   */
+  const controlNames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
   const control = createServer(handlerFor("control"));
   /** @type {import("node:http").Server[]} */
   const hailServers = [];
@@ -491,6 +595,8 @@ export function createDaemon({
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */
     listen: ({ port = 8787, host = "127.0.0.1" } = {}) =>
       new Promise((resolve) => {
+        // Whatever it was told to bind is a name it may answer to.
+        controlNames.add(String(host).toLowerCase());
         control.listen(port, host, () => {
           // A TCP listen always yields AddressInfo; the union covers pipes.
           const address = /** @type {import("node:net").AddressInfo} */ (control.address());
