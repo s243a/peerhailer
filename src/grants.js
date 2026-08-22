@@ -26,6 +26,23 @@
  * a credential in all but name, and a credential is the thing this design keeps
  * refusing to store.
  *
+ * Be precise about what expiry buys, because it is easy to credit it with the
+ * wrong thing. A grant is not a bearer token because it *names its subject* —
+ * an intercepted one is useless without the private key whatever its lifetime.
+ * What expiry buys is **bounded revocation latency**, and nothing else.
+ *
+ * Which means renewal is safer than holding only if each renewal is a fresh
+ * authorisation decision — the subject's standing now, not the standing it had
+ * when the first one was minted. A renewal that only re-mints is a standing
+ * permission wearing a grant's clothes. The at-use blocklist check in the server
+ * is what makes the difference real rather than rhetorical; without it, expiry
+ * was the only thing limiting a revoked grant, and the TTL was load-bearing.
+ *
+ * With that check, a longer TTL becomes an honest policy choice about how long
+ * revocation may take. A grant that never expires is still refused: at that
+ * point it is a profile assignment that lives nowhere, appears in no list, and
+ * survives `forget` — and the visible version of that already exists.
+ *
  * @module grants
  */
 import { canonicalize, normalizeKey, sameKey, signPayload, verifyPayload } from "./identity.js";
