@@ -113,6 +113,36 @@ stop two machines talking, and no policy here changes that — the honest answer
 that availability is the transport's problem, and a fabric of personally-owned
 machines fails visibly rather than silently when a link goes.
 
+## Better: separate the routes, not the labels
+
+The design above labels a listener and checks the label when a capability is
+used. There is a simpler implementation of the same rule, and it follows from
+noticing that **a listener is the unit of firewall policy** — two things needing
+different rules need different sockets, because a rule can only tell them apart
+by port.
+
+So rather than labelling and checking: **serve tunnel routes only on the
+encrypted listener.** A peer arriving over the plaintext LAN does not get a
+refusal; it gets a 404, because the route is not there. No label, no lookup, no
+branch — the same reason the control API is on its own socket instead of being
+filtered inside a handler. Enforcement by socket cannot be got wrong by editing a
+conditional.
+
+It also composes with the operating system for free. Different ports mean
+`iptables` can admit hails from the household LAN while admitting tunnels only
+from the tailnet, without peerhailer being involved in the decision at all — and
+a firewall rule that names one port is a rule whose scope a person can read.
+
+What the in-app check is still needed for is the case where one listener carries
+both — a TLS listener that qualifies for tunnels *and* serves hails. When TLS
+arrives, "encrypted" stops being a property of which socket you bound and starts
+being a property of the connection, and then something has to ask. Until then,
+sockets are enough.
+
+The same applies to anything else wanting its own rule: an arbitrary-source chat
+belongs on its own port, so it can be filtered without touching the port peers
+use.
+
 ## Two other shapes, and why not
 
 ### Rules that travel with the traffic
