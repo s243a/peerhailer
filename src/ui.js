@@ -80,6 +80,12 @@ export function renderPage(self) {
 
 <script type="module">
 const $ = (id) => document.getElementById(id);
+// Escapes ampersand, angle brackets and the double quote. Every attribute this
+// page builds is double-quoted, so a peer name — which arrives in a signed
+// record, travels by gossip, and is therefore text an attacker chose — cannot
+// close one. Single quotes are deliberately not escaped, which means a
+// single-quoted attribute must never be introduced here.
+// (No backticks in this comment: it lives inside the page template.)
 const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 async function api(path, options) {

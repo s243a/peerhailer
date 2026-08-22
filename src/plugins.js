@@ -101,6 +101,15 @@ export function validatePlugin(plugin) {
     if (typeof route?.path !== "string" || !route.path.startsWith("/")) {
       return { ok: false, error: `${plugin.name}: route path must start with /` };
     }
+    // Reserved for the core. Plugin routes are matched before the scope and
+    // origin checks — that is right for `/hail`, which authenticates every
+    // caller itself — but it means a plugin claiming `/api/peers` would both
+    // shadow the control endpoint and answer outside the cross-origin guard.
+    // Refused at load rather than left to whoever writes the first plugin that
+    // wants a nice-looking path.
+    if (route.path === "/" || route.path === "/api" || route.path.startsWith("/api/")) {
+      return { ok: false, error: `${plugin.name}: ${route.path} is reserved for the core API` };
+    }
     if (typeof route?.capability !== "string" || route.capability.length === 0) {
       // The load-bearing check. A route without a capability is a route with no
       // gate, and this is the last place that can be noticed.

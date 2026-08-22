@@ -33,10 +33,12 @@ export default {
         // profile granting only `hail` would have leaked the directory in
         // silence.
         //
-        // A caller admitted on a grant rather than a profile gets the identity
-        // and not the list: what a grant carries cannot be re-checked here, and
-        // withholding is the safe direction.
-        const maySeePeers = directory.allowsCapability(caller.name, DIRECTORY);
+        // A grant that carries `directory` is an issuer saying so deliberately,
+        // in something signed, scoped and expiring. Ignoring it made a grant
+        // weaker than an assignment, which is backwards.
+        const maySeePeers =
+          directory.allowsCapability(caller.name, DIRECTORY) ||
+          (caller.grantedCapabilities ?? []).includes(DIRECTORY);
         if (!maySeePeers) answer.peers = [];
         log(`[hail] ${caller.name} answered with ${answer.peers.length} peers`);
         // Signed, so the addresses in it are a claim only this machine's key

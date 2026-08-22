@@ -65,3 +65,53 @@ test("blocking a peer stops a grant it already holds", async () => {
     await daemon.close();
   }
 });
+
+test("a grant carrying `directory` grants it, and one that does not does not", async () => {
+  const me = generateIdentity();
+  const issuer = generateIdentity();
+  const guest = generateIdentity();
+
+  const directory = createDirectory({ self: { name: "me", publicKey: me.publicKey } });
+  directory.useProfiles({
+    delegator: { name: "delegator", allows: ["hail", "directory", "delegate"] },
+  });
+  directory.admit({ name: "issuer", publicKey: issuer.publicKey, profile: "delegator" });
+  directory.admit({ name: "someone", profile: "trusted" });
+
+  const mint = (capabilities) =>
+    mintGrant({
+      issuer: "issuer",
+      issuerKey: issuer.publicKey,
+      privateKey: issuer.privateKey,
+      subjectKey: guest.publicKey,
+      capabilities,
+    });
+
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin] });
+  const { port } = await daemon.listen({ port: 0 });
+
+  const ask = async (grant) => {
+    const from = { name: "guest", at: Date.now() };
+    const response = await fetch(`http://127.0.0.1:${port}/hail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from, signature: signPayload(from, guest.privateKey), grant }),
+    });
+    return response.ok ? response.json() : { status: response.status };
+  };
+
+  try {
+    // Hail alone: answered, and told nothing about who this machine knows.
+    const narrow = await ask(mint(["hail"]));
+    assert.ok(narrow.self, "a grant for hail is answered");
+    assert.deepEqual(narrow.peers, [], "and carries no directory");
+
+    // A grant that says `directory` is an issuer saying so deliberately, in
+    // something signed and expiring. Ignoring it made grants weaker than
+    // assignments, which is backwards.
+    const wide = await ask(mint(["hail", "directory"]));
+    assert.equal(wide.peers.length, 2, "a grant for directory is honoured");
+  } finally {
+    await daemon.close();
+  }
+});

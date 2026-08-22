@@ -189,6 +189,11 @@ export function createDaemon({
     // Until this existed the hole was bounded only by the five-minute TTL: block
     // a peer holding a fresh grant and it kept working until the clock ran out.
     // That also makes the TTL a policy choice rather than the only defence.
+    // Blocking is the instrument here, and only blocking. Demoting a peer does
+    // *not* revoke a grant it already holds: the grant records what an issuer
+    // allowed, expiry bounds how long that lasts, and block is what says "now".
+    // Worth stating because a renewal loop lives on this path, and somebody will
+    // try to end a tunnel by demoting its subject and be wrong.
     const subject = { publicKey: checked.grant.subjectKey, name: body?.from?.name };
     if (isBlocked(directory.blocklist(), subject)) {
       debugRefusal(`grant presented by a blocked peer`, body?.from?.name ?? "unnamed");
@@ -247,6 +252,10 @@ export function createDaemon({
     // Two ways to be someone here. Either this machine admitted you and holds
     // your key, or you carry a grant naming your key — which is how a peer
     // nobody admitted can still be let in, on the say-so of one who was.
+    // A peer admitted by address with no key yet, and presenting no grant, has
+    // nothing to be checked against and is refused. That resolves itself on the
+    // first verified `walk` contact, which binds the key — but until then a
+    // keyless peer cannot hail in, which reads like a bug when you meet it.
     const presenterKey = known?.publicKey ?? body?.grant?.grant?.subjectKey ?? null;
     if (!presenterKey) {
       return debugRefusal(`unknown peer ${claim.name}, and no grant naming a key`, claim.name);
@@ -290,7 +299,16 @@ export function createDaemon({
     const viaGrant = grantAllows(body, key, capability);
     if (viaGrant) {
       log(`[grant] ${name} used ${viaGrant.issuer}'s grant for ${capability}`);
-      return known ?? { name, publicKey: key, viaGrant: viaGrant.issuer };
+      // The grant's capabilities travel with the caller. Without them a route
+      // could only ask about the caller's *profile*, so a peer let in by a
+      // signed, scoped, expiring grant was strictly weaker than one holding an
+      // assignment — which inverts what a grant is: a peer nobody admitted,
+      // vouched for deliberately.
+      return {
+        ...(known ?? { name, publicKey: key }),
+        viaGrant: viaGrant.issuer,
+        grantedCapabilities: [...(viaGrant.capabilities ?? [])],
+      };
     }
     return debugRefusal(`${name} has no ${capability} capability`, name);
   };

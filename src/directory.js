@@ -18,7 +18,7 @@
  *
  * @module directory
  */
-import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
+import { makePeerRecord, MAX_CONFLICTS, mergePeerRecord, publicRecord } from "./peerRecord.js";
 import { normalizeKey, sameKey } from "./identity.js";
 import {
   allows,
@@ -335,7 +335,10 @@ export function createDirectory(state = {}) {
       seen.push({ key, firstSeen: at, lastSeen: at, count: 1, ...(via ? { via: via.value } : {}) });
     }
 
-    const updated = { ...record, conflicts: seen };
+    // Newest first, capped. Warning fatigue is the failure mode: a list nobody
+    // can read is a list nobody reads.
+    seen.sort((a, b) => b.lastSeen - a.lastSeen);
+    const updated = { ...record, conflicts: seen.slice(0, MAX_CONFLICTS) };
     admitted.set(name, updated);
     return updated;
   }
@@ -377,7 +380,13 @@ export function createDirectory(state = {}) {
       // Peers granted nothing are still ours to know about, but telling others
       // where to find a machine we deliberately do not answer would hand out a
       // reachability we chose not to use.
+      // Through `asOfNow`, like every other question about a peer's profile.
+      // Reading the stored field meant a raise that had expired went on being
+      // gossiped: `effectiveProfile` said the peer had fallen back, and this
+      // went on telling the fabric it was hail-able. A lapse has to be resolved
+      // wherever the profile is consulted, not only where it is displayed.
       peers: [...admitted.values()]
+        .map(asOfNow)
         .filter((record) => profileFor({ peer: record, directory: api, blocklist }).profile !== BLOCKED_PROFILE)
         .filter((record) => allows(record.profile, "hail", profileSet))
         .map((record) => publicRecord(record))
@@ -455,7 +464,7 @@ export function createDirectory(state = {}) {
       return allows(profile, capability, profileSet);
     },
     /** @param {string} name */
-    profileFor: (name) => resolveProfile(admitted.get(name)?.profile, profileSet),
+    profileFor: (name) => resolveProfile(asOfNow(admitted.get(name))?.profile, profileSet),
     /**
      * Take on state written by somebody else.
      *

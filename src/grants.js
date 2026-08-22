@@ -45,6 +45,8 @@
  *
  * @module grants
  */
+import { randomBytes } from "node:crypto";
+
 import { canonicalize, normalizeKey, sameKey, signPayload, verifyPayload } from "./identity.js";
 
 /** Long enough to use, short enough that a copy is not worth keeping. */
@@ -113,8 +115,10 @@ export function mintGrant({
     notBefore: now,
     expires: now + Math.min(Math.max(Number(ttlMs) || 0, 1_000), MAX_TTL_MS),
     // Not for replay prevention — the expiry bounds that — but so two grants
-    // minted in the same millisecond are distinguishable in a log.
-    nonce: nonce ?? Math.random().toString(36).slice(2, 12),
+    // minted in the same millisecond are distinguishable in a log. Taken from
+    // the CSPRNG anyway: `Math.random` in a file about credentials invites a
+    // correct complaint, and costs nothing to avoid.
+    nonce: nonce ?? randomBytes(6).toString("hex"),
   };
   return { grant: body, signature: signPayload(body, privateKey) };
 }

@@ -130,3 +130,24 @@ test("a plugin refuses without deciding how that looks", async () => {
   assert.equal(refusal[REFUSE], true);
   assert.equal(refusal.reason, "because");
 });
+
+test("a plugin may not claim the core's paths", () => {
+  // Plugin routes are matched before the scope and origin checks — correct for
+  // `/hail`, which authenticates its own callers — so a plugin claiming an API
+  // path would shadow the control endpoint *and* answer outside the guard.
+  for (const path of ["/api/peers", "/api", "/"]) {
+    const verdict = validatePlugin({
+      name: "greedy",
+      routes: [{ method: "POST", path, capability: "hail", handler: () => ({}) }],
+    });
+    assert.equal(verdict.ok, false, `${path} must be refused`);
+    assert.match(verdict.error, /reserved for the core/);
+  }
+
+  // Anything else is still fine, including paths that merely look similar.
+  const fine = validatePlugin({
+    name: "polite",
+    routes: [{ method: "POST", path: "/apiary", capability: "hail", handler: () => ({}) }],
+  });
+  assert.equal(fine.ok, true);
+});
