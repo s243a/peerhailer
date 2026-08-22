@@ -25,6 +25,7 @@ import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
+import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -374,11 +375,19 @@ switch (command) {
     // The CLI is opinionated where the library is not: a daemon that answers no
     // hails is not a daemon. Someone composing their own host loads whichever
     // of these they want, and opens no endpoints by default.
+    // Declared endpoints become a tunnel plugin; declare none and the routes do
+    // not exist, which is the difference between a service being refused and a
+    // service not being there.
+    const tunnels = stored.tunnels ?? {};
     const plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
+      ...(Object.keys(tunnels).length ? [createTunnelPlugin({ endpoints: tunnels })] : []),
       ...(await loadPlugins(stored.plugins ?? [], { log })),
     ];
+    for (const [name, address] of Object.entries(tunnels)) {
+      log(`[tunnel] ${name} -> ${address} (needs tunnel:${name})`);
+    }
     // Profiles a plugin suggests have to be known before anyone is asked
     // whether they hold one — bundled plugins included, which is where the
     // `operator` profile comes from.
@@ -492,6 +501,41 @@ switch (command) {
     break;
   }
 
+  case "tunnels": {
+    const [action, name, address] = rest;
+    const tunnels = stored.tunnels ?? {};
+
+    if (action === "add") {
+      if (!name || !address) fail("usage: hail tunnels add <name> <host:port>");
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a tunnel name is letters, digits and dashes");
+      // Written down here, and named by callers. A peer says `acp`; it never
+      // says an address, or this is a port forward into whatever trusts
+      // localhost for the reason that nothing remote should reach it.
+      stored.tunnels = { ...tunnels, [name]: address };
+      persist();
+      log(`tunnel ${name} -> ${address}`);
+      log(`peers need the ${`tunnel:${name}`} capability; no profile grants it yet`);
+      break;
+    }
+
+    if (action === "remove") {
+      if (!name) fail("usage: hail tunnels remove <name>");
+      const { [name]: _gone, ...rest2 } = tunnels;
+      stored.tunnels = rest2;
+      persist();
+      log(`tunnel ${name} removed`);
+      break;
+    }
+
+    const names = Object.keys(tunnels);
+    if (names.length === 0) {
+      log("no tunnels declared. hail tunnels add <name> <host:port>");
+      break;
+    }
+    for (const entry of names) log(`  ${entry.padEnd(12)} -> ${tunnels[entry]}   needs tunnel:${entry}`);
+    break;
+  }
+
   case "plugins": {
     const [action, specifier] = rest;
     if (action === "add" || action === "remove") {
@@ -592,6 +636,7 @@ switch (command) {
         "    ... --until 7d | <date>    raise its profile for a while, then fall back",
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
+        "  hail tunnels [add|remove]    endpoints a peer may reach, by name",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",
