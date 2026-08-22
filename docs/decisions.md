@@ -813,3 +813,57 @@ rather than optional forever: it is not extra safety on top of what works, it is
 what makes the fabric work off the tailnet at all. Nothing is re-judged when it
 lands; a listener's label changes and the capability follows.
 
+## A chat plugin, and the danger of an unauthenticated one
+
+Not presence and not discovery, so a plugin — which is what plugins are for, and
+it keeps anyone who does not want a chat from having one. **Memory only**: a
+message dies with the process, nothing reaches the directory file, and the
+credential-free invariant survives contact with a feature whose obvious use is
+passing a pairing URL to somebody.
+
+The proposed second half is where the care goes: piping an **arbitrary
+connection** into the chat, labelled by its source address rather than by a peer
+name, for talking to something that is not a peer.
+
+### Why that combination is a phishing surface
+
+Three things we have already discussed, put together: a chat, senders nobody
+authenticated, and the habit of passing pairing URLs through it. An unauthenticated
+sender writes *"here is your pairing URL"*, and a person pastes it into T3. The
+five-minute TTL does not help; the human does the work. This is the one place in
+the design where the payload and the channel make each other worse.
+
+So, if it exists at all:
+
+- **Off by default**, and a separate setting from the chat capability itself.
+- **Never rendered as a peer.** An address, visibly distinct, never resolved to a
+  name — a name is what makes a message look vouched for.
+- **Never actionable.** No clickable links and nothing that shortens the path
+  from an unauthenticated message to a redeemed credential.
+- Probably a **separate inbox** rather than a label in the same view. A label on
+  a busy screen is a thing people stop seeing; a different place is not.
+
+The reservation is narrow rather than fatal: the feature is useful exactly when
+you cannot authenticate the other end, which is exactly when you cannot tell a
+stranger from the machine you were expecting.
+
+### Source lists bound reachability, not identity
+
+Allow and deny lists in the manner of iptables are the right instinct and the
+right size. Two things to be clear about.
+
+**They are the weaker of two options where both exist.** The operating system
+already has a firewall, better tested than anything here, and the listener
+machinery already binds per interface — so on Linux the honest answer is a
+firewall rule plus a bound address. An app-level list earns its place on Windows,
+where there is no `iptables` to lean on, and for visibility: a list the GUI can
+show is a list someone will read.
+
+**And they say where, never who.** A rule about `192.168.1.0/24` is a rule about
+whatever holds those addresses today. It reduces "anyone" to "anyone in the
+house", which is worth having and is not authentication.
+
+If built: **CIDR, never string patterns** — `192.168.1.*` also matches
+`192.168.10.5` and has nothing to say about IPv6. Deny checked before allow, and
+default deny, so an empty configuration admits nobody rather than everybody.
+
