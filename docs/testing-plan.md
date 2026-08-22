@@ -43,7 +43,8 @@ interface spends its attention on the polish.
 | What | What to look for |
 | --- | --- |
 | **The GUI in a real browser** | It has only ever been fetched with `curl`. Does it render, does the profile picker work, does blocking update, does it survive a daemon restart, does it look sane in dark mode? |
-| **Two real machines** | Everything so far is loopback. Two boxes on a LAN, then one over Tailscale: do addresses get learned, does the right route win, does a laptop that moved get found again? Procedure: [two-machines.md](two-machines.md). |
+| ~~**Two real machines**~~ | **Tailscale done.** Two machines, one of them the PuppyLinux box, exchanged a signed hail with keys compared out of band; `last seen` moved off `never`. Six bugs came out of it, none of which the tests would have found — see below. Procedure: [two-machines.md](two-machines.md). |
+| **The LAN half** | **Not tested.** The PuppyLinux box runs a default-DROP firewall, and Tailscale installs its own `ts-input` chain, so the tailnet is accepted and the LAN is dropped. Nothing in peerhailer is wrong — the daemon answers on its own LAN address. Deferred rather than worked around, because opening the port would also expose the unauthenticated control API to the household network. See "Two ports" in [decisions.md](decisions.md). |
 | **The old PuppyLinux box** | The machine this is meant to serve. Does it install and run at all? |
 | **T3 `agy-dual-gated`** | Verified at the bridge, never through T3's UI. Do the approval cards appear with the command text? |
 

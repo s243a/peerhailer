@@ -468,3 +468,29 @@ could confer a capability, joining a café network would hand it to strangers.
 Port scanning is deliberately not offered. It is reconnaissance, it trips
 intrusion detection, and `nmap` composes with `hail add` for anyone who wants it.
 
+## Two ports, so the firewall means what it says
+
+The control API and the page hold no authentication of their own; their boundary
+is that they normally answer only on loopback. `--host 0.0.0.0` removes that
+boundary for everything at once, which is why the LAN half of the two-machine
+test is deferred: opening a firewall port for hails would also open the endpoint
+that admits peers.
+
+The fix is not to filter `/api/*` by socket inside the request handler. That is a
+check that can be got wrong, and being wrong once is enough. **Two listeners:**
+
+| Listener | Binds | Serves |
+| --- | --- | --- |
+| control | `127.0.0.1` | the page, `/api/*` |
+| hail | chosen interfaces | `/hail`, plugin routes |
+
+The separation is then enforced by the operating system rather than by a
+conditional — the control API is not listening on the external interface, so
+there is nothing to reach and nothing to get wrong. A firewall rule admitting the
+hail port admits only hails, which is what someone writing that rule believes
+they are doing.
+
+It also makes the accept policy in [discovery.md](discovery.md) implementable as
+stated: which interfaces answer hails becomes a property of a socket, not a
+branch. **Not built** — `createDaemon` binds once today.
+
