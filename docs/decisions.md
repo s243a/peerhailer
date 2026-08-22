@@ -792,7 +792,16 @@ one answers whatever helps. The only path facts worth anything already have
 cryptography behind them: the origin signature, and whether the immediate peer
 differs from it.
 
-It composes with TLS rather than competing: the rule is not "untrusted network,
-no tunnels" but "no tunnels *in plaintext*", so pinning a certificate to the
-peer's key restores the capability over the same wire.
+The label is **encrypted**, not *trusted*. "Trusted" is a judgement about who
+else is on a segment — unfalsifiable and prone to drift. "Encrypted" is a claim
+about the link, it is the property that matters for a protocol that is signed and
+not encrypted, and it becomes true by configuring something rather than by
+deciding something.
+
+So today tunnels run over Tailscale and nowhere else, because that is the only
+encrypted link this project has. TLS pinned to the peer's key makes a direct
+peer-to-peer wire qualify — which is the payoff, and the reason TLS is next
+rather than optional forever: it is not extra safety on top of what works, it is
+what makes the fabric work off the tailnet at all. Nothing is re-judged when it
+lands; a listener's label changes and the capability follows.
 

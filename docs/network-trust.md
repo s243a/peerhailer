@@ -31,17 +31,34 @@ listens can.
 
 The rule that follows: **enforce on what is observed; treat the rest as a hint.**
 
-## The recommendation: label the listeners
+## The recommendation: label the listeners by whether the link is encrypted
 
-Networks get a trust label locally, attached to the thing already in the config:
+The first draft labelled networks *trusted* and *untrusted*. That is the wrong
+word, and the right one is narrower.
+
+"Trusted" is a judgement about who else is on a segment — unfalsifiable, prone to
+drift, and it ages badly the moment a new device joins. **"Encrypted" is a claim
+about the link**, it is the property that actually matters for a plaintext
+protocol, and it becomes true by *doing* something rather than by deciding
+something. The label goes on the listener:
 
 ```
-hail daemon --hail-on tailscale0 --hail-on wlan0:untrusted
+hail daemon --hail-on tailscale0:encrypted --hail-on wlan0
 ```
 
-A capability may then require a trusted arrival. `tunnel:acp` does; `hail` does
-not. A peer holding `tunnel:acp` that reaches this machine over the labelled-
-untrusted LAN is refused *that capability* and keeps the rest — the peer is
+`tailscale0` is encrypted because WireGuard is underneath. A plain HTTP listener
+on `wlan0` is not. The same `wlan0` behind TLS pinned to the peer's key is —
+without anyone revisiting a judgement about the household.
+
+Tunnels then require an encrypted arrival, and that is the default rather than an
+option. `hail` does not require one: identity is signed, so a readable hail leaks
+who this machine knows and cannot be forged, while a readable *tunnel* leaks
+whatever crossed it.
+
+Still operator-asserted — this cannot verify that WireGuard is under
+`tailscale0`. But asserting a fact about a link is a smaller act than asserting a
+judgement about a network, and a wrong one is discoverable. A peer holding `tunnel:acp` that reaches this machine over a plaintext LAN
+listener is refused *that capability* and keeps the rest — the peer is
 still admitted, still hailed, still gossiped with. It has lost a privilege, not
 an identity.
 
@@ -92,22 +109,30 @@ already names.
 So: no path validation. One observed fact at the exit, one signed fact about the
 origin, and a hint from the peer for diagnosis.
 
-## How TLS composes
+## What this means today, and what TLS changes
 
-Labelling a network untrusted says the wire is readable. Once a link is TLS with
-the certificate pinned to the peer's key, that stops being true — the segment is
-still shared, and the conversation is not.
+**Today: tunnels over Tailscale, and nowhere else.** That is the only encrypted
+link this project has, so it is the only place the capability survives. The
+household LAN carries hails and not tunnels — which is a real restriction rather
+than a formality, and the honest state of a project whose protocol is signed and
+not encrypted.
 
-So the rule is not "untrusted network, no tunnels" but "**untrusted network, no
-tunnels in plaintext**". Pinned TLS restores the capability over the same wire.
-That is the argument for TLS being next after this rather than optional forever,
-and for the label describing *the link* rather than the place.
+**With TLS pinned to the peer's key, the same wire qualifies.** The segment is
+still shared and the conversation is not, so a direct peer-to-peer link becomes a
+place tunnels may run without Tailscale underneath. That is the payoff, and the
+reason TLS is next rather than optional forever: it is not extra safety on top of
+what works, it is what makes the fabric work off the tailnet at all.
+
+Note what does *not* need revisiting when that lands. No trust judgement changes,
+no peer is re-admitted, no capability is re-granted. A listener's label goes from
+plaintext to encrypted because something was configured, and the capability
+follows.
 
 ## Testing it
 
 The household LAN is a real untrusted network on real hardware:
 
-1. Label it: `--hail-on wlan0:untrusted --hail-on tailscale0`
+1. Label it: `--hail-on wlan0 --hail-on tailscale0:encrypted`
 2. `hail` still works over the LAN — identity is unaffected
 3. A tunnel over the LAN is refused, naming the reason
 4. The same tunnel over the tailnet succeeds, same peer, same key
