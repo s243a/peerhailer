@@ -549,16 +549,19 @@ and ACP needs the agent to originate messages — `session/update` streams, and
 it needs no change to what a plugin is, and the question worth answering first is
 whether a remote peer may drive an agent at all.
 
-A second endpoint follows the same rule and makes it sharper: T3 reaching another
-T3. The obvious version tunnels the token on request, which removes the storage
-problem and leaves a smaller one — the asking instance holds a credential
-briefly. The better version never moves it: the exit opens a loopback connection
-to its own T3 and attaches its own token, so the remote authenticates as a peer
-and no credential crosses at all. Revocation becomes `hail block` rather than
-rotating a secret everyone shares. The cost is that such an exit is a confused
-deputy, acting with full local authority on someone else's instructions — which
-is why it is its own capability, opened against a grant, bounded by source and
-destination.
+A second endpoint follows the same rule: T3 reaching another T3, without the
+long-lived token going anywhere. It is minted on request instead — scoped and
+expiring, which T3 already supports — so what crosses is a derived credential
+worthless a few minutes later, and revocation stays per-peer rather than meaning
+"rotate a secret everyone shares".
+
+Terminating the session at the exit, so that nothing token-shaped crosses at all,
+is cleaner on paper and was the first answer. It was wrong: T3 authenticates with
+a bearer header, a `wsTicket` parameter and a DPoP variant bound to the holder's
+key, so an exit attaching its own credential has to be a real T3 client and the
+entrance has to be pairable — protocol machinery at both ends, in a design whose
+point is that a second endpoint needs no second plugin. A derived credential
+keeps the tunnel knowing nothing, which is what everything else here rests on.
 
 That capability does not belong in `trusted`. Driving an agent executes code;
 `trusted` means hailing and seeing who we know. It gets its own profile the way

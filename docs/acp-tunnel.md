@@ -283,27 +283,34 @@ The namespace design starts from a T3 token crossing a clipboard to reach
 another instance. The tunnel removes the need for that, and there are two ways
 to do it — one obvious and one better.
 
-**Fetch it on request.** Nothing is stored ahead of time; the token is asked for
-when needed and carried sealed. That removes the storage problem, and leaves a
-smaller one: the asking instance now holds a credential, briefly, in a second
-place. Briefly is better than permanently. It is not the same as never.
+**Mint one on request, scoped and expiring.** Nothing is stored ahead of time
+and the long-lived token never moves. T3 already supports this: a session
+carries `expiresAt`, and a pairing carries scopes. So the thing that crosses is
+not the credential — it is a *derived* one, narrower and short-lived, which is
+`mintGrant` semantics wearing T3's clothes.
 
-**Or terminate the session at the machine that owns it.** The tunnel exit opens
-a loopback connection to the local T3 and attaches the local token itself. The
-remote peer authenticates as a *peer* — a key this machine admitted — and never
-sees a credential, because none crossed. This is the same shape as the ACP
-endpoint: the conversation travels, the thing that grants authority does not.
+- **Revocation stays per-peer.** Stop minting, or `hail block`. Rotating a
+  shared token ends everyone's access, which is the reason nobody rotates.
+- **The secret that matters never leaves.** What crosses expires on its own,
+  so a copy left behind is worthless rather than dangerous.
+- **The tunnel stays a byte carrier**, which is the property everything else
+  here depends on.
 
-The second is worth the extra thought:
+**The alternative, and why it is not the recommendation.** The exit could
+terminate the session itself: open a loopback connection to the local T3,
+attach its own credential, and let the remote authenticate purely as a peer, so
+that nothing resembling a token crosses at all. Cleaner on paper, and it is what
+"offers, not values" would suggest.
 
-- **Revocation becomes per-peer.** `hail block` ends one machine's access.
-  Rotating a shared token ends everyone's, which is the reason nobody rotates.
-- **There is nothing to store, so no decision about how to store it.** Every
-  question about protecting a secret at rest disappears rather than being
-  answered.
-- **It is what "offers, not values" already says.** The leaf is *I will act on
-  your behalf*, not *here is my token* — which is the rule
-  [shared-namespace.md](shared-namespace.md) sets for the whole namespace.
+The cost is that it stops being a tunnel. The entrance has to be something a
+local T3 client can pair with and open a WebSocket against; the exit has to be a
+real T3 client holding its own credential — T3 authenticates with a bearer
+header, a `wsTicket` query parameter, and a DPoP variant bound to the holder's
+key. That is protocol machinery at both ends, for one endpoint, in a design
+whose whole point is that a second endpoint needs no second plugin.
+
+A derived credential that expires is the better trade: the tunnel keeps knowing
+nothing, and what it carries is worthless a few minutes later.
 
 ### The cost, said plainly
 
