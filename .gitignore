@@ -2,3 +2,16 @@ node_modules/
 *.log
 .DS_Store
 types/
+
+# Anything belonging to a running peer, rather than to the project.
+#
+# Setting two machines up means keys and state files land in whatever directory
+# you were standing in, which is usually this one. The private key is the whole
+# of an identity — committing one hands it to anyone who can read the repo, and
+# a public key or directory tells strangers who you talk to.
+*.pem
+*.key
+*.pub
+directory.json
+peerhailer-state*.json
+.peerhailer/
