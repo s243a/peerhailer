@@ -12,7 +12,7 @@
  * @module builtin/hailPlugin
  */
 import { signRecord } from "../peerRecord.js";
-import { HAIL } from "../profiles.js";
+import { DIRECTORY, HAIL } from "../profiles.js";
 
 export default {
   name: "hail",
@@ -26,6 +26,18 @@ export default {
       /** @param {any} input */
       handler: ({ caller, directory, identity, log }) => {
         const answer = directory.hailResponse();
+        // Two gates, not one. `hail` says you may ask who this machine is;
+        // `directory` says you may also learn who it knows. They were one gate
+        // until now — anything that could hail got the peer list, which is not
+        // what `trusted` describing them separately implies, and a custom
+        // profile granting only `hail` would have leaked the directory in
+        // silence.
+        //
+        // A caller admitted on a grant rather than a profile gets the identity
+        // and not the list: what a grant carries cannot be re-checked here, and
+        // withholding is the safe direction.
+        const maySeePeers = directory.allowsCapability(caller.name, DIRECTORY);
+        if (!maySeePeers) answer.peers = [];
         log(`[hail] ${caller.name} answered with ${answer.peers.length} peers`);
         // Signed, so the addresses in it are a claim only this machine's key
         // could have made rather than whatever the network delivered.
