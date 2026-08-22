@@ -124,6 +124,49 @@ Not an optional plugin. If the allowlist were a separate install, the unfiltered
 tunnel would be what you get by following the instructions, and the safe
 configuration would be the one you had to remember.
 
+## Three roles, and who has to trust whom
+
+A machine can play three parts, and they are separate permissions because they
+are separate risks:
+
+| Role | The ask | Capability | Costs you |
+| --- | --- | --- | --- |
+| **origin** | I want to reach an endpoint | — | nothing here |
+| **transit** | carry this onward for me | `RELAY` | bandwidth, exposure, being a party to it |
+| **exit** | deliver this to your local endpoint | `tunnel:<name>` | whatever that endpoint can do |
+
+`RELAY` already exists and `carrier` already grants it; the per-endpoint
+capability is new. Both are ordinary capabilities, so **whether they live in one
+list or two is the operator's choice, not the design's**: a profile is a named
+set, and someone who wants a peer to both carry and terminate writes one profile
+granting both. A peer holds one profile, so combining is how you express "these
+machines do everything for me" — and keeping them apart is how you express "this
+box relays but is never a destination".
+
+That falls out of the profile model rather than needing anything added, which is
+a decent sign the model was cut in the right place.
+
+### Transit checks the neighbour; exit checks the origin
+
+The two roles ask different questions, and swapping them breaks both.
+
+**Exit must check the origin, not the last hop.** If an exit only asked "does the
+peer handing me this hold the endpoint capability", then any trusted relay could
+launder anyone's traffic into a local endpoint — the relay holds it, so the check
+passes, and whoever actually sent it was never examined. The origin signature
+exists precisely so the exit can ask about the party that matters.
+
+**Transit must check both ends.** A relay decision has two parties: who asked,
+and where it is going. Only checking the asker means a peer with `RELAY` can use
+this machine to reach *anyone* — including peers this machine has blocked. That
+would make blocking defeatable by indirection, which is worth stating as a rule:
+
+> **A relay must never be usable to reach a peer this machine has blocked.**
+
+Blocking is by key, so the check is available; it just has to be made on the
+next hop as well as on the requester. Without it, `hail block` protects only the
+front door.
+
 ## Identity travels with the payload
 
 Sealing hides the content from the fabric. It does not hide the sender, because
