@@ -185,3 +185,27 @@ test("the fabric decides who reaches an endpoint, not the tunnel", async () => {
     await service.close();
   }
 });
+
+test("ownership compares keys, not strings", async () => {
+  const service = await shoutingService();
+  const plugin = createTunnelPlugin({ endpoints: { echo: `127.0.0.1:${service.port}` } });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const { generateIdentity } = await import("../src/identity.js");
+  const identity = generateIdentity();
+  // The same key, spelled with and without the trailing newline a PEM may or
+  // may not carry. Strict equality says these are different keys.
+  const opener = { name: "sol", publicKey: `${identity.publicKey.trimEnd()}\n` };
+  const returning = { name: "sol", publicKey: identity.publicKey.trimEnd() };
+  assert.notEqual(opener.publicKey, returning.publicKey, "the strings differ");
+
+  try {
+    const { id } = await call(routes, "/tunnel/echo/open", { caller: opener });
+    await settle();
+    const polled = await call(routes, "/tunnel/echo/poll", { caller: returning, body: { id } });
+    assert.notEqual(polled[REFUSE], true, "the same key must not be locked out of its own tunnel");
+    await call(routes, "/tunnel/echo/close", { caller: returning, body: { id } });
+  } finally {
+    await service.close();
+  }
+});

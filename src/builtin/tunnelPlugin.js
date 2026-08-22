@@ -28,6 +28,7 @@
  */
 import { connect } from "node:net";
 
+import { sameKey } from "../identity.js";
 import { REFUSE } from "../plugins.js";
 
 /** Read from a socket without waiting: what has arrived by now, or nothing. */
@@ -79,7 +80,11 @@ export function createTunnelPlugin({ endpoints = {}, now = Date.now, connectImpl
   const ownedBy = (id, caller) => {
     const tunnel = open.get(String(id ?? ""));
     if (!tunnel) return null;
-    return tunnel.peerKey && caller?.publicKey === tunnel.peerKey ? tunnel : null;
+    // `sameKey`, never `===`. A PEM carries whitespace that is not part of the
+    // key, so a key can compare unequal to itself and lock its owner out of
+    // their own tunnel. This project has made that mistake before, which is why
+    // the helper exists.
+    return tunnel.peerKey && sameKey(caller?.publicKey, tunnel.peerKey) ? tunnel : null;
   };
 
   /** @param {any} tunnel */
