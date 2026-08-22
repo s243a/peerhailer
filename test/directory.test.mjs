@@ -219,3 +219,31 @@ test("an address you can type is an address that can be dialled", () => {
   directory.admit({ name: "mars", addresses: [{ transport: "tailscale", value: "https://mars.ts.net" }] });
   assert.equal(directory.get("mars").addresses[0].value, "https://mars.ts.net");
 });
+
+test("a competing key is recorded and warned about, never accepted", () => {
+  const original = generateIdentity();
+  const other = generateIdentity();
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.admit({ name: "sol", publicKey: original.publicKey, addresses: [] });
+
+  directory.noteKeyConflict("sol", other.publicKey, { transport: "lan", value: "http://10.0.0.9:7645" });
+  const seen = directory.get("sol");
+
+  assert.ok(sameKey(seen.publicKey, original.publicKey), "the key held keeps working");
+  assert.equal(seen.conflicts.length, 1);
+  assert.ok(sameKey(seen.conflicts[0].key, other.publicKey));
+
+  // Seeing it again counts it rather than duplicating it.
+  directory.noteKeyConflict("sol", other.publicKey);
+  assert.equal(directory.get("sol").conflicts.length, 1);
+  assert.equal(directory.get("sol").conflicts[0].count, 2);
+
+  // Stamping a route must not quietly drop the warning.
+  directory.markReachable("sol", { transport: "lan", value: "http://10.0.0.9:7645" });
+  assert.equal(directory.get("sol").conflicts?.length, 1, "a conflict survives a record being rebuilt");
+
+  // Only a person resolves it, and doing so clears what was reported.
+  const rotated = directory.rotateKey("sol", other.publicKey);
+  assert.ok(sameKey(rotated.publicKey, other.publicKey));
+  assert.equal(rotated.conflicts, undefined);
+});

@@ -120,6 +120,10 @@ export async function walk(directory, options = {}) {
     // have its directory merged into ours. The reply is signed, so check it.
     const proof = verifyRecord(result.response?.signed, peer.publicKey ?? null);
     if (!proof.ok) {
+      // A key we do not hold, proven by whoever presented it, is worth keeping:
+      // it is either a rotation or an impostor, and one line of output that
+      // scrolls past is not enough for a person to notice either.
+      if (proof.presentedKey) directory.noteKeyConflict(peer.name, proof.presentedKey, result.address);
       unreachable.push({ name: peer.name, error: `answered by someone else: ${proof.error}` });
       continue;
     }

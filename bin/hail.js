@@ -152,7 +152,21 @@ const describe = (peer) => {
   const seen = peer.lastSeen ? new Date(peer.lastSeen).toISOString() : "never";
   const profile = `[${effective.profile}]`;
   const key = peer.publicKey ? fingerprint(peer.publicKey).slice(0, 14) : "no key";
-  return `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})`;
+  const line = `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})`;
+  // A competing key is the one thing here a person must not scroll past: the
+  // key held keeps working, so nothing breaks to make them look.
+  const conflicts = Array.isArray(peer.conflicts) ? peer.conflicts : [];
+  if (conflicts.length === 0) return line;
+  return [
+    line,
+    ...conflicts.map(
+      (c) =>
+        `    ! also answered as ${peer.name} holding ${fingerprint(c.key).slice(0, 14)}` +
+        ` (${c.count}x, first ${new Date(c.firstSeen).toISOString()})`,
+    ),
+    `    ! the key above is still the trusted one. If this machine's key changed,`,
+    `    !   hail rotate ${peer.name} --key-file <new.pub>`,
+  ].join("\n");
 };
 
 switch (command) {
@@ -245,6 +259,27 @@ switch (command) {
     };
     persist();
     log(`trust model is now ${model}`);
+    break;
+  }
+
+  case "rotate": {
+    // Separate from `add` on purpose. Adding merges and never replaces a key,
+    // which is what stops a peer talking us out of the identity we hold for it;
+    // this is the door a person opens, and it takes the new key explicitly so
+    // it cannot be done by accident.
+    const [name] = rest;
+    if (!name) fail("usage: hail rotate <name> --key-file <new.pub>");
+    const key = publicKeyFromFlags();
+    if (!key) fail("hail rotate needs the new key: --key-file <new.pub> or --key <pem>");
+    const existing = directory.get(name);
+    if (!existing) fail(`no peer called ${name}`);
+    if (existing.publicKey) {
+      log(`replacing ${fingerprint(existing.publicKey).slice(0, 14)} with ${fingerprint(key).slice(0, 14)} for ${name}`);
+    }
+    const rotated = directory.rotateKey(name, key);
+    if (!rotated) fail(`could not rotate ${name}`);
+    persist();
+    log(`rotated ${describe(rotated)}`);
     break;
   }
 
@@ -440,7 +475,8 @@ switch (command) {
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... pin|unpin <name>       change which profile is offered first",
         "    ... reject <name> deny|drop  answer a refused peer, or close on it",
-        "  hail forget <name>           remove a peer, admitted or not",
+        "  hail rotate <name> --key-file F  replace the key held for a peer
+  hail forget <name>           remove a peer, admitted or not",
         "  hail block|unblock <name>    deny a peer everything, by key where we hold one",
         "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",

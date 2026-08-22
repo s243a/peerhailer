@@ -19,7 +19,7 @@
  * @module directory
  */
 import { makePeerRecord, mergePeerRecord, publicRecord } from "./peerRecord.js";
-import { sameKey } from "./identity.js";
+import { normalizeKey, sameKey } from "./identity.js";
 import {
   allows,
   ADMIT_PROFILE,
@@ -61,7 +61,16 @@ export function createDirectory(state = {}) {
     lastSeen: null,
   };
   const now = state.now ?? (() => Date.now());
-  /** @type {Map<string, import("./peerRecord.js").PeerRecord & {profile: string}>} */
+  /**
+   * What a peer says about itself, plus what is ours: the profile we assigned,
+   * and any competing key we have watched answer in its name.
+   *
+   * @typedef {import("./peerRecord.js").PeerRecord & {
+   *   profile: string,
+   *   conflicts?: {key: string, firstSeen: number, lastSeen: number, count: number, via?: string}[],
+   * }} StoredPeer
+   */
+  /** @type {Map<string, StoredPeer>} */
   const admitted = new Map();
   /** @type {Map<string, { record: import("./peerRecord.js").PeerRecord, heardFrom: string[] }>} */
   const candidates = new Map();
@@ -126,6 +135,7 @@ export function createDirectory(state = {}) {
     const withProfile = {
       ...merged,
       profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
+      ...(existing?.conflicts?.length ? { conflicts: existing.conflicts } : {}),
     };
     admitted.set(withProfile.name, withProfile);
     candidates.delete(withProfile.name);
@@ -201,9 +211,91 @@ export function createDirectory(state = {}) {
     // makePeerRecord only returns null for a nameless record, which this cannot
     // be — but a silent null here would erase a peer, so it is checked.
     if (!updated) return record;
-    const stampedRecord = { ...updated, profile: record.profile };
+    const stampedRecord = keepOurs(updated, record);
     admitted.set(name, stampedRecord);
     return stampedRecord;
+  }
+
+  /**
+   * Replace the key held for a peer, deliberately.
+   *
+   * The only path by which a held key changes. Everything else — gossip, a
+   * merge, a signed reply from a stranger — leaves it alone, because a key
+   * arriving over the wire is a claim and this is a decision. Clears the
+   * conflicts, since whatever they were reporting has now been answered by a
+   * person.
+   *
+   * @param {string} name
+   * @param {string} publicKey
+   */
+  function rotateKey(name, publicKey) {
+    const record = admitted.get(name);
+    const key = normalizeKey(publicKey);
+    if (!record || !key) return null;
+    const { conflicts: _dropped, ...rest } = record;
+    const rotated = { ...rest, publicKey: key };
+    admitted.set(name, rotated);
+    return rotated;
+  }
+
+  /**
+   * Re-attach what belongs to us rather than to the peer.
+   *
+   * `makePeerRecord` builds a record from what a peer says about itself, which
+   * is right for addresses and wrong for a profile we assigned or a conflict we
+   * observed. Anything rebuilt has to carry those back or they are quietly lost
+   * the next time a route is stamped.
+   *
+   * @param {any} rebuilt
+   * @param {any} previous
+   */
+  function keepOurs(rebuilt, previous) {
+    /** @type {any} */
+    return {
+      ...rebuilt,
+      profile: previous?.profile,
+      ...(previous?.conflicts?.length ? { conflicts: previous.conflicts } : {}),
+    };
+  }
+
+  /**
+   * Remember that something answered as this peer holding a different key.
+   *
+   * Not a decision — the key we hold keeps working, and nothing here changes
+   * what is trusted. It exists because the alternative is one line of `walk`
+   * output that scrolls past: run it again tomorrow and there is no sign
+   * anything ever disagreed.
+   *
+   * The two cases this cannot tell apart are the whole reason a person has to
+   * look. A machine whose key changed and a machine that is not this peer
+   * produce identical evidence, and only someone who knows what they did that
+   * afternoon can say which happened.
+   *
+   * Deliberately not part of `makePeerRecord`: a peer describing itself must
+   * never be able to hand us a conflict list, only to cause one.
+   *
+   * @param {string} name
+   * @param {string} publicKey
+   * @param {{transport: string, value: string}} [via]
+   */
+  function noteKeyConflict(name, publicKey, via) {
+    const record = admitted.get(name);
+    const key = normalizeKey(publicKey);
+    if (!record || !key || sameKey(key, record.publicKey)) return record ?? null;
+
+    const seen = Array.isArray(record.conflicts) ? [...record.conflicts] : [];
+    const at = now();
+    const existing = seen.findIndex((entry) => sameKey(entry.key, key));
+    const previous = existing >= 0 ? seen[existing] : undefined;
+    if (previous) {
+      seen[existing] = { ...previous, lastSeen: at, count: previous.count + 1 };
+    } else {
+      seen.push({ key, firstSeen: at, lastSeen: at, count: 1, ...(via ? { via: via.value } : {}) });
+    }
+
+    const updated = { ...record, conflicts: seen };
+    admitted.set(name, updated);
+    return updated;
   }
 
   /**
@@ -225,7 +317,7 @@ export function createDirectory(state = {}) {
     if (!record || record.publicKey) return record ?? null;
     const bound = makePeerRecord({ ...record, publicKey });
     if (!bound || !bound.publicKey) return record;
-    const kept = { ...bound, profile: record.profile };
+    const kept = keepOurs(bound, record);
     admitted.set(name, kept);
     return kept;
   }
@@ -258,6 +350,8 @@ export function createDirectory(state = {}) {
     learnFrom,
     markReachable,
     bindKey,
+    noteKeyConflict,
+    rotateKey,
     hailResponse,
     /** @param {string} name */
     /** @param {string} name */
@@ -335,7 +429,7 @@ export function createDirectory(state = {}) {
       candidates.clear();
       for (const peer of state?.admitted ?? []) {
         const record = makePeerRecord(peer);
-        if (record) admitted.set(record.name, { ...record, profile: peer.profile ?? DEFAULT_PROFILE });
+        if (record) admitted.set(record.name, keepOurs(record, { profile: peer.profile ?? DEFAULT_PROFILE, conflicts: peer.conflicts }));
       }
       for (const peer of state?.candidates ?? []) {
         const record = makePeerRecord(peer);
