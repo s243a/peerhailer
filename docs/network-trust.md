@@ -165,19 +165,50 @@ no peer is re-admitted, no capability is re-granted. A listener's label goes fro
 plaintext to encrypted because something was configured, and the capability
 follows.
 
-## Optional: dropping a privilege because of where a peer has been
+## Where a peer has been, and what to do about it
 
 Everything above is about the wire between two machines. A different worry sits
 beside it: a machine that spent an afternoon on a hostile segment may have been
-attacked while it was there, and coming home does not undo that. That is not a
-link property and no per-connection check sees it.
+attacked while it was there, and coming home does not undo that. No
+per-connection check sees it.
 
-**Off by default, and per capability.** Removing a privilege without a person
-acting is a real cost — "my laptop joined café wifi and now cannot reach my
-server" is a bad surprise — so this is a setting someone turns on for the
-capabilities where it is worth the friction, not a policy the project imposes.
+Three answers, in increasing friction, and they are worth building in this order.
 
-Which capabilities those are follows from what a compromised holder could do:
+### 1. Restrict yourself, at the moment you move
+
+A running daemon **observes its own network change** — an interface goes down, an
+address changes — as it happens. So a machine knows it has moved before it has
+been on the new segment long enough for anything to have happened to it, and can
+stop asking for tunnel capabilities immediately.
+
+That makes this the soundest of the three as well as the cheapest. It needs no
+agreement from anyone, no protocol, and no trust: a machine declining to ask for
+something is not a claim anybody has to believe. The narrow caveat is a machine
+asleep when it moves, which learns on waking.
+
+### 2. Record it where it arrives, and warn
+
+For the peers that matter this is not a self-report at all. If a peer hails me
+over a plaintext listener, I have **observed** that it was on a shared segment —
+the same fact the encrypted-arrival check already reads. Record it against the
+peer, change nothing, and warn until someone acts.
+
+That is deliberately the shape used for a competing key: evidence kept, privilege
+untouched, warning that does not scroll past. It fails *open*, which is the
+honest cost of it.
+
+Read at a moment of decision, the same record answers the narrower question too —
+*you are about to grant tunnel access to a machine that was on an unknown network
+yesterday* — so warning-at-promotion needs no separate mechanism, only somewhere
+to look.
+
+### 3. Demote automatically — opt-in, per capability
+
+For people who want it to fail closed. **Off by default**: removing a privilege
+without a person acting is a real cost, and "my laptop joined café wifi and now
+cannot reach my server" is a bad surprise.
+
+Which capabilities are worth arming follows from what a compromised holder gets:
 
 | Held by a compromised peer | What it gets them | Worth arming |
 | --- | --- | --- |
@@ -187,17 +218,29 @@ Which capabilities those are follows from what a compromised holder could do:
 | `DIRECTORY` | learns who this machine knows | rarely |
 | `HAIL` | learns this machine exists, which it already did | no |
 
-Note the tension, because it does not go away: the peer most worth arming this
-for is usually your own laptop, which is also the one you most want working. The
-friction lands hardest exactly where the protection is most valuable. That is an
-argument for making restoration trivial and the reason visible — not for
-skipping it.
+The tension does not go away: the peer most worth arming this for is usually your
+own laptop, which is also the one you most want working. The friction lands
+hardest exactly where the protection is most valuable — an argument for trivial
+restoration and a visible reason, not for skipping it.
+
+### Not this: demoting on a key conflict
+
+A tempting fourth, and wrong. Capabilities attach to a record and authentication
+is by key, so a peer presenting a *different* key already gets nothing — it is an
+unknown peer, and a genuine rotation leaves the real machine unable to
+authenticate until `hail rotate`. A changed key never carries a capability.
+
+Demoting the **record** because a conflict was seen would hand strangers a lever
+on your own directory: anyone sitting at a stale address can present a self-signed
+key, and a machine that demoted on that could have its real peers stripped from
+across the room. Recording and warning costs an attacker the same effort and buys
+them nothing.
 
 ### Believing a peer only when it costs them
 
-What triggers this is the peer's own report that it is somewhere risky, and the
-rule elsewhere in this design is that self-reports are hints rather than
-evidence. Both hold, because of an asymmetry worth stating plainly:
+Point 1 rests on a peer's own report, while this design says elsewhere that
+self-reports are hints rather than evidence. Both hold, because of an asymmetry
+worth stating plainly:
 
 **A self-report is unsafe to believe when it would grant, and safe when it would
 restrict.** A peer claiming a trusted network to *gain* a capability is claiming
@@ -205,14 +248,8 @@ something it benefits from, unverifiable, and exactly what an attacker would say
 A peer saying "I am on a café network" only ever loses something. Nobody lies
 their way into less.
 
-So the same untrusted input is usable here and not elsewhere, and the difference
-is the direction it moves privilege — which is the property to check whenever
-this design is tempted to trust a claim.
-
-The restriction can also be **self-imposed** rather than requested: a machine
-that knows where it is can simply decline to ask for tunnel capabilities while it
-is there. That needs no agreement from anyone and no mechanism at all, which
-makes it the cheapest version of this idea and the one to build first.
+That is the test to apply whenever this design is tempted to trust a claim: which
+direction does it move privilege.
 
 ## Testing it
 
