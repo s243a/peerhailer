@@ -98,6 +98,15 @@ export function createDaemon({
   log = () => {},
 }) {
   /**
+   * Every runtime mutation goes through here: applied to what is on disk now,
+   * then adopted in memory. Declared before its users rather than after,
+   * because reaching past it is how a change ends up memory-only.
+   *
+   * @param {(directory: any) => any} mutate
+   */
+  const change = (mutate) => (applyChange ? applyChange(mutate) : mutate(directory));
+
+  /**
    * Turn a caller away, in the style its profile calls for.
    *
    * `deny` answers, because a refusal a peer cannot see is one its operator
@@ -274,6 +283,13 @@ export function createDaemon({
       return debugRefusal(`unknown peer ${claim.name}, and no grant naming a key`, claim.name);
     }
     if (!verifyPayload(claim, body?.signature, presenterKey)) {
+      // A peer we hold a key for, failing to sign as itself, is the same event
+      // `walk` records when something answers at a peer's address with another
+      // key — and it is what the real owner looks like after losing a race to
+      // bind its own name. Recorded so it does not read as ordinary noise.
+      if (known?.publicKey) {
+        change((peers) => peers.noteKeyConflict(claim.name, presenterKey));
+      }
       return debugRefusal(`signature from ${claim.name} did not verify`, claim.name);
     }
     // Compare the grant's own subject against the key we hold. Comparing
@@ -297,7 +313,14 @@ export function createDaemon({
     // the grant's subject, so the signature verifies and the keyless peer's
     // profile is inherited. `bindKey` never replaces a key already held, so
     // this can only ever fill a blank.
-    if (known && !known.publicKey) directory.bindKey(claim.name, presenterKey);
+    if (known && !known.publicKey) {
+      // Through `change`, like every other mutation this daemon makes at
+      // runtime. Calling the directory straight left the binding in memory
+      // only: a restart un-bound it and reopened the window this closes, and it
+      // reintroduced exactly the disk divergence that made a daemon overwrite a
+      // second terminal's work.
+      change((peers) => peers.bindKey(claim.name, presenterKey));
+    }
 
     return { name: claim.name, key: presenterKey, known: directory.get(claim.name) ?? known ?? null };
   };
@@ -373,7 +396,6 @@ export function createDaemon({
    *
    * @param {(directory: any) => any} mutate
    */
-  const change = (mutate) => (applyChange ? applyChange(mutate) : mutate(directory));
 
   // Resolved once: a route table that changes per request is one nobody can
   // reason about, and a conflict is worth refusing at startup rather than

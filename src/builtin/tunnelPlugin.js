@@ -34,8 +34,27 @@ import { REFUSE } from "../plugins.js";
 /** Read from a socket without waiting: what has arrived by now, or nothing. */
 const MAX_BUFFERED = 1024 * 1024;
 
-/** A tunnel nobody has touched in this long is somebody's forgotten window. */
+/**
+ * A tunnel nobody has touched in this long is somebody's forgotten window.
+ *
+ * Measured from the *peer's* last call, not from socket activity: an endpoint
+ * that streams for six minutes while nobody polls is reaped. That is the right
+ * default for a request-shaped transport and a surprising one for a long-lived
+ * session, which is worth knowing before the first ACP client arrives.
+ */
 export const IDLE_MS = 5 * 60_000;
+
+/**
+ * How many tunnels may exist at once, in total and per peer.
+ *
+ * Each is a real socket and a file descriptor, so without a cap one capability
+ * holder can exhaust the daemon's descriptors and take down everything else it
+ * does — hails included. A peer authorised to reach one endpoint must not be
+ * able to deny service to the rest of the machine, and it does not take malice:
+ * a client with a reconnect loop and a bug does it by accident.
+ */
+export const MAX_TUNNELS = 64;
+export const MAX_TUNNELS_PER_PEER = 8;
 
 /**
  * The capability a named endpoint requires.
@@ -51,9 +70,15 @@ export function capabilityFor(name) {
  *   endpoints?: Record<string, string>,
  *   now?: () => number,
  *   connectImpl?: typeof connect,
+ *   sweepMs?: number,
  * }} [options]
  */
-export function createTunnelPlugin({ endpoints = {}, now = Date.now, connectImpl = connect } = {}) {
+export function createTunnelPlugin({
+  endpoints = {},
+  now = Date.now,
+  connectImpl = connect,
+  sweepMs = 30_000,
+} = {}) {
   /** id -> {socket, chunks, closed, error, peerKey, endpoint, touched} */
   const open = new Map();
 
@@ -65,6 +90,13 @@ export function createTunnelPlugin({ endpoints = {}, now = Date.now, connectImpl
       }
     }
   };
+
+  // On a timer as well as on `open`. Reaping only when a new tunnel arrives
+  // means a peer that opens one and vanishes holds a socket until somebody else
+  // happens to connect — and an attacker keeping tunnels warm with polls makes
+  // `open` reap nothing at all. Unref'd, so it never keeps a process alive.
+  const sweep = setInterval(reap, sweepMs);
+  sweep.unref?.();
 
   /**
    * The tunnel this caller is asking about, if it is theirs.
@@ -97,6 +129,12 @@ export function createTunnelPlugin({ endpoints = {}, now = Date.now, connectImpl
 
   return {
     name: "tunnel",
+    /** For a host that discards a plugin without ending the process. */
+    stop: () => {
+      clearInterval(sweep);
+      for (const tunnel of open.values()) tunnel.socket.destroy();
+      open.clear();
+    },
     description: "Carries bytes to a locally declared endpoint, for peers holding its capability.",
     capabilities: Object.keys(endpoints).map(capabilityFor),
 
@@ -111,6 +149,17 @@ export function createTunnelPlugin({ endpoints = {}, now = Date.now, connectImpl
           handler: ({ caller, log }) => {
             reap();
             if (!caller?.publicKey) return { [REFUSE]: true, reason: "no key to own a tunnel" };
+
+            if (open.size >= MAX_TUNNELS) {
+              return { [REFUSE]: true, reason: "this machine is holding as many tunnels as it will" };
+            }
+            const mine = [...open.values()].filter((entry) => sameKey(entry.peerKey, caller.publicKey));
+            if (mine.length >= MAX_TUNNELS_PER_PEER) {
+              // Per peer as well as in total, so one peer cannot spend the whole
+              // allowance and lock everyone else out of a machine they were also
+              // authorised to reach.
+              return { [REFUSE]: true, reason: "you are holding as many tunnels as you may" };
+            }
 
             const [host, port] = String(address).split(":");
             const id = `${name}-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;

@@ -9,7 +9,12 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { test } from "node:test";
 
-import { capabilityFor, createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
+import {
+  capabilityFor,
+  createTunnelPlugin,
+  IDLE_MS,
+  MAX_TUNNELS_PER_PEER,
+} from "../src/builtin/tunnelPlugin.js";
 import { collectRoutes, REFUSE } from "../src/plugins.js";
 
 /** A local service to tunnel to: echoes what it is given, in upper case. */
@@ -205,6 +210,62 @@ test("ownership compares keys, not strings", async () => {
     const polled = await call(routes, "/tunnel/echo/poll", { caller: returning, body: { id } });
     assert.notEqual(polled[REFUSE], true, "the same key must not be locked out of its own tunnel");
     await call(routes, "/tunnel/echo/close", { caller: returning, body: { id } });
+  } finally {
+    await service.close();
+  }
+});
+
+test("one peer cannot exhaust the machine's descriptors", async () => {
+  const service = await shoutingService();
+  const plugin = createTunnelPlugin({ endpoints: { echo: `127.0.0.1:${service.port}` } });
+  const routes = collectRoutes([plugin], { log: () => {} });
+  const greedy = { name: "sol", publicKey: "KEY-SOL" };
+  const other = { name: "mars", publicKey: "KEY-MARS" };
+
+  try {
+    const opened = [];
+    for (let i = 0; i < MAX_TUNNELS_PER_PEER + 3; i += 1) {
+      opened.push(await call(routes, "/tunnel/echo/open", { caller: greedy }));
+    }
+    const refusedForGreedy = opened.filter((result) => result[REFUSE]).length;
+    assert.equal(opened.length - refusedForGreedy, MAX_TUNNELS_PER_PEER, "capped per peer");
+    assert.equal(refusedForGreedy, 3, "and the rest are refused, not queued");
+
+    // And the allowance is per peer, so one peer filling its share does not
+    // lock out another the machine was equally willing to serve.
+    const someoneElse = await call(routes, "/tunnel/echo/open", { caller: other });
+    assert.notEqual(someoneElse[REFUSE], true, "another peer is unaffected");
+
+    plugin.stop();
+  } finally {
+    await service.close();
+  }
+});
+
+test("a forgotten tunnel is reaped without anyone else connecting", async () => {
+  const service = await shoutingService();
+  let clock = 1_000_000;
+  const plugin = createTunnelPlugin({
+    endpoints: { echo: `127.0.0.1:${service.port}` },
+    now: () => clock,
+    sweepMs: 20,
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  try {
+    const { id } = await call(routes, "/tunnel/echo/open", { caller: { name: "sol", publicKey: "KEY-SOL" } });
+    await settle(40);
+
+    // Nobody opens another tunnel, which is when reaping used to happen.
+    clock += IDLE_MS + 1_000;
+    await settle(80);
+
+    const gone = await call(routes, "/tunnel/echo/poll", {
+      caller: { name: "sol", publicKey: "KEY-SOL" },
+      body: { id },
+    });
+    assert.equal(gone[REFUSE], true, "the idle tunnel was swept on a timer");
+    plugin.stop();
   } finally {
     await service.close();
   }
