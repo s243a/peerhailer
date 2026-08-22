@@ -36,7 +36,11 @@ const MAX_BUFFERED = 1024 * 1024;
 /** A tunnel nobody has touched in this long is somebody's forgotten window. */
 export const IDLE_MS = 5 * 60_000;
 
-/** The capability a named endpoint requires. */
+/**
+ * The capability a named endpoint requires.
+ *
+ * @param {string} name
+ */
 export function capabilityFor(name) {
   return `tunnel:${name}`;
 }
