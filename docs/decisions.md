@@ -869,3 +869,30 @@ If built: **CIDR, never string patterns** — `192.168.1.*` also matches
 `192.168.10.5` and has nothing to say about IPv6. Deny checked before allow, and
 default deny, so an empty configuration admits nobody rather than everybody.
 
+## A node can mint T3 credentials without being a T3 plugin
+
+The one case Tailscale and `t3 pair` do not cover is the unattended one: a
+machine asking another machine for access with nobody at either keyboard.
+Everything else — short-lived tokens, QR delivery, `--tailscale` pairing — assumes
+a person is present to run a command and move the output.
+
+A peerhailer node closes it by running the command itself. Designed in
+[commands.md](commands.md), as a sibling of the tunnel plugin: a tunnel exposes a
+local *service*, a declared command exposes a local *command*.
+
+The rule that makes it safe is the tunnel's rule. **The operator declares the
+command and the caller names it** — `hail commands add pair "t3 pair --ttl 5m"`,
+and a peer may ask for `pair` and nothing else. No caller-supplied arguments in
+any form, because a caller-supplied TTL is a number until somebody passes
+`5m; rm -rf ~`, and validating it is the defence this project has already refused
+for shell commands and for URL prefixes. If a command must vary, declare two.
+
+One capability per command, none granted by anything built in. And said plainly:
+this is a remote execution primitive narrowed by declaration, comparable to the
+tunnel rather than to anything smaller — with the first declared command being
+one whose **output is a bearer credential**, so holding `command:pair` means *may
+obtain control of my T3*.
+
+It also removes the last reason to wait for a plugin system: the credential path
+needs no T3 plugin, because the CLI is already an interface.
+
