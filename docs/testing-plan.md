@@ -43,7 +43,7 @@ interface spends its attention on the polish.
 | What | What to look for |
 | --- | --- |
 | **The GUI in a real browser** | It has only ever been fetched with `curl`. Does it render, does the profile picker work, does blocking update, does it survive a daemon restart, does it look sane in dark mode? |
-| **Two real machines** | Everything so far is loopback. Two boxes on a LAN, then one over Tailscale: do addresses get learned, does the right route win, does a laptop that moved get found again? |
+| **Two real machines** | Everything so far is loopback. Two boxes on a LAN, then one over Tailscale: do addresses get learned, does the right route win, does a laptop that moved get found again? Procedure: [two-machines.md](two-machines.md). |
 | **The old PuppyLinux box** | The machine this is meant to serve. Does it install and run at all? |
 | **T3 `agy-dual-gated`** | Verified at the bridge, never through T3's UI. Do the approval cards appear with the command text? |
 
