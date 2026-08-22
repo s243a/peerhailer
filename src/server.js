@@ -26,6 +26,7 @@ import { sameKey, verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
+import { isBlocked } from "./trust.js";
 import {
   BLOCKED_PROFILE,
   DELEGATE,
@@ -164,6 +165,21 @@ export function createDaemon({
     const checked = verifyGrant(envelope, { presenterKey: presenterKey ?? null, capability });
     if (!checked.ok) {
       debugRefusal(`grant refused: ${checked.error}`, body?.from?.name ?? "unnamed");
+      return null;
+    }
+
+    // The subject's own standing, which nothing here used to ask about. A grant
+    // records what someone was allowed when it was minted; blocking says what
+    // they are allowed now, and precedence rule one is that blocked beats
+    // everything "whatever else says otherwise". A grant is an accelerator for a
+    // peer nobody has admitted, never an override for a peer somebody refused.
+    //
+    // Until this existed the hole was bounded only by the five-minute TTL: block
+    // a peer holding a fresh grant and it kept working until the clock ran out.
+    // That also makes the TTL a policy choice rather than the only defence.
+    const subject = { publicKey: checked.grant.subjectKey, name: body?.from?.name };
+    if (isBlocked(directory.blocklist(), subject)) {
+      debugRefusal(`grant presented by a blocked peer`, body?.from?.name ?? "unnamed");
       return null;
     }
 

@@ -78,6 +78,14 @@ message, so it cannot carry that as it stands.
 queued. Needs **no change to the plugin contract** — a route that returns JSON is
 exactly what a plugin already is. Costs latency and empty round trips.
 
+The cost lands on the worst possible message. `session/request_permission` blocks
+the agent while a human decides, and the bridge's gate times out at 120 seconds —
+which now has to cover the poll interval, the trip to a phone, and a person
+noticing. A timeout denies, so this fails safe, but the MVP's most important
+interaction becomes the one most likely to expire. Either the gate timeout grows
+for tunnelled sessions, or permission requests jump the poll queue, or this is
+the reason streaming stops being optional.
+
 **Stream (SSE) plus POST.** What MCP Streamable HTTP does, and what the bridge
 already speaks on its other side. Correct shape, lower latency, and it requires
 plugin routes to hold a response open — a change to what a plugin *is*.
@@ -175,6 +183,11 @@ identity the daemon vouches for, and bytes it cannot read. Without that, the
 bridge sees anonymous bytes arriving on a local socket and cannot tell a phone
 from anything else on the machine.
 
+**The identity that crosses is the key, never the name.** A name is a label the
+model deliberately allows two machines to share, and a rename must not transfer a
+policy decision to a different machine. The bridge keys its source axis on the
+origin's public key; the name travels only so a human can read the log.
+
 **The hand-off has to be authenticated too**, or the chain unravels at the last
 inch. If the bridge's tunnel endpoint accepts any local connection, any local
 process can claim to be the daemon relaying from a trusted peer — the same class
@@ -195,6 +208,14 @@ no understanding of topology, and survives any number of hops.
   attenuation already does, so the machinery would be borrowed rather than
   invented.
 
+**What the signature covers is the whole of it.** A signature over a generic
+message is replayable: capture one sealed tunnel-open and re-present it later,
+through any relay, and it verifies exactly as well. The signed body has to name
+*this* endpoint and carry a timestamp, checked against a freshness window — the
+same lesson the hello protocol already learned with `at` and `FRESHNESS_MS`. An
+origin signature that does not bind the endpoint is an origin signature for
+whichever endpoint the holder chooses.
+
 ## Source and destination
 
 Policy at the bridge keys on both ends, and both are configurable.
@@ -207,6 +228,12 @@ change configuration; a relayed request may be refused outright.
 per-workspace policy is a cut that already exists in the model — and a useful
 one, since it is the difference between letting a phone poke at a scratch repo
 and letting it into the one with credentials in it.
+
+**Relayed-or-not is its own axis**, not an inference. It is derivable — the
+immediate peer differs from the origin — but deriving it makes a policy depend on
+topology, and topology is the thing this design keeps refusing to trust. Naming
+it costs nothing and keeps "no agent traffic that was relayed" true by
+construction rather than by arithmetic.
 
 The rules themselves live at the bridge, in the policy system it already has,
 because that is the only place the payload is plaintext. See its `design.md`.

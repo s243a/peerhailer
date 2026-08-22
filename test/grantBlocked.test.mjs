@@ -1,0 +1,67 @@
+/**
+ * A grant is an accelerator, never an override.
+ *
+ * Precedence rule one is that blocked beats everything "whatever else says
+ * otherwise". The grant path used to sit outside it: a peer that obtained a
+ * valid grant while in good standing kept using it after being blocked, until
+ * the TTL ran out. This drives that exact sequence through the daemon.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import { createDaemon } from "../src/server.js";
+import { createDirectory } from "../src/directory.js";
+import { generateIdentity, signPayload } from "../src/identity.js";
+import { mintGrant } from "../src/grants.js";
+import hailPlugin from "../src/builtin/hailPlugin.js";
+
+/** A signed hail carrying a grant, as a peer nobody admitted would send it. */
+async function hailWithGrant(url, { name, identity, grant }) {
+  const from = { name, at: Date.now() };
+  const response = await fetch(`${url}/hail`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ from, signature: signPayload(from, identity.privateKey), grant }),
+  });
+  return response.status;
+}
+
+test("blocking a peer stops a grant it already holds", async () => {
+  const me = generateIdentity();
+  const issuer = generateIdentity();
+  const mallory = generateIdentity();
+
+  const directory = createDirectory({ self: { name: "me", publicKey: me.publicKey } });
+  // An issuer this machine trusts to delegate.
+  directory.useProfiles({
+    delegator: { name: "delegator", allows: ["hail", "directory", "delegate"] },
+  });
+  directory.admit({ name: "issuer", publicKey: issuer.publicKey, profile: "delegator" });
+
+  // Minted while Mallory was in good standing, and still inside its TTL.
+  const grant = mintGrant({
+    issuer: "issuer",
+    issuerKey: issuer.publicKey,
+    privateKey: issuer.privateKey,
+    subjectKey: mallory.publicKey,
+    capabilities: ["hail"],
+  });
+  assert.ok(grant, "the grant itself is valid");
+
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin] });
+  const { port } = await daemon.listen({ port: 0 });
+  const url = `http://127.0.0.1:${port}`;
+
+  try {
+    const before = await hailWithGrant(url, { name: "mallory", identity: mallory, grant });
+    assert.equal(before, 200, "a grant lets in a peer nobody admitted — that is what it is for");
+
+    // The operator decides otherwise.
+    directory.block({ name: "mallory", publicKey: mallory.publicKey });
+
+    const after = await hailWithGrant(url, { name: "mallory", identity: mallory, grant });
+    assert.notEqual(after, 200, "the same grant must stop working the moment its subject is blocked");
+  } finally {
+    await daemon.close();
+  }
+});
