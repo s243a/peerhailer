@@ -8,10 +8,10 @@ A capability is currently a property of a *peer*. `luna` holds `tunnel:acp`, so
 `luna` may drive the agent — from anywhere, over anything.
 
 That is not what an operator means. The same machine reached over a tailnet and
-reached over a café LAN is not equally trustworthy, because the risk is not
-"which machine" but "who else is on the wire and what did they see". The link
-today is plaintext, so an untrusted segment means an untrusted *conversation*
-even when the peer at the far end is entirely honest.
+reached over a café LAN does not carry the same risk, because the risk is not
+"which machine" but "who else can read this". The protocol is signed and not
+encrypted, so a shared segment means a readable *conversation* even when the peer
+at the far end is entirely honest.
 
 So a second question belongs beside "who are you": **how did you get here**.
 
@@ -57,10 +57,11 @@ whatever crossed it.
 
 Still operator-asserted — this cannot verify that WireGuard is under
 `tailscale0`. But asserting a fact about a link is a smaller act than asserting a
-judgement about a network, and a wrong one is discoverable. A peer holding `tunnel:acp` that reaches this machine over a plaintext LAN
-listener is refused *that capability* and keeps the rest — the peer is
-still admitted, still hailed, still gossiped with. It has lost a privilege, not
-an identity.
+judgement about a network, and a wrong one is discoverable.
+
+A peer holding `tunnel:acp` that reaches this machine over a plaintext LAN
+listener is refused *that capability* and keeps the rest — still admitted, still
+hailed, still gossiped with. It has lost a privilege, not an identity.
 
 Two properties make this cheap:
 
@@ -130,7 +131,7 @@ follows.
 
 ## Testing it
 
-The household LAN is a real untrusted network on real hardware:
+The household LAN is a real plaintext segment on real hardware:
 
 1. Label it: `--hail-on wlan0 --hail-on tailscale0:encrypted`
 2. `hail` still works over the LAN — identity is unaffected
