@@ -411,6 +411,14 @@ export function createDaemon({
           resolve({ port: address.port, host });
         });
       }),
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () =>
+      new Promise((resolve) => {
+        // `server.close` waits for open connections to end on their own, and
+        // the page polls on a keep-alive socket — so a daemon with a browser
+        // pointed at it never finished closing, and Ctrl-C appeared to do
+        // nothing at all. Stopping means stopping.
+        server.close(resolve);
+        server.closeAllConnections?.();
+      }),
   };
 }

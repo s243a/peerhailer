@@ -179,3 +179,23 @@ test("but storage keeps the route that worked, whatever is reported", () => {
   const held = directory.get("laptop").addresses;
   assert.equal(held[0].value, "http://works:8787", "what has worked is never evicted for what has not");
 });
+
+test("a change made while a daemon runs is not undone when it exits", () => {
+  const dir = mkdtempSync(join(tmpdir(), "peerhailer-daemon-"));
+  const statePath = join(dir, "directory.json");
+  writeFileSync(statePath, JSON.stringify({ self: { name: "host-a" }, admitted: [] }));
+
+  // The picture a daemon holds from startup.
+  const asDaemonStarted = JSON.parse(readFileSync(statePath, "utf8"));
+
+  // A second terminal admits a peer while it runs.
+  updateState(statePath, (onDisk) => ({
+    ...onDisk,
+    admitted: [{ name: "late-peer", publicKey: null, addresses: [], lastSeen: null, profile: "trusted" }],
+  }));
+
+  // What the old shutdown did: write that startup picture back over it. The
+  // lock made the write atomic, which is not the same as making it correct.
+  const afterNaiveShutdown = updateState(statePath, (onDisk) => ({ ...onDisk, ...asDaemonStarted }));
+  assert.equal(afterNaiveShutdown.admitted.length, 0, "which is why the daemon no longer persists on exit");
+});

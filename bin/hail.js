@@ -329,8 +329,13 @@ switch (command) {
     const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
     const listening = await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
     log(`[ui] http://${listening.host}:${listening.port}`);
+    // Deliberately no persist() here. Every change the daemon makes already
+    // went to disk through applyChange, which writes and then re-reads, so its
+    // in-memory copy holds nothing newer than the file. What it *can* hold is
+    // something older: it never re-reads changes made behind it, so a `hail add`
+    // run at another terminal while this was up would be overwritten on the way
+    // out. Serving a hail mutates nothing, so there is nothing here to lose.
     const stop = async () => {
-      persist();
       await daemon.close();
       process.exit(0);
     };
