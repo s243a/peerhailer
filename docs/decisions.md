@@ -549,6 +549,17 @@ and ACP needs the agent to originate messages — `session/update` streams, and
 it needs no change to what a plugin is, and the question worth answering first is
 whether a remote peer may drive an agent at all.
 
+A second endpoint follows the same rule and makes it sharper: T3 reaching another
+T3. The obvious version tunnels the token on request, which removes the storage
+problem and leaves a smaller one — the asking instance holds a credential
+briefly. The better version never moves it: the exit opens a loopback connection
+to its own T3 and attaches its own token, so the remote authenticates as a peer
+and no credential crosses at all. Revocation becomes `hail block` rather than
+rotating a secret everyone shares. The cost is that such an exit is a confused
+deputy, acting with full local authority on someone else's instructions — which
+is why it is its own capability, opened against a grant, bounded by source and
+destination.
+
 That capability does not belong in `trusted`. Driving an agent executes code;
 `trusted` means hailing and seeing who we know. It gets its own profile the way
 diagnostics got `operator`, and a tunnel opens against a grant rather than a

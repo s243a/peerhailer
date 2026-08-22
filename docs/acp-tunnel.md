@@ -277,6 +277,52 @@ or pass to the human — needs plaintext. Sealing the payload settles where it c
 live: **the bridge**, which is where it was first sketched, not the peer
 boundary. One component rather than two.
 
+## A second endpoint: T3 to T3, without moving the token
+
+The namespace design starts from a T3 token crossing a clipboard to reach
+another instance. The tunnel removes the need for that, and there are two ways
+to do it — one obvious and one better.
+
+**Fetch it on request.** Nothing is stored ahead of time; the token is asked for
+when needed and carried sealed. That removes the storage problem, and leaves a
+smaller one: the asking instance now holds a credential, briefly, in a second
+place. Briefly is better than permanently. It is not the same as never.
+
+**Or terminate the session at the machine that owns it.** The tunnel exit opens
+a loopback connection to the local T3 and attaches the local token itself. The
+remote peer authenticates as a *peer* — a key this machine admitted — and never
+sees a credential, because none crossed. This is the same shape as the ACP
+endpoint: the conversation travels, the thing that grants authority does not.
+
+The second is worth the extra thought:
+
+- **Revocation becomes per-peer.** `hail block` ends one machine's access.
+  Rotating a shared token ends everyone's, which is the reason nobody rotates.
+- **There is nothing to store, so no decision about how to store it.** Every
+  question about protecting a secret at rest disappears rather than being
+  answered.
+- **It is what "offers, not values" already says.** The leaf is *I will act on
+  your behalf*, not *here is my token* — which is the rule
+  [shared-namespace.md](shared-namespace.md) sets for the whole namespace.
+
+### The cost, said plainly
+
+An exit that attaches its own credential is a **confused deputy**: it acts with
+full local authority on instructions from somewhere else. Every reason to be
+careful about the agent endpoint applies here, and one more — an agent endpoint
+runs commands a reviewer can see, while this one drives an application that has
+its own permissions and its own idea of who is asking.
+
+So: its own capability, never part of `trusted`; opened against a grant rather
+than a standing permission; and bounded by the source and destination policy the
+bridge already documents, since "which peer, reaching which instance" is exactly
+what that answers.
+
+**Encrypted end to end**, for the same reason as everything else here: what a
+relay cannot read, it cannot leak, and a machine carrying traffic it cannot read
+is safer for the one carrying it. Sealing is not invisibility — that a session
+exists, to whom, and how long it lasted all remain visible on the path.
+
 ## What this is not
 
 **Not a VPN**, though the reason is not that it speaks ACP — it is that
