@@ -2,6 +2,10 @@
 
 **Status: designed, not built.**
 
+Once the payload is sealed and lands at an endpoint the operator declared, the
+tunnel carries bytes and nothing about it is specific to ACP. ACP is the first
+endpoint because it is the one worth having; the mechanism is general.
+
 ## Why this one first
 
 Every other plugin idea is a feature. This one is the reason the fabric exists:
@@ -41,6 +45,16 @@ remote can reach them.
 So **the endpoint is named in local configuration and referenced by name.** The
 caller says `acp`, not `127.0.0.1:9000`. An unknown name is refused. This is the
 same rule as everywhere else here: a peer may cause something, never choose it.
+
+### One capability per endpoint
+
+It follows that "may open a tunnel" cannot be a single permission. A generic
+carrier with one capability would mean granting a peer the agent endpoint also
+grants it every other declared one — a database, a printer, whatever a later
+version adds. Each endpoint carries its own capability, and holding one says
+nothing about the others.
+
+This is what keeps a general mechanism from being a general-purpose door.
 
 ## What has to cross
 
@@ -195,8 +209,21 @@ boundary. One component rather than two.
 
 ## What this is not
 
-**Not a VPN.** One protocol, one named endpoint, one capability. The narrowness
-is what makes it reviewable.
+**Not a VPN**, though the reason is not that it speaks ACP — it is that
+destinations are *declared* rather than dialled. A VPN carries whatever you aim
+at whatever host you name; this carries whatever you like to a service its
+operator wrote down in advance, for a peer holding that endpoint's capability.
+It is closer to a reverse proxy with peer authentication than to a network.
+
+If that rule ever weakens — if a caller can supply an address — it becomes a
+port forward into the machine, and Tailscale already does that job with far more
+scrutiny behind it.
+
+**TCP and UDP are not equally ready.** A stream has a beginning and an end for a
+grant to bound and a session to resume. Datagrams have neither, need framing over
+a request-shaped transport, and an endpoint that answers unauthenticated
+datagrams is an amplification reflector. Authentication removes that particular
+risk, but UDP should follow TCP rather than arrive with it.
 
 **Not a way to reach a machine you could not otherwise reach.** The tunnel runs
 over a peer link that already exists. Bridging networks is a separate question,
