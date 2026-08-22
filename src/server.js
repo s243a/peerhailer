@@ -329,7 +329,22 @@ export function createDaemon({
   // settling by whichever plugin happened to be listed first.
   const pluginRoutes = collectRoutes(plugins, { log });
 
-  const server = createServer(async (request, response) => {
+  /**
+   * The request handler, told which door this arrived at.
+   *
+   * `control` serves the page and `/api/*`, which hold no authentication of
+   * their own and are therefore bound to loopback and nowhere else. `hail`
+   * serves plugin routes, which authenticate every caller, and is the only
+   * scope safe to expose on a network.
+   *
+   * Two listeners rather than a check inside one handler: a conditional can be
+   * got wrong, and being wrong once is enough. Here the control API is simply
+   * not listening on the external interface, so there is nothing to reach.
+   *
+   * @param {"control" | "hail"} scope
+   * @returns {import("node:http").RequestListener}
+   */
+  const handlerFor = (scope) => async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
@@ -355,7 +370,7 @@ export function createDaemon({
         return send(response, 200, result ?? {});
       }
 
-      if (url.pathname === "/" && request.method === "GET") {
+      if (scope === "control" && url.pathname === "/" && request.method === "GET") {
         // Same loopback address as the API it reads. A page that can admit
         // peers has no business being reachable from anywhere else.
         response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -365,11 +380,11 @@ export function createDaemon({
         return;
       }
 
-      if (url.pathname === "/api/profiles" && request.method === "GET") {
+      if (scope === "control" && url.pathname === "/api/profiles" && request.method === "GET") {
         return send(response, 200, listProfiles(profiles));
       }
 
-      if (url.pathname === "/api/block" && request.method === "POST") {
+      if (scope === "control" && url.pathname === "/api/block" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         if (typeof body?.name !== "string") return send(response, 400, { error: "a name is required" });
         const list = change((peers) =>
@@ -380,7 +395,7 @@ export function createDaemon({
         return send(response, 200, list);
       }
 
-      if (url.pathname === "/api/peers" && request.method === "GET") {
+      if (scope === "control" && url.pathname === "/api/peers" && request.method === "GET") {
         return send(response, 200, {
           self: directory.self,
           // The effective profile travels with each peer: what was assigned is
@@ -397,7 +412,7 @@ export function createDaemon({
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.
-      if (url.pathname === "/api/plugins" && request.method === "GET") {
+      if (scope === "control" && url.pathname === "/api/plugins" && request.method === "GET") {
         return send(response, 200, {
           plugins: plugins.map((plugin) => ({
             name: plugin.name,
@@ -416,7 +431,7 @@ export function createDaemon({
       // only honest way to check the rules: `hail` is answered at all,
       // `directory` is answered with the peer list, and a profile holding
       // neither gets nothing. Describing that is not the same as showing it.
-      if (url.pathname === "/api/shared" && request.method === "GET") {
+      if (scope === "control" && url.pathname === "/api/shared" && request.method === "GET") {
         const profileName = url.searchParams.get("profile") ?? "";
         const known = listProfiles(profiles).find((entry) => entry.name === profileName);
         if (!known) return send(response, 404, { error: `no profile called ${profileName}` });
@@ -434,7 +449,7 @@ export function createDaemon({
         });
       }
 
-      if (url.pathname === "/api/peers" && request.method === "POST") {
+      if (scope === "control" && url.pathname === "/api/peers" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         const admitted = change((peers) =>
           peers.admit(body, ...(typeof body?.profile === "string" ? [{ profile: body.profile }] : [])),
@@ -443,7 +458,7 @@ export function createDaemon({
         return send(response, 200, admitted);
       }
 
-      if (url.pathname === "/api/peers" && request.method === "DELETE") {
+      if (scope === "control" && url.pathname === "/api/peers" && request.method === "DELETE") {
         const name = url.searchParams.get("name");
         const forgotten = name ? change((peers) => peers.forget(name)) : false;
         return send(response, 200, { forgotten });
@@ -454,28 +469,75 @@ export function createDaemon({
       log(`[daemon] ${url.pathname} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       return nothingHere(response);
     }
-  });
+  };
+
+  const control = createServer(handlerFor("control"));
+  /** @type {import("node:http").Server[]} */
+  const hailServers = [];
+
+  /** @param {import("node:http").Server} target */
+  const stop = (target) =>
+    new Promise((resolve) => {
+      // `server.close` waits for open connections to end on their own, and the
+      // page polls on a keep-alive socket — so a daemon with a browser pointed
+      // at it never finished closing, and Ctrl-C appeared to do nothing at all.
+      // Stopping means stopping.
+      target.close(() => resolve(undefined));
+      target.closeAllConnections?.();
+    });
 
   return {
-    server,
+    server: control,
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */
     listen: ({ port = 8787, host = "127.0.0.1" } = {}) =>
       new Promise((resolve) => {
-        server.listen(port, host, () => {
+        control.listen(port, host, () => {
           // A TCP listen always yields AddressInfo; the union covers pipes.
-          const address = /** @type {import("node:net").AddressInfo} */ (server.address());
-          log(`[daemon] listening on http://${host}:${address.port}`);
+          const address = /** @type {import("node:net").AddressInfo} */ (control.address());
+          log(`[daemon] control on http://${host}:${address.port} — page and local API`);
           resolve({ port: address.port, host });
         });
       }),
-    close: () =>
-      new Promise((resolve) => {
-        // `server.close` waits for open connections to end on their own, and
-        // the page polls on a keep-alive socket — so a daemon with a browser
-        // pointed at it never finished closing, and Ctrl-C appeared to do
-        // nothing at all. Stopping means stopping.
-        server.close(resolve);
-        server.closeAllConnections?.();
-      }),
+
+    /**
+     * Answer hails on chosen addresses, and nothing else there.
+     *
+     * A separate listener per address rather than one bound to `0.0.0.0`, so
+     * what is exposed is what was named. Plugin routes authenticate every
+     * caller; the page and `/api/*` are not served here at all, which is the
+     * point — a firewall rule admitting this port admits only hails.
+     *
+     * An address that cannot be bound is logged and skipped rather than taking
+     * the daemon down with it: a laptop whose wifi is not up yet should still
+     * answer on its tailnet.
+     *
+     * @param {{port?: number, hosts: string[]}} options
+     */
+    listenHail: async ({ port = 8787, hosts }) => {
+      /** @type {{host: string, port: number}[]} */
+      const bound = [];
+      for (const host of hosts) {
+        const server = createServer(handlerFor("hail"));
+        try {
+          await new Promise((resolve, reject) => {
+            server.once("error", reject);
+            server.listen(port, host, () => resolve(undefined));
+          });
+          const address = /** @type {import("node:net").AddressInfo} */ (server.address());
+          hailServers.push(server);
+          bound.push({ host, port: address.port });
+          log(`[daemon] hails on http://${host}:${address.port}`);
+        } catch (error) {
+          log(`[daemon] not listening on ${host}: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+      return bound;
+    },
+
+    close: async () => {
+      await Promise.all(hailServers.map(stop));
+      hailServers.length = 0;
+      await stop(control);
+    },
   };
 }

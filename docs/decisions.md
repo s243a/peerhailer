@@ -492,7 +492,22 @@ they are doing.
 
 It also makes the accept policy in [discovery.md](discovery.md) implementable as
 stated: which interfaces answer hails becomes a property of a socket, not a
-branch. **Not built** — `createDaemon` binds once today.
+branch.
+
+**Built.** `hail daemon --hail-on wlan0,tailscale0` opens one listener per
+address, serving plugin routes only; the page and `/api/*` stay on loopback.
+
+Two details that were not obvious until it ran. The config names **interfaces,
+not addresses**, because the name is the stable half — `wlan0` outlives the
+address DHCP gives it, and a daemon bound to yesterday's address answers nothing
+while looking healthy. And an address that cannot be bound is logged and
+skipped rather than taken as fatal: a laptop whose wifi is not up should still
+answer on its tailnet.
+
+Which machine can do what turns out to differ. A WSL2 host has no interface on
+the household network at all — only a virtual NAT, a loopback and a tailnet
+address — so it cannot host a LAN listener whatever the config says. You cannot
+bind an address you do not have.
 
 ## Bridging carries introductions, not packets
 

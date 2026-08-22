@@ -16,6 +16,7 @@
  *   hail daemon [--port N]         answer hails from other machines
  */
 import { readFileSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
 import { createDirectory } from "../src/directory.js";
@@ -138,6 +139,28 @@ function untilFromFlag(value) {
   }
   const parsed = Date.parse(text);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Turn what a person wrote into addresses a socket can bind.
+ *
+ * Interface names, because they are the stable half: `wlan0` outlives the
+ * address DHCP hands it, and a daemon bound to yesterday's address answers
+ * nothing while looking healthy. A literal address is taken as written, for the
+ * cases where that is what you meant.
+ *
+ * @param {string} spec
+ * @returns {string[]}
+ */
+function addressesFor(spec) {
+  const wanted = spec.trim();
+  if (!wanted) return [];
+  // Already an address, or the wildcard.
+  if (/^[0-9.]+$/.test(wanted) || wanted.includes(":") || wanted === "0.0.0.0") return [wanted];
+
+  const iface = networkInterfaces()[wanted];
+  if (!iface) return [];
+  return iface.filter((entry) => entry.family === "IPv4" && !entry.internal).map((entry) => entry.address);
 }
 
 const publicKeyFromFlags = () => {
@@ -389,11 +412,29 @@ switch (command) {
       log,
     });
     const port = Number(flags.port ?? 8787);
-    // Binding beyond loopback exposes an API that can admit peers, so it has to
-    // be asked for by name rather than arrived at by default.
+    // Two doors. The page and the local API answer on loopback, because they
+    // hold no authentication of their own; hails answer wherever you say, and
+    // authenticate every caller.
+    //
+    // `--host` still moves the control door for anyone who means it, and still
+    // exposes an API that can admit peers when they do.
     const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
     const listening = await daemon.listen({ port: Number.isFinite(port) ? port : 8787, host });
     log(`[ui] http://${listening.host}:${listening.port}`);
+    if (host !== "127.0.0.1" && host !== "localhost") {
+      log(`[daemon] warning: the page and /api/* are on ${host} and hold no authentication`);
+    }
+
+    // `--hail-on wlan0,tailscale0` — interface names, resolved now, because the
+    // name is the stable half and the address is not.
+    const hailOn = typeof flags["hail-on"] === "string" ? flags["hail-on"].split(",") : [];
+    const hosts = [...new Set(hailOn.flatMap(addressesFor))];
+    for (const spec of hailOn) {
+      if (addressesFor(spec).length === 0) log(`[daemon] ${spec.trim()} has no address to bind`);
+    }
+    if (hosts.length) {
+      await daemon.listenHail({ port: Number.isFinite(port) ? port : 8787, hosts });
+    }
     // Deliberately no persist() here. Every change the daemon makes already
     // went to disk through applyChange, which writes and then re-reads, so its
     // in-memory copy holds nothing newer than the file. What it *can* hold is
@@ -538,6 +579,7 @@ switch (command) {
         "  hail trust [model]           how peers you have not assigned are treated",
         "  hail walk                    ask known peers who else they know",
         "  hail daemon [--port N]       answer hails from other machines",
+        "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",
         "",
         "  --state <path>               use a different directory file",
