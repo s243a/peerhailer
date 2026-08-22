@@ -1,0 +1,100 @@
+# What a person cannot be relied on to do.
+#
+# This project shipped `bin/hail.js` syntactically invalid for six commits while
+# every test passed, because nothing in the suite loaded the entry point. It has
+# also been committed twice with typecheck errors that were printed and not read.
+# Neither is fixed by more care; both are fixed by a machine that refuses.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor `engines` promises, and current. The floor matters: this runs
+        # on old machines, which is the whole point of having no dependencies.
+        node: ["20", "22"]
+    name: node ${{ matrix.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+
+  # Kimi's earlier review found the package shipped no usable declarations —
+  # they were never packed, and the `exports` map shadowed the `types` field, so
+  # a consumer resolved `any`. Neither showed up in this repo's own tests,
+  # because both are properties of the tarball rather than of the source.
+  package:
+    runs-on: ubuntu-latest
+    name: the tarball a consumer actually gets
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm pack
+
+      - name: install it somewhere else and use it
+        run: |
+          set -euo pipefail
+          tarball="$(ls peerhailer-*.tgz)"
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/$tarball"
+
+          # It has to run.
+          node -e "
+            const { createDirectory } = require('peerhailer');
+            const d = createDirectory({ self: { name: 'consumer' } });
+            d.admit({ name: 'sol', profile: 'trusted' });
+            if (d.listAdmitted().length !== 1) throw new Error('directory did not work');
+            console.log('imported and used');
+          "
+
+          # And it has to carry types a consumer resolves, which is the half
+          # that broke silently last time.
+          cat > use.ts <<'TS'
+          import { createDirectory } from "peerhailer";
+          const directory = createDirectory({ self: { name: "consumer" } });
+          const peers: ReturnType<typeof directory.listAdmitted> = directory.listAdmitted();
+          export const count: number = peers.length;
+          TS
+
+          # Through a tsconfig, because that is what a consumer has. The shipped
+          # declarations name `node:http` and `NodeJS`, so `types: ["node"]` is
+          # required — which is ordinary for a Node library, and is why this is
+          # written down here rather than added as a dependency: the package has
+          # none, and that is worth keeping literally true.
+          cat > tsconfig.json <<'JSON'
+          {
+            "compilerOptions": {
+              "strict": true,
+              "module": "nodenext",
+              "moduleResolution": "nodenext",
+              "types": ["node"],
+              "noEmit": true
+            },
+            "files": ["use.ts"]
+          }
+          JSON
+          npm install --no-save typescript@^7.0.2 @types/node@^26.2.0
+          npx tsc -p tsconfig.json
+
+      - name: what the tarball contains
+        run: npm pack --dry-run
