@@ -35,71 +35,97 @@ keep.
 Routes follow the tunnel plugin's shape — `send`, `poll`, `clear` — so this needs
 no change to what a plugin is.
 
-## Two inboxes, not one
+## Reaching someone who is not a peer
 
-The interesting half is accepting messages from things that are **not peers**: a
-script, a device with no identity, something on the LAN. Useful precisely when
-you cannot authenticate the other end.
+The useful half is talking to something with no identity here: a script, a device,
+someone who has not been admitted. The obvious answer is an inbox that accepts
+unauthenticated messages. That answer is rejected below; this is the better one.
 
-That is also what makes it dangerous, and the danger is specific rather than
-theoretical. Put together a chat, senders nobody authenticated, and the habit of
-passing pairing URLs through it, and you have built a phishing channel: a
-stranger writes *"here is your pairing URL"*, a person pastes it into T3, and the
-five-minute expiry does not help because the human did the work.
+**Give the stranger a relay, not a listener.** Someone who cannot be
+authenticated talks to a machine you chose to expose; that machine holds a peer
+relationship with the destination and passes the message on. The destination
+never opens a port to strangers and never parses input from one — its code only
+ever handles peers.
 
-So:
+That is a genuine reduction rather than a relabelling. An arbitrary inbox puts
+unauthenticated parsing in *every* node; a relay puts it in one you picked, and
+the blast radius of a bug in it is that machine.
 
-| | Peers | Arbitrary sources |
-| --- | --- | --- |
-| Identity | a key, verified | an address, observed |
-| Default | off until `chat` is granted | **off entirely** |
-| Shown | by peer name | by address, never a name |
-| Where | the inbox | **a separate inbox** |
-| Rendering | plain text | plain text, never actionable |
+It costs an extra node, which is the honest overhead. In exchange the same
+mechanism becomes reusable: the relay is a peer doing a peer's job, so it is
+bounded by `RELAY` and by whatever the destination will accept from it, rather
+than by new machinery.
+
+### Sealed to the destination, so the relay cannot read it
+
+A relay that carries text can read text. The fix is to seal the message to the
+destination before handing it over, which turns the relay into a carrier rather
+than a reader — and, as recorded in the tunnel design, carrying what you cannot
+read is safer for the one carrying it too.
+
+This is the case that earns the **second key type**. Identities here are Ed25519,
+which signs and cannot encrypt, so sealing requires each peer to publish an
+X25519 encryption key in its record, signed by its identity key. That is the
+standard arrangement — age and Signal both do it — and Node performs X25519 ECDH
+directly, so no curve conversion or field arithmetic is involved.
+
+**And it would be the most dangerous code in this project.** ECDH, HKDF and an
+AEAD is a standard composition and still a bespoke assembly, in a codebase whose
+safety argument is that it is small enough to read, written by whoever is
+quickest to volunteer. If built it should be the thing reviewed hardest, and it
+should not be built before there is a relay to need it.
+
+The ordering that follows: relay first, sealed messages second, and a chat that
+works between admitted peers before either.
+
+## Considered and rejected: an inbox for unauthenticated senders
+
+The first design accepted messages directly from things that are not peers,
+shown by source address rather than name, in a second view, on a second port.
+The reasoning is kept because it applies to *any* unauthenticated input, and
+because the relay above has to honour most of it anyway.
+
+### Why it is a phishing surface
+
+Three things together: a chat, senders nobody authenticated, and the habit of
+passing pairing URLs through it. A stranger writes *"here is your pairing URL"*,
+a person pastes it into T3, and the five-minute expiry does not help because the
+human did the work. It is the one place in this design where the payload and the
+channel make each other worse.
+
+### The rules it would have needed, which the relay still needs
 
 **A separate place, not a label.** A label on a busy screen is a thing people
-stop seeing; a different view is not. This is the same reasoning as showing a
-competing key as its own line rather than a flag on an existing one.
+stop seeing; a different view is not. The same reasoning as showing a competing
+key on its own line rather than as a flag.
 
-**Never resolved to a name.** A name is what makes a message look vouched for. An
-unauthenticated sender that arrives from `192.168.1.40` is displayed as
-`192.168.1.40`, even when a peer is admitted at that address — *especially* then,
-because that is the case a person would misread.
+**Never resolved to a name.** A name is what makes a message look vouched for.
+Something relayed from an unidentified party is shown as unidentified, even when
+a peer is admitted at the address it came from — *especially* then, because that
+is the case a person would misread.
 
-**Never actionable.** No clickable links, no "open this", nothing that shortens
-the path between an unauthenticated message and a redeemed credential. The text
-is text.
+**Never actionable.** No clickable links, nothing that shortens the path between
+an unauthenticated message and a redeemed credential. The text is text.
 
-## Its own port
+### And the part the relay makes unnecessary
 
-Arbitrary sources listen on a **separate port** from peer traffic, because a
-listener is the unit of firewall policy: a rule can only distinguish two things
-by the port they arrive on. One port for peers, another for strangers, and
-`iptables` can admit the second only from the household LAN without touching the
-first.
+**Its own port.** A listener is the unit of firewall policy, so an inbox for
+strangers belongs on a socket of its own, filtered separately from the port peers
+use. That rule is right and it still holds for the *relay* — but a destination
+running no such listener needs no such rule.
 
-That is the general rule this project keeps rediscovering — the control API is on
-its own socket for the same reason, and tunnel routes should be, too. Enforcement
-by socket cannot be broken by editing a conditional.
+**Source allow and deny lists.** In the manner of `iptables`, and worth two
+qualifications. They bound reachability rather than identity: a rule about
+`192.168.1.0/24` concerns whoever holds those addresses today, which turns
+"anyone" into "anyone in the house" and is not authentication. And they are the
+weaker of two options wherever an OS firewall exists — earning their place on
+Windows, where there is no `iptables`, and for visibility, since a list the page
+can show is a list someone will read. If built: CIDR never string patterns
+(`192.168.1.*` also matches `192.168.10.5` and ignores IPv6), deny before allow,
+default deny.
 
-### Source lists, and their honest weight
-
-Allow and deny lists in the manner of `iptables` are the right size for what they
-do, with two qualifications.
-
-**They bound reachability, not identity.** A rule about `192.168.1.0/24` is a
-rule about whoever holds those addresses today. It turns "anyone" into "anyone in
-the house", which is worth having and is not authentication.
-
-**They are the weaker of two options where both exist.** On Linux the OS firewall
-is better tested than anything written here, and the listener already binds per
-interface. An app-level list earns its place on **Windows**, where there is no
-`iptables` to lean on, and for **visibility** — a list the page can show is a list
-someone will read.
-
-If built: **CIDR, never string patterns.** `192.168.1.*` also matches
-`192.168.10.5` and says nothing about IPv6. Deny checked before allow, and
-default deny, so an empty configuration admits nobody rather than everybody.
+These now describe the **relay's** exposure rather than every node's, which is
+the whole gain.
 
 ## What this is not
 
@@ -110,16 +136,17 @@ mean the credential-free invariant needs an exception.
 **Not a transport.** Tunnels carry bytes to a service; this carries text to a
 person. Anything that wants a protocol should use the other one.
 
-**Not authenticated when the sender is not a peer**, which is stated here rather
-than implied because every other input in this project is.
+**Not authenticated end to end when a relay is involved.** A relay vouches for
+delivery, never for content — it says *somebody gave me this for you*, and who
+that somebody was is exactly what it cannot tell you. Stated rather than implied,
+because every other input in this project carries an identity.
 
 ## Open
 
 - **Should a peer be able to send to a peer it has not admitted?** Symmetric
-  admission is the obvious answer and it makes the first message impossible,
-  which is exactly the case an unauthenticated inbox exists to cover.
+  admission is the obvious answer and it makes the first message impossible —
+  which is the case the relay exists to cover, so the two answers have to agree.
 - **Notification.** A message nobody polls for is a message nobody reads. Polling
   is the plugin shape today; a machine that only checks when a human opens a page
   will be a machine that misses things.
-- **Whether the arbitrary inbox should exist at all**, or whether the honest
-  answer is that a stranger who wants to reach you can be admitted first.
+
