@@ -115,3 +115,43 @@ test("a grant carrying `directory` grants it, and one that does not does not", a
     await daemon.close();
   }
 });
+
+test("a grant confers nothing the issuer does not currently hold", async () => {
+  const me = generateIdentity();
+  const issuer = generateIdentity();
+  const guest = generateIdentity();
+
+  const directory = createDirectory({ self: { name: "me", publicKey: me.publicKey } });
+  // May delegate, may hail — and may *not* see who this machine knows.
+  directory.useProfiles({ weak: { name: "weak", allows: ["hail", "delegate"] } });
+  directory.admit({ name: "issuer", publicKey: issuer.publicKey, profile: "weak" });
+  directory.admit({ name: "someone", profile: "trusted" });
+
+  // It mints a grant claiming `directory` anyway. Nothing stops it minting;
+  // the check belongs at the point of use, where the issuer's standing is known.
+  const grant = mintGrant({
+    issuer: "issuer",
+    issuerKey: issuer.publicKey,
+    privateKey: issuer.privateKey,
+    subjectKey: guest.publicKey,
+    capabilities: ["hail", "directory"],
+  });
+
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin] });
+  const { port } = await daemon.listen({ port: 0 });
+
+  try {
+    const from = { name: "guest", at: Date.now() };
+    const response = await fetch(`http://127.0.0.1:${port}/hail`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from, signature: signPayload(from, guest.privateKey), grant }),
+    });
+    assert.equal(response.status, 200, "the grant is good for hail, which the issuer does hold");
+
+    const body = await response.json();
+    assert.deepEqual(body.peers, [], "delegating what you do not hold is escalation with extra steps");
+  } finally {
+    await daemon.close();
+  }
+});

@@ -190,9 +190,12 @@ export function createDirectory(state = {}) {
       const known = admitted.get(record.name);
       if (known) {
         const merged = mergePeerRecord(known, record);
-        // The profile is ours; nothing a peer says can change what another peer
-        // is allowed to ask of us.
-        if (merged) admitted.set(record.name, { ...merged, profile: known.profile });
+        // Through `keepOurs`, like every other rebuild. Re-attaching only the
+        // profile dropped the rest: a peer raised until Friday, mentioned by
+        // anyone holding `introduce`, came back raised *for good* — gossip
+        // deleting an expiry rather than merely reading past one — and the
+        // record of a competing key went with it.
+        if (merged) admitted.set(record.name, keepOurs(merged, known));
         learned.merged.push(record.name);
         continue;
       }
@@ -332,6 +335,8 @@ export function createDirectory(state = {}) {
     if (previous) {
       seen[existing] = { ...previous, lastSeen: at, count: previous.count + 1 };
     } else {
+      // Where it was *first* seen, and not updated after: an address is a hint
+      // about which route carried it, not a claim about where it lives now.
       seen.push({ key, firstSeen: at, lastSeen: at, count: 1, ...(via ? { via: via.value } : {}) });
     }
 

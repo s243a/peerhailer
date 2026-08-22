@@ -214,7 +214,20 @@ export function createDaemon({
       debugRefusal(`${issuer.name} cannot delegate ${capability}, not holding it`, body?.from?.name ?? "unnamed");
       return null;
     }
-    return checked.grant;
+
+    // The rest of the list gets the same treatment, because the rest of the
+    // list is now consumed. Checking only the requested capability was right
+    // while that was all anyone read; once a route may ask what else the grant
+    // carries, an unchecked entry is an issuer delegating something it does not
+    // hold — escalation with extra steps, which is the thing grants refuse.
+    //
+    // Filtered rather than refused, so a grant naming one capability the issuer
+    // has since lost still confers the others: when an issuer's standing
+    // shrinks, every outstanding grant shrinks with it at next use.
+    const conferrable = (checked.grant.capabilities ?? []).filter((held) =>
+      directory.allowsCapability(issuer.name, held),
+    );
+    return { ...checked.grant, capabilities: conferrable };
   };
 
   /**
@@ -277,7 +290,16 @@ export function createDaemon({
     const age = Math.abs(Date.now() - (Number(claim.at) || 0));
     if (!Number.isFinite(age) || age > FRESHNESS_MS) return debugRefusal(`stale hail from ${claim.name}`, claim.name);
 
-    return { name: claim.name, key: presenterKey, known: known ?? null };
+    // First contact proves possession of this key, which is the same evidence
+    // `walk` binds on. Binding here closes a window: an admitted peer with no
+    // key yet had its *name* available to anyone holding any valid grant —
+    // claim the name, sign with your own key, and `presenterKey` falls back to
+    // the grant's subject, so the signature verifies and the keyless peer's
+    // profile is inherited. `bindKey` never replaces a key already held, so
+    // this can only ever fill a blank.
+    if (known && !known.publicKey) directory.bindKey(claim.name, presenterKey);
+
+    return { name: claim.name, key: presenterKey, known: directory.get(claim.name) ?? known ?? null };
   };
 
   /**
@@ -467,6 +489,9 @@ export function createDaemon({
         }
       }
 
+      // Anything added below must also be reserved in `plugins.js`, or a plugin
+      // can claim the path and answer it outside this guard.
+      //
       // Only what this door actually serves. Guarding everything meant an
       // unknown path answered "refused" rather than "no such thing", which says
       // something about this machine that a 404 does not.

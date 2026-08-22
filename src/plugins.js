@@ -179,6 +179,17 @@ export function collectRoutes(plugins, { log = () => {} } = {}) {
   /** @type {Map<string, PluginRoute & {plugin: string}>} */
   const routes = new Map();
   for (const plugin of plugins) {
+    // Validated here rather than only where plugins are loaded from disk. The
+    // CLI goes through `loadPlugins`, which checks; an embedder passing plugin
+    // objects to `createDaemon` directly did not, and that is the documented
+    // way to use this library. The load-bearing check is the capability one: a
+    // route declaring none reaches `verifyGrant` with `capability: undefined`,
+    // which skips the capability test, so any valid grant opens it.
+    const verdict = validatePlugin(plugin);
+    if (!verdict.ok) {
+      log(`[plugin] ${verdict.error} — refused`);
+      continue;
+    }
     for (const route of plugin.routes ?? []) {
       const key = `${String(route.method).toUpperCase()} ${route.path}`;
       const existing = routes.get(key);

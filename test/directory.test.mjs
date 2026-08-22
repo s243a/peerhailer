@@ -247,3 +247,23 @@ test("a competing key is recorded and warned about, never accepted", () => {
   assert.ok(sameKey(rotated.publicKey, other.publicKey));
   assert.equal(rotated.conflicts, undefined);
 });
+
+test("gossip cannot make a temporary raise permanent", () => {
+  const directory = createDirectory({ self: { name: "me" } });
+  directory.admit({ name: "luna" }, { profile: "known" });
+  directory.admit({ name: "luna" }, { profile: "trusted", until: Date.now() + 3_600_000 });
+  directory.noteKeyConflict("luna", generateIdentity().publicKey);
+  directory.admit({ name: "sol", profile: "trusted" });
+
+  // A peer holding `introduce` mentions luna in the ordinary course of a walk.
+  directory.learnFrom("sol", [{ name: "luna", addresses: [{ transport: "lan", value: "10.0.0.4:7645" }] }]);
+
+  const luna = directory.get("luna");
+  assert.ok(luna.profileUntil, "the expiry survives being mentioned");
+  assert.equal(luna.profileAfter, "known", "and still knows what to fall back to");
+  assert.equal(luna.conflicts?.length, 1, "and the competing key it was warning about");
+  assert.ok(
+    luna.addresses.some((entry) => entry.value.includes("10.0.0.4")),
+    "while still learning the address it was told",
+  );
+});

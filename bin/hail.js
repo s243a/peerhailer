@@ -164,6 +164,12 @@ function addressesFor(spec) {
 }
 
 const publicKeyFromFlags = () => {
+  // `--key` with nothing after it parses as boolean `true`, which is not a
+  // string and so used to read as "no key flag given" — silently admitting on
+  // trust-on-first-use, the exact thing this function exists to refuse.
+  if (flags.key === true) fail("--key needs a PEM; --key-file <path> is easier");
+  if (flags["key-file"] === true) fail("--key-file needs a path");
+
   const source = typeof flags["key-file"] === "string" ? "key-file" : typeof flags.key === "string" ? "key" : null;
   if (!source) return null;
 

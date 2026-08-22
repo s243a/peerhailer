@@ -55,6 +55,14 @@ export const MAX_ADDRESSES = 12;
  * for a person rather than a log. Unbounded, somebody sitting on a stale address
  * — an inherited DHCP lease is enough — can append until the one conflict that
  * matters is buried under three hundred that do not. Newest kept.
+ *
+ * Be honest about what that buys: it bounds memory, and it does **not** promise
+ * the truest entry survives. An attacker refreshing ten junk keys just after
+ * each walk can hold a real rotation at position eleven for as long as they keep
+ * it up — they cannot forge the real key, only crowd it, and a list pinned at
+ * ten fresh entries is itself worth noticing. If that stops being an acceptable
+ * trade, evict by ascending `count` rather than by age: a rotation seen forty
+ * times should outlive junk seen three.
  */
 export const MAX_CONFLICTS = 10;
 
