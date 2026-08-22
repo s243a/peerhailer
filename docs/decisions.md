@@ -520,6 +520,14 @@ Designed in [acp-tunnel.md](acp-tunnel.md). A phone running T3 Code driving an
 agent on a machine at home is what this fabric is for, and it replaces something
 worse — the T3 token crossing a clipboard that motivated the namespace design.
 
+The payload stays **sealed until it reaches the thing that speaks it**, so
+peerhailer never learns what ACP is: it answers *who*, the bridge answers *what*.
+That keeps the fabric protocol-agnostic, means a second tunnel needs no second
+plugin, and leaves a compromised relay knowing who talked to whom and not what
+was said. The cost is one sharp edge — "deliver these bytes to a local process"
+is a port forward, so the endpoint is named in local configuration and referenced
+by name. A caller says `acp`, never `127.0.0.1:9000`.
+
 The obstacle is shape, not trust: a plugin route is a request that returns JSON,
 and ACP needs the agent to originate messages — `session/update` streams, and
 `session/request_permission` blocks waiting for an answer. Polling first, because
