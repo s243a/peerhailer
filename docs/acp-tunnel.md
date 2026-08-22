@@ -110,6 +110,50 @@ Not an optional plugin. If the allowlist were a separate install, the unfiltered
 tunnel would be what you get by following the instructions, and the safe
 configuration would be the one you had to remember.
 
+## Identity travels with the payload
+
+Sealing hides the content from the fabric. It does not hide the sender, because
+peerhailer is the thing that verified them — so a delivery is a pair: an
+identity the daemon vouches for, and bytes it cannot read. Without that, the
+bridge sees anonymous bytes arriving on a local socket and cannot tell a phone
+from anything else on the machine.
+
+**The hand-off has to be authenticated too**, or the chain unravels at the last
+inch. If the bridge's tunnel endpoint accepts any local connection, any local
+process can claim to be the daemon relaying from a trusted peer — the same class
+of problem as the control API answering on loopback with no credential, and the
+same answer: a mode-600 shared secret between daemon and bridge.
+
+## Verify the origin; do not trace the route
+
+A route is a claim by whoever reports it, and an intermediary with a reason to
+lie about the path can. **An origin signature is verifiable end to end**, needs
+no understanding of topology, and survives any number of hops.
+
+- **Direct.** The immediate peer is the origin, and the two agree.
+- **Relayed.** The bridge verifies the origin's signature, and the fact that the
+  immediate peer *differs* is itself the useful signal: this arrived through
+  someone else. Cheap, and enough to express "no agent traffic that was relayed".
+- **Full path**, if ever needed, is a chain of signed hops — which is what grant
+  attenuation already does, so the machinery would be borrowed rather than
+  invented.
+
+## Source and destination
+
+Policy at the bridge keys on both ends, and both are configurable.
+
+**Source** is the verified origin, not the socket. Different peers get different
+answers: a machine you sit at may prompt and cancel; a phone may prompt but not
+change configuration; a relayed request may be refused outright.
+
+**Destination** is the workspace. Bridge sessions already carry a `cwd`, so
+per-workspace policy is a cut that already exists in the model — and a useful
+one, since it is the difference between letting a phone poke at a scratch repo
+and letting it into the one with credentials in it.
+
+The rules themselves live at the bridge, in the policy system it already has,
+because that is the only place the payload is plaintext. See its `design.md`.
+
 ## Sealed or inspectable, and who the relay is
 
 Encryption decides what an intermediary can enforce, and the answer depends on
