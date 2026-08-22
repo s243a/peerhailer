@@ -77,6 +77,42 @@ Peers sharing which networks they bind on is still worth doing — it belongs in
 the namespace design as a self-reported ability — but as *diagnosis*, so a
 person can see why a capability is missing. Never as the basis for granting one.
 
+## Encryption does not protect availability, and that is the stronger argument
+
+A node on the path that can neither read nor alter can still **drop, delay and
+reset**. No cipher helps. What that buys an attacker, and what it does not:
+
+**Killing a tunnel mid-turn.** The agent keeps working, the client comes back to
+a turn it cannot see — already an open question in
+[acp-tunnel.md](acp-tunnel.md), and now with a party who can cause it
+deliberately.
+
+**Stalling polls until the gate times out.** Fail-safe in the sense that nothing
+is approved, and still sabotage: the agent cannot work. One property from
+earlier work matters here. Refusals by a *person* are sticky — the agent is told
+not to reword and try again — but **timeouts are deliberately not**: "nobody
+refused; you may try once more". So a forced timeout produces a retry rather than
+a permanent refusal. Had every denial been made sticky, an on-path attacker could
+have manufactured permanent ones by dropping packets.
+
+**And a downgrade.** This is the one that changes the argument. Routes sort by
+what has worked, so an attacker who blocks the encrypted path does not merely
+deny service — the peer falls back to the path that still answers, which is the
+one the attacker can read. Without a rule about the link, blocking a wire
+silently moves tunnels onto plaintext, and the attacker has *chosen* the medium
+rather than waited for it.
+
+With the rule, the fallback carries hails and refuses tunnels. The attacker can
+still deny service; they cannot convert denial into interception. That is why
+requiring an encrypted arrival is a **default rather than an option**: it is not
+protection against being overheard by accident, it is what stops someone
+arranging to overhear.
+
+What none of this prevents is denial itself. A node that can drop traffic can
+stop two machines talking, and no policy here changes that — the honest answer is
+that availability is the transport's problem, and a fabric of personally-owned
+machines fails visibly rather than silently when a link goes.
+
 ## Two other shapes, and why not
 
 ### Rules that travel with the traffic

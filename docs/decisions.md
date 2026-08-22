@@ -798,6 +798,14 @@ about the link, it is the property that matters for a protocol that is signed an
 not encrypted, and it becomes true by configuring something rather than by
 deciding something.
 
+The stronger argument for making it a default is not confidentiality but
+**downgrade**. Encryption never protected availability: a node on the path can
+drop and delay without reading anything. Routes sort by what has worked, so an
+attacker who blocks the encrypted path does not merely deny service — the peer
+falls back to the path that still answers, which is the one they can read.
+Requiring an encrypted arrival means the fallback carries hails and refuses
+tunnels, so denial cannot be converted into interception.
+
 So today tunnels run over Tailscale and nowhere else, because that is the only
 encrypted link this project has. TLS pinned to the peer's key makes a direct
 peer-to-peer wire qualify — which is the payoff, and the reason TLS is next
