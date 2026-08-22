@@ -815,6 +815,8 @@ lands; a listener's label changes and the capability follows.
 
 ## A chat plugin, and the danger of an unauthenticated one
 
+Designed in full in [chat.md](chat.md); the reasoning is summarised here.
+
 Not presence and not discovery, so a plugin — which is what plugins are for, and
 it keeps anyone who does not want a chat from having one. **Memory only**: a
 message dies with the process, nothing reaches the directory file, and the
