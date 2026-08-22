@@ -165,6 +165,55 @@ no peer is re-admitted, no capability is re-granted. A listener's label goes fro
 plaintext to encrypted because something was configured, and the capability
 follows.
 
+## Optional: dropping a privilege because of where a peer has been
+
+Everything above is about the wire between two machines. A different worry sits
+beside it: a machine that spent an afternoon on a hostile segment may have been
+attacked while it was there, and coming home does not undo that. That is not a
+link property and no per-connection check sees it.
+
+**Off by default, and per capability.** Removing a privilege without a person
+acting is a real cost — "my laptop joined café wifi and now cannot reach my
+server" is a bad surprise — so this is a setting someone turns on for the
+capabilities where it is worth the friction, not a policy the project imposes.
+
+Which capabilities those are follows from what a compromised holder could do:
+
+| Held by a compromised peer | What it gets them | Worth arming |
+| --- | --- | --- |
+| `tunnel:<endpoint>` | drives a local service — the agent runs commands here | **yes, first** |
+| `RELAY` | carries others' traffic: metadata, and the power to drop it | yes |
+| `INTRODUCE` | puts names and keys in a candidate list nothing admits | rarely |
+| `DIRECTORY` | learns who this machine knows | rarely |
+| `HAIL` | learns this machine exists, which it already did | no |
+
+Note the tension, because it does not go away: the peer most worth arming this
+for is usually your own laptop, which is also the one you most want working. The
+friction lands hardest exactly where the protection is most valuable. That is an
+argument for making restoration trivial and the reason visible — not for
+skipping it.
+
+### Believing a peer only when it costs them
+
+What triggers this is the peer's own report that it is somewhere risky, and the
+rule elsewhere in this design is that self-reports are hints rather than
+evidence. Both hold, because of an asymmetry worth stating plainly:
+
+**A self-report is unsafe to believe when it would grant, and safe when it would
+restrict.** A peer claiming a trusted network to *gain* a capability is claiming
+something it benefits from, unverifiable, and exactly what an attacker would say.
+A peer saying "I am on a café network" only ever loses something. Nobody lies
+their way into less.
+
+So the same untrusted input is usable here and not elsewhere, and the difference
+is the direction it moves privilege — which is the property to check whenever
+this design is tempted to trust a claim.
+
+The restriction can also be **self-imposed** rather than requested: a machine
+that knows where it is can simply decline to ask for tunnel capabilities while it
+is there. That needs no agreement from anyone and no mechanism at all, which
+makes it the cheapest version of this idea and the one to build first.
+
 ## Testing it
 
 The household LAN is a real plaintext segment on real hardware:
