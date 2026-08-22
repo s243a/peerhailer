@@ -26,6 +26,7 @@ import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
+import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -379,14 +380,21 @@ switch (command) {
     // not exist, which is the difference between a service being refused and a
     // service not being there.
     const tunnels = stored.tunnels ?? {};
+    const declaredCommands = stored.commands ?? {};
     const plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
       ...(Object.keys(tunnels).length ? [createTunnelPlugin({ endpoints: tunnels })] : []),
+      ...(Object.keys(declaredCommands).length
+        ? [createCommandPlugin({ commands: declaredCommands })]
+        : []),
       ...(await loadPlugins(stored.plugins ?? [], { log })),
     ];
     for (const [name, address] of Object.entries(tunnels)) {
       log(`[tunnel] ${name} -> ${address} (needs tunnel:${name})`);
+    }
+    for (const name of Object.keys(declaredCommands)) {
+      log(`[command] ${name} (needs command:${name})`);
     }
     // Profiles a plugin suggests have to be known before anyone is asked
     // whether they hold one — bundled plugins included, which is where the
@@ -498,6 +506,44 @@ switch (command) {
   case "id": {
     // For handing to another machine: `hail id > sol.pub`.
     process.stdout.write(identity.publicKey.endsWith("\n") ? identity.publicKey : `${identity.publicKey}\n`);
+    break;
+  }
+
+  case "commands": {
+    const [action, name] = rest;
+    const declared = stored.commands ?? {};
+
+    if (action === "add") {
+      const line = rest.slice(2).join(" ").trim();
+      if (!name || !line) fail('usage: hail commands add <name> "<command line>"');
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a command name is letters, digits and dashes");
+      // The operator writes the whole line, and a caller only ever names it.
+      // Nothing a peer sends is interpolated into it — a command that must vary
+      // is two declared commands, because validating a caller's value is the
+      // defence this project has refused twice already.
+      stored.commands = { ...declared, [name]: line };
+      persist();
+      log(`command ${name} runs: ${line}`);
+      log(`peers need command:${name}; no profile grants it yet`);
+      log(`this runs as ${process.env.USER ?? "this user"} — declare only what you mean`);
+      break;
+    }
+
+    if (action === "remove") {
+      if (!name) fail("usage: hail commands remove <name>");
+      const { [name]: _gone, ...rest2 } = declared;
+      stored.commands = rest2;
+      persist();
+      log(`command ${name} removed`);
+      break;
+    }
+
+    const names = Object.keys(declared);
+    if (names.length === 0) {
+      log('no commands declared. hail commands add <name> "<command line>"');
+      break;
+    }
+    for (const entry of names) log(`  ${entry.padEnd(12)} runs: ${declared[entry]}   needs command:${entry}`);
     break;
   }
 
@@ -637,6 +683,7 @@ switch (command) {
         "  hail name <name>             set this machine's name",
         "  hail id                      print this machine's public key",
         "  hail tunnels [add|remove]    endpoints a peer may reach, by name",
+        "  hail commands [add|remove]   commands a peer may run, by name",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",
