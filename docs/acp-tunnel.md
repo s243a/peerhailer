@@ -238,6 +238,50 @@ construction rather than by arithmetic.
 The rules themselves live at the bridge, in the policy system it already has,
 because that is the only place the payload is plaintext. See its `design.md`.
 
+## What subject-binding protects, and what it does not
+
+A grant is useless to whoever intercepts it: it names its subject by key, so the
+bytes buy nothing without the matching private key. That is real, and it is why
+a tunnel can be opened over a plaintext link without the *authorisation* being
+at risk.
+
+It says nothing about the payload. Unencrypted, anyone on the path reads what
+crosses — prompts, file contents, command output, an agent's reasoning about a
+codebase. Subject-binding protects the right to open a tunnel, not the contents
+of one.
+
+And the second endpoint has a sharper version of the same gap. The T3 design
+deliberately sends a **short-lived bearer token**, and a bearer token is usable
+by whoever holds the bytes — that is what the word means. Minting it narrow and
+brief limits the damage; it does not make interception harmless.
+
+So the two endpoints have different requirements, and it is worth stating them
+separately rather than settling on one answer:
+
+| Endpoint | Plaintext link | Why |
+| --- | --- | --- |
+| agent (ACP) | acceptable on a trusted transport | the authorisation is subject-bound; the payload is a conversation |
+| T3 credential | **no** | what crosses is a bearer token, and bearing is the whole mechanism |
+
+### The order this gets built in
+
+**First, no encryption of our own.** Over Tailscale the link is already
+WireGuard; over a household LAN it is not, and that is a documented gap rather
+than a solved problem. This is enough to prove the thing worth proving — that a
+peer can reach one declared local endpoint and nothing else.
+
+**Then TLS, pinned to the peer's key.** Node has TLS; a self-signed certificate
+per machine, accepted only when its key matches the one the directory holds.
+That reuses an implementation many people have attacked, and the part written
+here is the pinning, which is small and checkable.
+
+**Never a hand-rolled transport cipher.** An ephemeral X25519 exchange signed by
+the identity keys is the textbook shape and entirely writable — and it would be
+the most dangerous code in this project, written by whoever is quickest to
+volunteer, in a codebase whose safety argument is that it is small enough to
+read. Reviews of this project have found defects in far less subtle code, in the
+same week it was written.
+
 ## Sealed or inspectable, and who the relay is
 
 Encryption decides what an intermediary can enforce, and the answer depends on
