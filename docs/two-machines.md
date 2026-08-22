@@ -101,9 +101,28 @@ anywhere else until the control API is pinned back to loopback.
 
 ## When it does not work
 
-- **Nothing answers over the LAN, Tailscale is fine.** Check the daemon is bound
-  beyond loopback, then check the access point: consumer routers often enable
-  client isolation, which blocks host-to-host traffic even on the same SSID.
+- **Nothing answers over the LAN, Tailscale is fine.** Seen on the first real
+  run, and confusing because the machines demonstrably reach each other:
+  `tailscale ping` reported `direct 192.168.1.68:41641` in 2ms while TCP to the
+  same address hung. Tailscale installs its own `ts-input` chain, so a host with
+  `Chain INPUT (policy DROP)` accepts the tailnet and drops everything else —
+  the LAN included. Check in this order:
+
+  ```sh
+  curl -s -o /dev/null -w '%{http_code}\n' http://<own-lan-ip>:7645/   # bound?
+  iptables -L INPUT -n | head                                          # policy DROP?
+  tailscale ping <peer>                                                # direct, or relayed?
+  ```
+
+  A daemon answering on its own LAN address while nothing external reaches it is
+  a firewall, not a binding. Open it narrowly if you want the LAN path tested —
+  `iptables -I INPUT -p tcp -s 192.168.1.0/24 --dport 7645 -j ACCEPT` — and know
+  what that admits: the control API is on every bound interface and holds no
+  authentication, so a default-DROP firewall may be the only thing keeping it
+  off the LAN.
+
+  Also check the access point: consumer routers often enable client isolation,
+  which blocks host-to-host traffic even on the same SSID.
 - **`unreachable`, immediately.** Older versions stored `host:port` and dialled
   it as a URL, which threw and read as the peer being down. Pull, and re-add.
 - **`answered by someone else`.** The reply was signed by a key that is not the
