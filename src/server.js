@@ -73,6 +73,7 @@ function readBody(request) {
  *   profiles?: Record<string, any>,
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
+ *   allowedOrigins?: string[],
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   log?: (message: string) => void,
  * }} options
@@ -373,7 +374,7 @@ export function createDaemon({
 
     // Only `application/json` is preflighted; the simple types are what a page
     // may send without asking us first.
-    const type = String(request.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+    const type = String(request.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
     return type !== "application/json";
   };
 
