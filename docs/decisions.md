@@ -494,3 +494,41 @@ It also makes the accept policy in [discovery.md](discovery.md) implementable as
 stated: which interfaces answer hails becomes a property of a socket, not a
 branch. **Not built** — `createDaemon` binds once today.
 
+## Bridging carries introductions, not packets
+
+A machine with more than one listener is *in* more than one network, which is
+what makes it a bridge at all — and `RELAY` has existed as a capability, granted
+by `carrier`, with nothing implementing it. Two listeners are the missing half.
+
+Three constraints, before any of it is built. Being multi-homed must not imply
+willing to carry: binding a second interface cannot quietly enrol a laptop as
+transit for other people's traffic. Direction is not expressible as a boolean —
+letting a household device reach your tailnet peers is a different act from
+letting tailnet peers reach into the household segment. And what crosses should
+be **introductions rather than packets**: forwarding traffic is a VPN, and
+Tailscale already does that better, while carrying the fact that a peer exists
+and how to reach it is `INTRODUCE`, which already exists.
+
+One rule falls out that is easy to forget later: addresses learned on one
+listener must not be republished on another. `192.168.1.68` is useless to a
+tailnet peer, leaks internal topology, and fills a route list that evicts real
+routes to make room.
+
+## The first tunnel plugin carries ACP
+
+Designed in [acp-tunnel.md](acp-tunnel.md). A phone running T3 Code driving an
+agent on a machine at home is what this fabric is for, and it replaces something
+worse — the T3 token crossing a clipboard that motivated the namespace design.
+
+The obstacle is shape, not trust: a plugin route is a request that returns JSON,
+and ACP needs the agent to originate messages — `session/update` streams, and
+`session/request_permission` blocks waiting for an answer. Polling first, because
+it needs no change to what a plugin is, and the question worth answering first is
+whether a remote peer may drive an agent at all.
+
+That capability does not belong in `trusted`. Driving an agent executes code;
+`trusted` means hailing and seeing who we know. It gets its own profile the way
+diagnostics got `operator`, and a tunnel opens against a grant rather than a
+standing permission, because a session with a lifetime is the closest thing here
+to a credential.
+
