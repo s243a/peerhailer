@@ -30,6 +30,7 @@ import { isBlocked } from "./trust.js";
 import {
   BLOCKED_PROFILE,
   DELEGATE,
+  DIRECTORY,
   DIAGNOSTICS,
   HAIL,
   listProfiles,
@@ -390,6 +391,46 @@ export function createDaemon({
             effective: directory.effectiveProfile(peer.name),
           })),
           candidates: directory.listCandidates(),
+        });
+      }
+
+      // What this machine offers, as it knows itself. Locally sourced: nothing
+      // advertises its abilities over the wire yet, which is the namespace
+      // design's job — see docs/shared-namespace.md.
+      if (url.pathname === "/api/plugins" && request.method === "GET") {
+        return send(response, 200, {
+          plugins: plugins.map((plugin) => ({
+            name: plugin.name,
+            description: plugin.description ?? "",
+            capabilities: plugin.capabilities ?? [],
+            routes: (plugin.routes ?? []).map((route) => ({
+              method: route.method,
+              path: route.path,
+              capability: route.capability,
+            })),
+          })),
+        });
+      }
+
+      // What a caller actually receives, gate by gate. Rendering this is the
+      // only honest way to check the rules: `hail` is answered at all,
+      // `directory` is answered with the peer list, and a profile holding
+      // neither gets nothing. Describing that is not the same as showing it.
+      if (url.pathname === "/api/shared" && request.method === "GET") {
+        const profileName = url.searchParams.get("profile") ?? "";
+        const known = listProfiles(profiles).find((entry) => entry.name === profileName);
+        if (!known) return send(response, 404, { error: `no profile called ${profileName}` });
+
+        const mayHail = (known.allows ?? []).includes(HAIL);
+        const maySeePeers = (known.allows ?? []).includes(DIRECTORY);
+        const answer = directory.hailResponse();
+        return send(response, 200, {
+          profile: known.name,
+          allows: known.allows ?? [],
+          gates: { hail: mayHail, directory: maySeePeers },
+          receives: mayHail
+            ? { self: answer.self, peers: maySeePeers ? answer.peers : [] }
+            : null,
         });
       }
 

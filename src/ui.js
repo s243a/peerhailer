@@ -43,12 +43,20 @@ export function renderPage(self) {
   /* The only colour on the page that does not derive from currentColor, so
      the only one that can end up dark red on a dark background. */
   #error { color: #b00; color: light-dark(#b00, #ff9b9b); margin-top: 1rem; }
+  details.node { border-left: 1px solid var(--line); margin: .15rem 0 .15rem .35rem; padding-left: .7rem; }
+  details.node > summary { cursor: pointer; padding: .15rem 0; font-size: .88rem; }
+  details.node > summary::marker { color: color-mix(in oklab, currentColor 45%, transparent); }
+  .leaf { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; padding: .1rem 0 .1rem .2rem; }
+  .leaf .k { opacity: .6; }
+  .gate { display: inline-block; margin-left: .4rem; font-size: .72rem; padding: 0 .35rem; border: 1px solid var(--line); border-radius: .5rem; }
+  .gate.no { opacity: .5; text-decoration: line-through; }
+  .warn { color: #b00; color: light-dark(#b00, #ff9b9b); }
 </style>
 </head>
 <body>
 <header>
   <h1>${escapeHtml(self.name)}</h1>
-  <span class="mono muted">${escapeHtml(self.fingerprint)}</span>
+  <span class="mono muted" id="fingerprint-value">${escapeHtml(self.fingerprint)}</span>
   <span class="muted" id="clock"></span>
 </header>
 
@@ -60,6 +68,13 @@ export function renderPage(self) {
   A peer naming another tells you it exists, not that you should talk to it.
 </p>
 <div id="candidates"></div>
+
+<h2>What this machine holds and shares</h2>
+<p class="muted" style="margin:.2rem 0 .6rem">
+  Opening a branch fetches it; closing one discards what was fetched, so nothing
+  read stays behind. Re-opening asks again.
+</p>
+<div id="tree"></div>
 
 <div id="error"></div>
 
@@ -149,6 +164,133 @@ document.addEventListener("change", async (event) => {
     $("error").textContent = String(cause.message ?? cause);
   }
 });
+
+
+/*
+ * The tree.
+ *
+ * Closing a branch throws away what was fetched rather than hiding it. Hiding
+ * leaves the value in the DOM and in memory, where a heap snapshot still finds
+ * it and re-opening shows it again without asking anyone's permission a second
+ * time. Discarding makes the gate run every time a branch opens, which is what
+ * you want a gate to do.
+ */
+const nodes = new Map();
+
+function leaf(key, value) {
+  return '<div class="leaf"><span class="k">' + esc(key) + ':</span> ' + esc(value) + '</div>';
+}
+
+function gateChip(name, open) {
+  return '<span class="gate' + (open ? '' : ' no') + '">' + esc(name) + '</span>';
+}
+
+function node(id, label, extra) {
+  return '<details class="node" data-node="' + esc(id) + '"><summary>' + label +
+    (extra ?? '') + '</summary><div class="body"></div></details>';
+}
+
+const RENDER = {
+  async self() {
+    const state = await api("/api/peers");
+    const plugins = await api("/api/plugins");
+    return [
+      leaf("name", state.self.name),
+      leaf("fingerprint", $("fingerprint-value")?.textContent ?? ""),
+      state.self.addresses?.length
+        ? state.self.addresses.map((a) => leaf(a.transport, a.value)).join("")
+        : leaf("addresses", "none recorded"),
+      '<div class="leaf k" style="margin-top:.3rem">offers</div>',
+      plugins.plugins.map((p) =>
+        leaf(p.name, (p.capabilities.join(", ") || "no capability") + " — " + p.description)).join(""),
+    ].join("");
+  },
+
+  async peers() {
+    const state = await api("/api/peers");
+    if (!state.admitted.length) return '<div class="leaf">none admitted</div>';
+    return state.admitted.map((peer) => node("peer:" + peer.name, esc(peer.name),
+      gateChip(peer.effective?.profile ?? "?", peer.effective?.profile !== "blocked"))).join("");
+  },
+
+  async shared() {
+    const profiles = await api("/api/profiles");
+    return profiles.map((p) => node("shared:" + p.name, esc(p.name))).join("");
+  },
+};
+
+async function renderNode(id) {
+  if (RENDER[id]) return RENDER[id]();
+
+  if (id.startsWith("peer:")) {
+    const name = id.slice(5);
+    const state = await api("/api/peers");
+    const peer = state.admitted.find((entry) => entry.name === name);
+    if (!peer) return '<div class="leaf">gone</div>';
+    const lapses = peer.profileUntil && peer.profileUntil > Date.now()
+      ? leaf("until", new Date(peer.profileUntil).toISOString() + " then " + (peer.profileAfter ?? "default"))
+      : "";
+    const conflicts = (peer.conflicts ?? []).map((c) =>
+      '<div class="leaf warn">! another key answered as ' + esc(name) + ', seen ' + c.count +
+      'x since ' + esc(new Date(c.firstSeen).toISOString()) + ' — the key held still applies</div>').join("");
+    return [
+      leaf("profile", peer.effective?.profile ?? "?"),
+      leaf("why", peer.effective?.reason ?? ""),
+      lapses,
+      leaf("key", peer.publicKey ? "held" : "none — trust on first use"),
+      peer.addresses?.length
+        ? peer.addresses.map((a) => leaf(a.transport, a.value)).join("")
+        : leaf("addresses", "none"),
+      leaf("last seen", peer.lastSeen ? new Date(peer.lastSeen).toISOString() : "never"),
+      conflicts,
+    ].join("");
+  }
+
+  if (id.startsWith("shared:")) {
+    const view = await api("/api/shared?profile=" + encodeURIComponent(id.slice(7)));
+    const gates =
+      '<div class="leaf">' + gateChip("hail", view.gates.hail) + gateChip("directory", view.gates.directory) + '</div>';
+    if (!view.receives) return gates + '<div class="leaf">receives nothing — not answered at all</div>';
+    return gates +
+      leaf("self", view.receives.self?.name ?? "") +
+      (view.gates.directory
+        ? (view.receives.peers.length
+            ? view.receives.peers.map((peer) => leaf("peer", peer.name)).join("")
+            : leaf("peers", "none to pass on"))
+        : leaf("peers", "withheld — no directory capability"));
+  }
+
+  return "";
+}
+
+document.addEventListener("toggle", async (event) => {
+  const details = event.target;
+  if (!(details instanceof HTMLDetailsElement) || !details.dataset.node) return;
+  const body = details.querySelector(".body");
+  const id = details.dataset.node;
+
+  if (!details.open) {
+    // Discard, do not hide. Any nested branch goes with it.
+    body.innerHTML = "";
+    for (const key of [...nodes.keys()]) if (key === id || key.startsWith(id + "/")) nodes.delete(key);
+    return;
+  }
+
+  try {
+    body.innerHTML = '<div class="leaf muted">…</div>';
+    body.innerHTML = await renderNode(id);
+    nodes.set(id, true);
+  } catch (cause) {
+    body.innerHTML = "";
+    $("error").textContent = String(cause.message ?? cause);
+  }
+}, true);
+
+$("tree").innerHTML = [
+  node("self", "self"),
+  node("peers", "peers"),
+  node("shared", "what a caller receives"),
+].join("");
 
 refresh();
 setInterval(refresh, 5000);
