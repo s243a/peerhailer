@@ -666,3 +666,61 @@ while appearing to permit. The default is empty: the page this daemon serves is
 same-origin and needs nothing, and a page you did not write has no business
 admitting peers.
 
+## The page is surface, and it is optional in principle
+
+Everything above exists because there is a web interface. Without one, this
+daemon needs no HTTP server a browser can reach, no control API, and none of the
+origin machinery — the boundary would be filesystem permissions on the state
+file, which is simpler and far better understood.
+
+What the page costs, stated plainly:
+
+- **A port a browser can reach.** Every page you visit can send it requests. The
+  reply is hidden from them; the effect is not. That is the whole CSRF class, and
+  it exists only because a browser is in the picture.
+- **A surface that keeps moving.** Which request shapes count as "simple", what
+  a preflight covers, how `Origin` behaves in edge cases — these are browser
+  rules, revised by browser vendors, not by us. A check that is correct today is
+  correct until Chromium changes its mind.
+- **The page itself as a target.** Script injected into it runs same-origin and
+  inherits the control API completely. Everything rendered from a peer's data —
+  names, addresses, plugin descriptions — is attacker-influenced text.
+- **A second implementation of every rule.** Capability changes have to land in
+  the CLI and the page. This session added key-conflict warnings and elevation
+  expiry to the CLI and forgot the page until it was asked about.
+
+None of that argues for deleting it. Seeing the fabric is genuinely worth
+something, and the tree makes rules visible that prose does not. It argues for
+the page being **opt-in**, so a headless daemon on a server carries none of it —
+the same principle as plugins: people should not inherit features they did not
+ask for.
+
+### Would Electron help?
+
+Partly, and less than it looks.
+
+**The real win is dropping HTTP entirely.** An Electron renderer talks to its
+main process over IPC, not a socket. No port, no `Origin`, no preflight, no DNS
+rebinding — the entire class of problem above stops existing, rather than being
+defended against. That is a categorical improvement over getting three checks
+right and keeping them right.
+
+**The costs are not small.** It bundles Chromium, which is a far larger attack
+surface than anything here and must be kept current — a stale Electron is a
+stale browser. It would take a project with **zero dependencies**, which runs on
+an old PuppyLinux box, and give it one of the largest in software. And Electron
+misconfigured is worse than a loopback server: `nodeIntegration` with remote
+content is remote code execution, not information disclosure.
+
+**And it does not answer the case that motivated all of this.** The point of
+this fabric is reaching a machine from a phone. An Electron app is a desktop
+window; the moment you want the interface remotely you are serving over a
+network again, and back to needing tokens, origins and the rest. Electron
+removes the browser problem for people sitting at the machine, which is the case
+that already had the safest answer available — the CLI.
+
+The middle option, if the page is ever wanted beyond loopback, is a token in the
+URL the way T3 Code pairs a browser: it authenticates the page rather than
+trusting its position, and it works remotely. That is a bigger decision than a
+flag, and it is not needed while the page is local and optional.
+
