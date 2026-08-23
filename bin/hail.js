@@ -439,7 +439,7 @@ switch (command) {
      * The daemon cannot do this itself: only here knows that `stored.tunnels`
      * becomes a tunnel plugin and `stored.commands` becomes a command plugin.
      */
-    const rebuild = () => {
+    const rebuild = async () => {
       const fresh = loadState(statePath);
       const nextTunnels = fresh.tunnels ?? {};
       const nextCommands = fresh.commands ?? {};
@@ -452,6 +452,11 @@ switch (command) {
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
+        // The externally-loaded ones too. Dropping them silently on reload
+        // vanishes the profiles they declare, so a peer holding a capability one
+        // of them contributed is refused with nothing said — an operator adding
+        // a tunnel and watching their T3 integration stop answering.
+        ...(await loadPlugins(fresh.plugins ?? [], { log })),
       ];
       return {
         plugins: nextPlugins,
@@ -460,12 +465,14 @@ switch (command) {
       };
     };
 
+    const port = Number(flags.port ?? 8787);
     const daemon = createDaemon({
       directory,
       identity,
       profiles,
       diagnostics,
       plugins,
+      onReload: async () => daemon.reload(await rebuild()),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
       // so a change made at a terminal is not discarded by the next save here.
@@ -486,7 +493,6 @@ switch (command) {
       },
       log,
     });
-    const port = Number(flags.port ?? 8787);
     // Two doors, and the first one is optional.
     //
     // The control listener exists only for the page: the CLI reads the state

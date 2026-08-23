@@ -74,7 +74,7 @@ function readBody(request) {
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
  *   allowedOrigins?: string[],
- *   onReload?: () => any,
+ *   onReload?: () => any | Promise<any>,
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   log?: (message: string) => void,
  * }} options
@@ -601,8 +601,11 @@ export function createDaemon({
       // because only the host knows how its plugins are constructed.
       if (scope === "control" && url.pathname === "/api/reload" && request.method === "POST") {
         if (!onReload) return send(response, 501, { error: "this host cannot reload" });
+        // The body is read and discarded even though nothing uses it: an unread
+        // body on a keep-alive connection leaves bytes for the next parse.
+        await readBody(request).catch(() => "");
         try {
-          return send(response, 200, onReload());
+          return send(response, 200, await onReload());
         } catch (error) {
           return send(response, 500, { error: String(error instanceof Error ? error.message : error) });
         }

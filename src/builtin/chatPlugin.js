@@ -28,13 +28,30 @@ export const MAX_PER_PEER = 100;
 export const MESSAGE_MS = 24 * 60 * 60_000;
 
 /**
+ * A ceiling across *all* conversations, not just each one.
+ *
+ * The per-peer cap bounds one thread; nothing bounds the number of threads. That
+ * is fine while `chat` is granted one peer at a time, and stops being fine the
+ * day a profile hands it to a class of callers — distinct keys are only scarce
+ * while capabilities are. A total cap costs nothing and does not wait for that
+ * day to arrive.
+ */
+export const MAX_CONVERSATIONS = 500;
+
+/**
  * @param {{
  *   now?: () => number,
  *   maxPerPeer?: number,
  *   messageMs?: number,
+ *   maxConversations?: number,
  * }} [options]
  */
-export function createChatPlugin({ now = Date.now, maxPerPeer = MAX_PER_PEER, messageMs = MESSAGE_MS } = {}) {
+export function createChatPlugin({
+  now = Date.now,
+  maxPerPeer = MAX_PER_PEER,
+  messageMs = MESSAGE_MS,
+  maxConversations = MAX_CONVERSATIONS,
+} = {}) {
   /**
    * Peer fingerprint -> their messages, newest last.
    *
@@ -56,6 +73,15 @@ export function createChatPlugin({ now = Date.now, maxPerPeer = MAX_PER_PEER, me
     const oldest = now() - messageMs;
     while (thread.length && (thread.length > maxPerPeer || (thread[0]?.at ?? oldest) < oldest)) thread.shift();
     threads.set(peerKey, thread);
+
+    // Evict the least-recently-touched whole conversation past the ceiling. A
+    // Map preserves insertion order and `set` above moved this key to the end,
+    // so the front is the coldest.
+    while (threads.size > maxConversations) {
+      const coldest = threads.keys().next().value;
+      if (coldest === undefined || coldest === peerKey) break;
+      threads.delete(coldest);
+    }
   };
 
   return {
@@ -79,9 +105,12 @@ export function createChatPlugin({ now = Date.now, maxPerPeer = MAX_PER_PEER, me
           if (!text.trim()) return { [REFUSE]: true, reason: "an empty message is not a message" };
           if (text.length > MAX_MESSAGE) return { [REFUSE]: true, reason: "that is longer than a note" };
 
-          // `mine: false` — it came from them. Stored as plain text and shown as
-          // plain text; nothing here is rendered as a link or a command, because
-          // a message is not an instruction.
+          // `mine: false` — it came from them. Stored verbatim, and this is the
+          // one place to be clear about it: the text is attacker-chosen and the
+          // storage does not sanitise it. Whatever renders a thread MUST escape
+          // it and MUST NOT make it actionable — a link, a command — or this is
+          // the stored-XSS plugin. The claim lives here as a requirement because
+          // the renderer that has to honour it does not exist yet.
           append(caller.publicKey, { from: caller.name, text, at: now(), mine: false });
           return { received: true };
         },
