@@ -29,6 +29,7 @@ import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
+import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -384,6 +385,7 @@ switch (command) {
     const tunnels = stored.tunnels ?? {};
     const declaredCommands = stored.commands ?? {};
     const declaredServices = stored.services ?? {};
+    const declaredShells = stored.shells ?? {};
     // An inbox is opt-in: someone running a headless relay should not inherit
     // one, same principle as the page.
     const wantsChat = flags.chat === true || stored.chat === true;
@@ -395,6 +397,7 @@ switch (command) {
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
+      ...(Object.keys(declaredShells).length ? [createShellPlugin({ shells: declaredShells })] : []),
       ...(Object.keys(declaredCommands).length
         ? [
             createCommandPlugin({
@@ -417,6 +420,9 @@ switch (command) {
     }
     for (const name of Object.keys(declaredServices)) {
       log(`[service] ${name} (needs service:${name})`);
+    }
+    for (const name of Object.keys(declaredShells)) {
+      log(`[shell] ${name} (needs shell:${name}) — remote shell access; encrypted arrival only`);
     }
     if (wantsChat) log(`[chat] on (needs chat)`);
     // Profiles a plugin suggests have to be known before anyone is asked
@@ -450,6 +456,7 @@ switch (command) {
       const nextTunnels = fresh.tunnels ?? {};
       const nextCommands = fresh.commands ?? {};
       const nextServices = fresh.services ?? {};
+      const nextShells = fresh.shells ?? {};
       const nextChat = flags.chat === true || fresh.chat === true;
       const nextPlugins = [
         hailPlugin,
@@ -459,6 +466,7 @@ switch (command) {
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
         ...(Object.keys(nextServices).length ? [createServicePlugin({ services: nextServices })] : []),
+        ...(Object.keys(nextShells).length ? [createShellPlugin({ shells: nextShells })] : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
         // The externally-loaded ones too. Dropping them silently on reload
         // vanishes the profiles they declare, so a peer holding a capability one
@@ -564,6 +572,39 @@ switch (command) {
   case "id": {
     // For handing to another machine: `hail id > sol.pub`.
     process.stdout.write(identity.publicKey.endsWith("\n") ? identity.publicKey : `${identity.publicKey}\n`);
+    break;
+  }
+
+  case "shells": {
+    const [action, name] = rest;
+    const declared = stored.shells ?? {};
+
+    if (action === "add") {
+      const line = rest.slice(2).join(" ").trim();
+      if (!name || !line) fail('usage: hail shells add <name> "<shell command>"');
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a shell name is letters, digits and dashes");
+      stored.shells = { ...declared, [name]: line };
+      persist();
+      log(`shell ${name} runs: ${line}`);
+      log(`peers need shell:${name}; it is in no profile — grant it deliberately`);
+      log("this is remote shell access, run as " + (process.env.USER ?? "this user") + ". To restrict it, declare a sandbox:");
+      log('  hail shells add ' + name + ' "firejail --net=none bash"   (or bwrap / unshare / a container)');
+      break;
+    }
+    if (action === "remove") {
+      if (!name) fail("usage: hail shells remove <name>");
+      const { [name]: _gone, ...rest2 } = declared;
+      stored.shells = rest2;
+      persist();
+      log(`shell ${name} removed`);
+      break;
+    }
+    const names = Object.keys(declared);
+    if (names.length === 0) {
+      log('no shells declared. hail shells add <name> "<shell command>"');
+      break;
+    }
+    for (const entry of names) log(`  ${entry.padEnd(12)} runs: ${declared[entry]}   needs shell:${entry}`);
     break;
   }
 
@@ -791,6 +832,7 @@ switch (command) {
         "  hail tunnels [add|remove]    endpoints a peer may reach, by name",
         "  hail commands [add|remove]   commands a peer may run, by name",
         "  hail services [add|remove]   long-running processes a peer may start",
+        "  hail shells [add|remove]     an interactive shell a peer may open (remote shell access)",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",

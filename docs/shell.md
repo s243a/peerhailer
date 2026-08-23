@@ -1,7 +1,8 @@
 # A shell plugin
 
-**Status: designed, not built. The most dangerous plugin in the project — read
-the ladder before the mechanism.**
+**Status: built** (`src/builtin/shellPlugin.js`) — a pipe-based first cut; a real
+PTY is a stdio swap validated on-device, the route surface unchanged. The most
+dangerous plugin in the project — read the ladder before the mechanism.
 
 ## What it is, said plainly
 
@@ -64,9 +65,12 @@ It is the most direct grant of this machine to another that the fabric can make.
 
 Nothing here is optional. Each is because of the row above.
 
-- **Its own capability, `shell`, in no built-in profile.** Not bundled with
-  anything, not implied by `trusted`. A peer gets a shell only by a grant that
-  says `shell` and nothing weaker standing in for it.
+- **Its own capability, `shell:<name>`, in no built-in profile.** Per-name, like
+  the rest of the plugin family — so an operator declares a bare shell and a
+  sandboxed one as *separate* grants (`shell:admin`, `shell:sandboxed`) — but
+  never under the tunnel namespace: a person granting it must see "a shell", not
+  "one more endpoint". Not bundled with anything, not implied by `trusted`. A
+  peer gets a shell only by a grant that names it and nothing weaker.
 - **An encrypted arrival, without exception.** A plaintext shell is a session
   anyone on the wire reads and injects keystrokes into — worse than the CDP case,
   because it is a root-ish prompt rather than a browser. So `network-trust.md`'s
@@ -131,14 +135,16 @@ not imply parity.
 
 ## Where a supervisor fits
 
-A shell is exactly where the bridge's supervisor idea would want to reach, and
-the composition is worth stating: a shell session could pass its commands through
-a supervisor before they run — the `withSupervisor` seam, applied to shell input
-rather than ACP tool calls. That turns "an unfiltered terminal" into "a terminal
-a reviewer watches," which is the difference between `shell` being reckless and
-being merely powerful. It is not required for a first version, but it is the
-thing that would make `shell` safe to grant more widely, and the design should
-leave room for it rather than assume the PTY is unwatched.
+A supervisor is **optional here, not a precondition** — the gate is the
+capability, and an operator who grants `shell:<name>` has already decided to
+trust the holder with a terminal. But the composition is worth stating, because
+it is cheap: the `send` handler is the single choke point for input, so a
+reviewer could sit there — the `withSupervisor` seam applied to shell input
+rather than ACP tool calls — turning "an unfiltered terminal" into "a terminal a
+reviewer watches". That is the difference between reckless and merely powerful,
+and it is a nice-to-have for granting more widely, not a gate the first version
+waits behind. The plugin leaves the seam where it would attach and does not
+build it.
 
 ## Open
 
@@ -160,10 +166,15 @@ leave room for it rather than assume the PTY is unwatched.
   PTY that kills a long `make` producing output nobody typed at, or holds one open
   on a 4-minute keepalive byte. Idle for a shell must mean **no bytes in either
   direction**, which is not what the tunnel measures.
-- **Whether it should exist at all before a shell-aware supervisor does.** An
-  unwatched remote shell is a lot to offer. The supervisor seam that exists
-  supervises *ACP tool calls*; supervising shell *input* is a byte-stream seam
-  that does not exist yet — so "supervisor first, done" understates the distance.
-  A defensible sequence: build the byte-stream supervision, then the shell as
-  something a supervisor can be *required* for, rather than a shell anyone with
-  the capability drives blind.
+- **Restriction is a declared sandbox, not plugin machinery.** The earlier draft
+  asked whether the shell should exist before a shell-aware supervisor does. It
+  should: a supervisor is one optional way to restrict a shell, and it is not the
+  only one, nor the cheapest. Because the operator declares the command, the
+  command *can be the sandbox* — `firejail --net=none bash`, `bwrap …`,
+  `unshare -Urn bash`, a container, or on Termux the Android app sandbox (with
+  `proot` if wanted). The plugin runs what is declared and never looks inside it,
+  so OS-level confinement composes for free, with no filter on the bytes and no
+  implied safety the plugin cannot deliver. "Restrict this shell" is "declare a
+  restricted shell." An operator who wants neither a sandbox nor a supervisor is
+  granting a full terminal, deliberately — which is what `shell:<name>` in no
+  profile is there to make them do.
