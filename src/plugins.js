@@ -61,7 +61,7 @@
  *     run: (input: {args: string[], flags: Record<string, string | true>, directory: any, log: (message: string) => void}) => unknown,
  *   }>,
  *   init?: (input: {directory: any, identity: any, log: (message: string) => void}) => void,
- *   history?: () => Array<{capability: string, peerKey: string, runs: number, last: number | null}>,
+ *   history?: () => Array<{capability: string, peerKey: string, at: number, outcome: string}>,
  *   stop?: () => void,
  * }} Plugin
  */

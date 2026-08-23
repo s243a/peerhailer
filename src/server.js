@@ -597,10 +597,10 @@ export function createDaemon({
             // A fingerprint, not the key: this is for recognising a peer, and a
             // page full of PEMs is a page nobody reads.
             peer: entry.peerKey ? fingerprint(entry.peerKey) : "unknown",
-            runs: entry.runs,
-            last: entry.last,
+            at: entry.at,
+            outcome: entry.outcome,
           }))
-          .sort((left, right) => (right.last ?? 0) - (left.last ?? 0));
+          .sort((left, right) => (right.at ?? 0) - (left.at ?? 0));
         return send(response, 200, { entries });
       }
 

@@ -100,9 +100,10 @@ test("who ran what is recorded for a person to read", async () => {
   await call(routes, "/command/pair/run", { caller: sol });
   await call(routes, "/command/pair/run", { caller: sol });
 
-  const [entry] = plugin.history();
-  assert.equal(entry.capability, "command:pair");
-  assert.equal(entry.runs, 2, "a credential minted while nobody watched is worth a list afterwards");
+  const seen = plugin.history();
+  assert.equal(seen.length, 2, "both runs are kept, not a rolling count that a minute erases");
+  assert.equal(seen[0].capability, "command:pair");
+  assert.deepEqual(seen.map((entry) => entry.outcome), ["ran", "ran"]);
 });
 
 test("the same key spelled differently is still the same peer", async () => {
@@ -175,9 +176,44 @@ test("what a peer ran is visible somewhere a person looks", async () => {
     const seen = await (await fetch(`http://127.0.0.1:${port}/api/command-history`)).json();
     assert.equal(seen.entries.length, 1);
     assert.equal(seen.entries[0].capability, "command:greet");
-    assert.equal(seen.entries[0].runs, 1);
+    assert.equal(seen.entries[0].outcome, "ran");
     assert.equal(seen.entries[0].peer, fingerprint(runner.publicKey), "by fingerprint, not by PEM");
   } finally {
     await daemon.close();
   }
+});
+
+test("the record outlives the rate-limit window, and is bounded", async () => {
+  let clock = 1_000_000;
+  const plugin = createCommandPlugin({
+    commands: { greet: "echo hi" },
+    now: () => clock,
+    maxHistory: 3,
+    historyMs: 10 * 60_000,
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  // Two runs a minute apart. Sharing the limiter's array made the first vanish,
+  // so the record said "1" for a peer that had run twice — accountability that
+  // evaporates looks like accountability until somebody needs it.
+  await call(routes, "/command/greet/run", { caller: sol });
+  clock += 61_000;
+  await call(routes, "/command/greet/run", { caller: sol });
+  assert.equal(plugin.history().length, 2, "the older run survives the window that limits it");
+
+  // Refusals are recorded too: a peer repeatedly hitting the limit is exactly
+  // what someone reading this afterwards wants to see.
+  for (let i = 0; i < MAX_RUNS + 1; i += 1) await call(routes, "/command/greet/run", { caller: sol });
+  assert.ok(
+    plugin.history().some((entry) => entry.outcome.startsWith("refused")),
+    "and so is being turned away",
+  );
+
+  // Bounded, because this lives in memory.
+  assert.equal(plugin.history().length, 3, "capped at maxHistory");
+
+  // And by age.
+  clock += 11 * 60_000;
+  await call(routes, "/command/greet/run", { caller: sol });
+  assert.equal(plugin.history().length, 1, "older than historyMs is dropped");
 });

@@ -386,7 +386,16 @@ switch (command) {
       createDiagnosticsPlugin(diagnostics),
       ...(Object.keys(tunnels).length ? [createTunnelPlugin({ endpoints: tunnels })] : []),
       ...(Object.keys(declaredCommands).length
-        ? [createCommandPlugin({ commands: declaredCommands })]
+        ? [
+            createCommandPlugin({
+              commands: declaredCommands,
+              // How much to remember, and for how long. In memory, so both are
+              // bounded — and settings, because how much you want to know
+              // afterwards is not this project's decision.
+              ...(Number.isFinite(stored.history?.max) ? { maxHistory: stored.history.max } : {}),
+              ...(Number.isFinite(stored.history?.ageMs) ? { historyMs: stored.history.ageMs } : {}),
+            }),
+          ]
         : []),
       ...(await loadPlugins(stored.plugins ?? [], { log })),
     ];
