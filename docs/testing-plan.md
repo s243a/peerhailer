@@ -48,6 +48,20 @@ interface spends its attention on the polish.
 | **The old PuppyLinux box** | The machine this is meant to serve. Does it install and run at all? |
 | **T3 `agy-dual-gated`** | Verified at the bridge, never through T3's UI. Do the approval cards appear with the command text? |
 
+## Stage 1b — the plugins, on real machines
+
+| What | Result |
+| --- | --- |
+| **Declared commands, peer to peer** | **Works.** A command declared on the PuppyLinux box, granted through a profile that no built-in grants (`hail` + `command:whoami`), run from another machine over the tailnet, returned its output. The caller supplied nothing that reached the command line. |
+| **Per-peer rate limit** | **Works.** Five runs, then `403 denied` — the refusal style an identified peer should get, rather than a drop. |
+| **Tunnel plugin, peer to peer** | **Not tested.** Built and unit-tested; has never carried bytes between machines. |
+
+One gap the exercise found: `history()` records who ran what and **nothing surfaces
+it**. The daemon logs a line per run, so it scrolls past; the structured record —
+added so a person could see credentials minted while nobody was watching — is
+reachable only from host code, exposed by no command and no page. Built and
+invisible is worse than not built, because it reads as covered.
+
 ## Stage 2 — review (Kimi)
 
 The highest-value stage, because peerhailer has had **no external review at
