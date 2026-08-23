@@ -30,25 +30,57 @@ belongs to the peer we mean — which is a comparison, not a construction. The
 cipher, the handshake, the record layer are Node's, which is OpenSSL's, which is
 attacked continuously by people who do that for a living.
 
-## The mechanism: a self-signed cert carrying the identity key
+## The mechanism: a cert key the identity certifies
 
 peerhailer identities are **Ed25519**, and X.509 certificates can be Ed25519
 (RFC 8410). Node's `tls` both serves and verifies them. So:
 
-- A daemon generates, once, a **self-signed certificate whose key is its identity
-  key.** Not a *new* key that the identity signs — the identity key itself, so
-  the cert *is* the identity in X.509 clothing. Stored beside the identity file.
+- A daemon generates, once, a **self-signed certificate for a dedicated cert
+  key, and has the identity key certify it** — a signed statement "cert key K
+  speaks for identity I until time T", verified with the same `verifyPayload`
+  machinery the hail already uses. The client pins by verifying that statement:
+  the presented cert's key is vouched for by the identity key it holds. Stored
+  beside the identity file.
+
+  *Why not reuse the identity key as the cert key directly (the first draft's
+  plan)?* Because one Ed25519 key signing both hail payloads and the TLS
+  handshake is cross-protocol reuse, and its safety would rest entirely on
+  OpenSSL's domain-separation prefix (`"TLS 1.3, server CertificateVerify"` +
+  padding) keeping the two signature domains from colliding — a property enforced
+  by a third party's framing constant, not by this project's own code, in a
+  project whose safety argument is that it is small enough to read. Reuse also
+  couples the blast radii: an OpenSSL memory-disclosure bug reading the in-use
+  cert key would then leak the *identity*, unrecoverably, rather than a disposable
+  subkey. And it buys nothing operationally — `hail rotate` rotates the identity,
+  which forces cert regeneration anyway. A certified subkey costs one extra
+  verification and keeps "the cert is the identity" one revocable indirection
+  away.
 - A client connecting over TLS does **not** use a CA. It sets
   `rejectUnauthorized: false` to stop Node applying the web PKI, and instead, in
   the TLS `checkServerIdentity` / on `secureConnect`, reads the peer's presented
-  certificate, extracts its public key, and **compares it to the key the
-  directory holds for that peer** with `sameKey`.
+  cert key *and* the accompanying certificate statement, and **verifies that
+  statement against the identity key the directory holds** — the subkey speaks
+  for the identity we pin to. A cert whose statement does not verify under the
+  held identity key is refused.
 
-That comparison is the whole security boundary, and it is the same check the
-whole project already rests on: *is this the key I hold for this name.* A
-certificate signed by any other key — a real CA, a different peer, a
+That comparison is the security boundary against key impersonation, and it is the
+same check the whole project already rests on: *is this the key I hold for this
+name.* A certificate signed by any other key — a real CA, a different peer, a
 man-in-the-middle — fails it, exactly as a hail signed by the wrong key fails
 `verifyRecord`.
+
+**But the pin only closes key-impersonation, not name-resolution.** The pin
+proves "I am talking to the key I hold for X" — at whatever address X's name
+currently resolves to. If the address came from one place (DNS on a LAN, an ARP
+answer, a CLI argument) and the pinned key from another (the directory), an
+attacker who can shift the *address* cannot forge the key, but can change the
+question the pin answers: the client gets a pinned session to a peer who will
+never answer there, and its traffic flows to a black hole, or to a relay holding
+it for later replay. So the rule, stated as a rule: **the pinned key and the
+address it dials must come from the same lookup — one directory record, read
+once, both fields from it.** Never "resolve the name, then separately ask the
+directory for its key." This is the live-read rule the doc already endorses for
+rotation, extended from freshness to provenance.
 
 ### Why not a CA, and why not the web PKI
 
@@ -91,12 +123,18 @@ someone *between* the machines, not against the machine you are talking to.
 **Not authentication on its own — pinning is.** Plain TLS with
 `rejectUnauthorized: false` and no pin authenticates nothing; it encrypts to
 whoever answered. The pin is the half that makes the encryption meaningful, so
-the pin check is not optional and not skippable, and a connection that cannot
-read the peer's cert key must fail, never proceed unpinned.
+the pin check is not optional and not skippable. And Node's API makes the skip
+*easy* — `checkServerIdentity` returning `undefined` accepts — so the failure
+shape must be explicit: **the pin callback is total.** Every branch returns a
+verified key or throws; `getPeerCertificate()` returning empty (handshake
+weirdness, post-handshake auth) throws, never falls through. A pin that can
+return `undefined` is a pin that fails open.
 
-**Not a new identity.** The cert carries the *existing* Ed25519 identity key.
-Nothing new to exchange, revoke, or rotate separately from the identity itself —
-`hail rotate` already covers the one key there is.
+**Not a new identity.** The cert key is a *subkey*, vouched for by the existing
+Ed25519 identity. Nothing new is *exchanged* — a peer still holds only the
+identity key, and verifies the subkey's certificate against it, so there is no
+second key to distribute. The subkey is disposable and locally regenerable; the
+identity, which `hail rotate` covers, remains the one thing peers pin to.
 
 ## Open
 

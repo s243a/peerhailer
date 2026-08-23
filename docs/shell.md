@@ -40,7 +40,20 @@ The capabilities this fabric grants, in order of consequence:
 | `command:pair` | a bearer credential |
 | `tunnel:devtools` | a browser and its logins |
 | `service:agent` | starts an agent that runs *some* commands |
-| **`shell`** | **runs *any* command, interactively, now** |
+| **`shell`** | **runs any command, interactively — and thereby the control API** |
+
+`shell` is above everything because it does not stop at "any command." A PTY
+spawned as the daemon user inherits the daemon's environment, cwd, filesystem
+access to the **identity key, the grants store, and the state file**, and network
+access to the **loopback control listener** — which mints grants, rotates keys,
+and reloads plugins. A peer holding `shell` who runs `curl localhost:<control>/…`
+exercises operator authority the fabric tracks no capability for. So the honest
+row is: **`shell` ≈ operator of this host.** A peer you would not hand the
+control port to must not hold `shell`. The tunnel's self-port guard closed
+exactly this for tunnels; a shell needs the equivalent — at minimum a scrubbed
+spawn environment carrying no control-port address and no auth material — and it
+needs it *because* the ladder does not stop at "any command", it follows through
+to "therefore operator authority."
 
 `service:agent` is below `shell` because an agent is still mediated — it decides
 what to run, and the bridge can review it. A shell is unmediated: the peer is the
@@ -63,10 +76,13 @@ Nothing here is optional. Each is because of the row above.
   declaration has no PTY route at all — not a refused one, an absent one. Opting
   in is a deliberate act with a deliberate capability behind it.
 - **A recorded session, always.** `command:pair` records who ran what because a
-  credential minted unwatched is what a person wants to see afterwards. A *shell*
-  session is far more, and the same argument is far stronger: what commands ran,
-  from which peer, when — kept, bounded, and visible where the run-history already
-  is. A shell you cannot audit is one you should not have opened.
+  credential minted unwatched is what a person wants to see afterwards; the same
+  argument applies to a shell, harder. What is recordable is *that* a session
+  happened, from which peer, when and how long — kept, bounded, visible where the
+  run-history is. What is **not** cleanly recordable is "the commands", for the
+  reason below (a PTY byte log is not an audit trail); do not promise it. A shell
+  whose *existence* you cannot see is one you should not have opened — which is
+  the honest, deliverable version of the audit requirement.
 - **Bounded like everything else.** One session per peer by default, an idle
   timeout that closes an abandoned PTY, a cap on concurrent sessions. An
   unbounded shell plugin is a way to hold this machine's processes open from
@@ -74,9 +90,9 @@ Nothing here is optional. Each is because of the row above.
 
 ## What it deliberately does *not* try to do
 
-**It does not screen commands.** The lesson this project learned twice — for
-shell strings and for URLs — is that you cannot safely decide security by parsing
-what a shell will do. A shell plugin that tried to allow `ls` and block `rm` would
+**It screens no *commands*** — deliberately, and the word matters. The lesson this
+project learned twice, for shell strings and for URLs, is that you cannot safely
+decide security by parsing what a shell will do. A shell plugin that tried to allow `ls` and block `rm` would
 be `ls -la; rm -rf ~` away from being wrong, and worse, it would *imply* a safety
 it cannot deliver. So it screens nothing: the gate is the capability and the
 recording, not a filter on the bytes. If you do not trust a peer with an
@@ -89,6 +105,29 @@ was not, and that asymmetry is documented in the bridge as the reason a confined
 tool is safer than a shell. A shell plugin confines nothing, by nature — which is
 the same reason it sits above the confined tools on the ladder, and the same
 reason it is capability-gated so hard.
+
+But **"screens no commands" is not "shapes nothing."** Two things that are not
+command content are the plugin's own integrity surface, and are shaped even
+though the bytes are not:
+
+- **The spawn environment.** The PTY must not inherit the control-port address or
+  any auth material the CLI holds — see the ladder note above. Scrubbing the
+  environment is not screening the caller's commands; it is denying the session a
+  door to operator authority the caller was never granted.
+- **The egress rendering.** A PTY's output is raw bytes to a terminal parser —
+  escape sequences included. Whatever renders the session on the operator side
+  (the CLI, the web UI) receives them, and this project has already been bitten by
+  render-escaping once (chat's `esc` requirement). A hostile shell-holder emitting
+  terminal control sequences into the operator's terminal is that problem at
+  maximum, and it is the renderer's job to handle it, stated now as a requirement.
+
+And the **recording promise needs scoping.** A recorded *byte stream* of a PTY is
+not "what commands ran" — `vi`, `less`, and line-editing make the log unreadable
+as an audit trail. If the audit is part of what justifies the plugin, the promise
+is either scoped down honestly ("a replayable byte log", not an audit) or the
+recording is defined as something an auditor can actually read. The `command:`
+plugin's audit is genuinely stronger here; a PTY's is weaker, and the doc should
+not imply parity.
 
 ## Where a supervisor fits
 
@@ -107,13 +146,24 @@ leave room for it rather than assume the PTY is unwatched.
   bidirectional; it wants the tunnel's byte transport, not a request/response
   route. That is the tunnel plugin's job — so a shell is perhaps not a route at
   all but a *declared endpoint* the tunnel reaches, `tunnel:shell` pointing at a
-  local PTY spawner. Worth deciding: is `shell` a capability of its own, or is it
-  `tunnel:shell` plus a PTY endpoint, reusing everything the tunnel already
-  bounds and encrypts? The latter is less new code and inherits the tunnel's
-  caps; the former is clearer about how dangerous it is. Lean toward `tunnel:` +
-  endpoint for the mechanism, with the capability *named* `shell` so a person
-  granting it sees what it is.
-- **Whether it should exist at all before the supervisor does.** An unwatched
-  remote shell is a lot to offer. A defensible sequence: build the supervisor
-  first (done — the seam exists), then the shell as something a supervisor can be
-  required for, rather than a shell anyone with the capability drives blind.
+  local PTY spawner. The deciding axis is not clarity-vs-code-reuse but **which
+  admission check fires**: a route-plugin is capability-checked *per request*, a
+  tunnel endpoint *per open, then bytes flow unchecked*. A shell is a session, so
+  per-open is correct — the tunnel mechanism wins. But then the **name** is the
+  grant surface: a person granting `tunnel:shell` sees "one more endpoint", not "a
+  terminal", which is the wider-than-intended failure capability names exist to
+  prevent. So: tunnel mechanism, capability **named `shell`**, never
+  `tunnel:shell`.
+
+  And note what the tunnel does *not* inherit correctly: the self-port guard has
+  no PTY equivalent (above), and the idle timeout keys on peer activity — for a
+  PTY that kills a long `make` producing output nobody typed at, or holds one open
+  on a 4-minute keepalive byte. Idle for a shell must mean **no bytes in either
+  direction**, which is not what the tunnel measures.
+- **Whether it should exist at all before a shell-aware supervisor does.** An
+  unwatched remote shell is a lot to offer. The supervisor seam that exists
+  supervises *ACP tool calls*; supervising shell *input* is a byte-stream seam
+  that does not exist yet — so "supervisor first, done" understates the distance.
+  A defensible sequence: build the byte-stream supervision, then the shell as
+  something a supervisor can be *required* for, rather than a shell anyone with
+  the capability drives blind.
