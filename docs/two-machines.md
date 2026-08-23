@@ -99,6 +99,66 @@ your real ones. That is a judgement about your network, not a bug being hidden:
 acceptable on a household LAN and a single-user tailnet, and not acceptable
 anywhere else until the control API is pinned back to loopback.
 
+## Android phones
+
+The Android Tailscale app and Termux do not share a `tailscaled` daemon. The app
+can route ordinary Termux outbound traffic through the Android VPN when it is
+connected, so a phone can still hail a desktop. It does not give Termux a
+`tailscaled.sock`, and it does not make a Termux loopback daemon reachable from
+the tailnet.
+
+A phone is a full peer only when Termux runs its own userspace `tailscaled`. That
+registers as a second tailnet node, with its own name and 100.x address, beside
+the Android app's phone node:
+
+```sh
+termux-wake-lock
+
+setsid sh -c 'exec tailscaled \
+  --statedir="$HOME/.tailscale" \
+  --socket="$HOME/.tailscale/tailscaled.sock" \
+  --tun=userspace-networking \
+  --socks5-server=127.0.0.1:1055 \
+  --outbound-http-proxy-listen=127.0.0.1:1055 \
+  > "$HOME/.tailscale/tailscaled.log" 2>&1 < /dev/null' &
+
+tailscale --socket="$HOME/.tailscale/tailscaled.sock" up \
+  --hostname=termux-tailscale-s24 \
+  --accept-dns=false
+```
+
+If you have the Termux wrapper installed, use `tailscale-cli` instead of
+repeating the socket flag:
+
+```sh
+tailscale-cli status --self
+tailscale-cli serve --bg --http=7645 --yes 127.0.0.1:7645
+tailscale-cli serve status
+```
+
+Userspace networking creates no `tailscale0` interface, so
+`--hail-on tailscale0` has nothing to bind inside Termux. Keep peerhailer on
+loopback and publish the loopback port with Tailscale Serve, or run a separate
+loopback hail-only listener. The address other peers use is the Termux node, for
+example:
+
+```sh
+hail add phone http://termux-tailscale-s24.<tailnet>.ts.net:7645 \
+  --transport tailscale \
+  --key "$(cat phone.pub)"
+```
+
+No Funnel is involved here; `tailscale serve` is tailnet-only. The Android app
+node and the Termux userspace node do not conflict, because the Termux daemon is
+not creating Android-wide VPN routes. The tradeoff is outbound: if the Android
+app is off, ordinary Termux processes need the userspace SOCKS/HTTP proxy to
+dial tailnet peers. Node 24's built-in `fetch` works through the HTTP side of
+that proxy when environment proxy support is enabled:
+
+```sh
+NODE_USE_ENV_PROXY=1 HTTP_PROXY=http://127.0.0.1:1055 hail walk
+```
+
 ## When it does not work
 
 - **Nothing answers over the LAN, Tailscale is fine.** Seen on the first real
