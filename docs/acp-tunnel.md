@@ -374,6 +374,43 @@ relay cannot read, it cannot leak, and a machine carrying traffic it cannot read
 is safer for the one carrying it. Sealing is not invisibility — that a session
 exists, to whom, and how long it lasted all remain visible on the path.
 
+## A worked example: inspecting a remote browser
+
+Chrome's DevTools Protocol is a good fit, and a good illustration of the whole
+model on one concrete thing. Started with `--remote-debugging-port=9222`, Chrome
+speaks CDP as a WebSocket over HTTP on a loopback port. The tunnel carries
+arbitrary TCP bytes and a WebSocket upgrade is just bytes, so it rides through
+untouched:
+
+```sh
+hail tunnels add devtools 127.0.0.1:9222     # needs tunnel:devtools
+```
+
+A peer holding `tunnel:devtools` can then attach DevTools to a browser on the far
+machine — inspect the page, read the console, watch the network. For a fabric
+whose point is reaching machines you own from somewhere else, that is genuinely
+useful: debug the GUI on the box in the other room from the one in your hand.
+
+It is also the sharpest example of why the capability has to be taken seriously,
+because CDP is **unauthenticated and total**. Anything that reaches `9222` reads
+every open page, every cookie and stored token, runs arbitrary JavaScript, and
+navigates anywhere. So `tunnel:devtools` is not a mild grant — it is
+`command:pair`-tier, *may drive my browser and everything it is logged into*, and
+belongs in a deliberately-granted profile rather than a general one. The model
+already expresses that; this is a reminder to use it, not new machinery.
+
+**And it must arrive encrypted**, which is the encrypted-arrival rule
+([network-trust.md](network-trust.md)) earning its keep on a case you can picture:
+a CDP stream in plaintext is a browser session anyone on the wire can hijack, live.
+Today that means **over Tailscale, and only Tailscale** — the one encrypted link
+this project has. TLS pinned to the peer's key would extend it to a direct
+peer-to-peer wire, which is the reason TLS is next rather than optional forever.
+
+One practical note: Chrome binds `9222` to loopback, which is correct — the tunnel
+is what reaches it, and the daemon reaches loopback. It needs a browser on the
+remote machine, so it inspects a browser that is running; peerhailer's own page
+serves from plain Node and needs no browser there.
+
 ## What this is not
 
 **Not a VPN**, though the reason is not that it speaks ACP — it is that
