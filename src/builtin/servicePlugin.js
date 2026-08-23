@@ -106,7 +106,13 @@ export function createServicePlugin({
   const kill = (service) => {
     try {
       // The group, not just the shell — a declared line is one `&` from leaving
-      // grandchildren behind, and killing the shell alone strands them.
+      // grandchildren behind, and killing the shell alone strands them. Reached
+      // only for entries still in `running`, and the exit handler removes dead
+      // children — so the racy path (child dies, pid recycled, we signal a fresh
+      // group on the same number) is a milliseconds-wide window that also needs
+      // the whole group gone and a new one to land on that exact number. Accepted
+      // rather than engineered against; the on-device Termux test confirmed the
+      // group-kill mechanism itself is sound.
       if (service.child?.pid) process.kill(-service.child.pid, "SIGKILL");
       else service.child?.kill?.("SIGKILL");
     } catch {
@@ -139,6 +145,13 @@ export function createServicePlugin({
   const ownedBy = (id, caller) => {
     const service = running.get(String(id ?? ""));
     if (!service) return null;
+    // Looked up in the global table by id, not scoped to the route's service
+    // name: a peer reaching /service/a/stop can manage any service *it owns*,
+    // even one it started under name `b`. That namespace crossing is deliberate.
+    // The gate is ownership by key below, and stop/status on your own service
+    // only ever reduces what runs — so it cannot widen access even if the grant
+    // for `b` has since lapsed. You may always reap what you spawned.
+    //
     // By key, never `===`: a PEM tolerates whitespace, so a key can be unequal
     // to itself and lock its owner out. `sameKey` is why that does not happen.
     return service.peerKey && sameKey(caller?.publicKey, service.peerKey) ? service : null;
@@ -181,21 +194,44 @@ export function createServicePlugin({
               return { [REFUSE]: true, reason: "you are running as many services as you may" };
             }
 
-            // The machine picks the port; the caller never sends one. A real
-            // allocated integer, so substituting it into the declared line
-            // cannot inject — it is a number, not caller text.
-            const port = await allocatePortImpl();
+            // Reserve the slot *before* the first await. The cap checks above are
+            // synchronous and `allocatePort` yields the event loop, so without a
+            // reservation N concurrent starts each pass the caps before any of
+            // them registers — one peer clears MAX_PER_PEER in a single tick. The
+            // placeholder makes `running.size` and the per-peer count honest
+            // across the allocate window; port and child fill in once they exist.
+            const id = `${name}-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+            /** @type {{name: string, peerKey: string, port: number, child: any, startedAt: number, touched: number}} */
+            const service = { name, peerKey: caller.publicKey, port: 0, child: null, startedAt: now(), touched: now() };
+            running.set(id, service);
+
+            let port;
+            try {
+              // The machine picks the port; the caller never sends one. A real
+              // allocated integer, so substituting it into the declared line
+              // cannot inject — it is a number, not caller text.
+              port = await allocatePortImpl();
+            } catch {
+              running.delete(id);
+              return { [REFUSE]: true, reason: "could not allocate a port for the service" };
+            }
+            service.port = port;
             const command = String(line).replaceAll("{port}", String(port));
 
-            const id = `${name}-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             // Detached so the child leads its own group and the whole tree can be
             // killed; the declared line goes to a shell because the operator
             // wrote it and may want a pipe — their machine, their decision.
             const child = spawnImpl(command, { shell: true, detached: true });
-            const service = { name, peerKey: caller.publicKey, port, child, startedAt: now(), touched: now() };
+            service.child = child;
 
             // A service that dies on its own is gone from the table, not a
-            // phantom the caller thinks is up.
+            // phantom the caller thinks is up. Both handlers guard on identity:
+            // a late event from a child whose slot was already reused — stopped,
+            // reaped, replaced — must not delete the newcomer or record a phantom
+            // event against it. The `error` guard is the one round 7 review found
+            // missing; without it a child erroring after `stop` wrote a spurious
+            // "failed to start" into the audit log for a deliberately-stopped
+            // service.
             child.on("exit", () => {
               if (running.get(id) === service) {
                 running.delete(id);
@@ -203,15 +239,23 @@ export function createServicePlugin({
               }
             });
             child.on("error", () => {
-              running.delete(id);
-              record({ name, peerKey: caller.publicKey, port, event: "failed to start" });
+              if (running.get(id) === service) {
+                running.delete(id);
+                record({ name, peerKey: caller.publicKey, port, event: "failed to start" });
+              }
             });
 
-            running.set(id, service);
             record({ name, peerKey: caller.publicKey, port, event: "started" });
             hostLog(`[service] ${caller.name} started ${name} on port ${port}`);
-            // The port is what a caller tunnels to. It is *this machine's*
-            // loopback port — reaching it is a separate tunnel capability.
+            // The port is where the child was *told* to bind and what a caller
+            // tunnels to — this machine's loopback port. It is a claim, not a
+            // fact: `allocatePort` frees the port before the child takes it, so a
+            // response carrying a port says the child was asked to bind it, not
+            // that it did, and `status` reports the service running, not what is
+            // listening. On a shared box a foreign process can win the freed port
+            // in that window, leaving the caller's tunnel pointed at it. Closing
+            // the gap needs the child to report its own bound port back — see
+            // docs/services.md; until then the port is a routing hint, not proof.
             return { id, name, port };
           },
         },

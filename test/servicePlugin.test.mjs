@@ -179,3 +179,54 @@ test("a real process is started, reachable on its port, and stopped", async () =
   assert.equal(afterStop, "down", "stop killed the process");
   plugin.stop();
 });
+
+test("concurrent starts cannot race past the per-peer cap", async () => {
+  const { spawnImpl } = fakeSpawn();
+  let p = 9000;
+  // A port allocator that yields the event loop, so every start reaches its
+  // await before any of them registers — the exact window the cap race lived in.
+  const allocatePortImpl = () => new Promise((r) => setImmediate(() => r(p++)));
+  const plugin = createServicePlugin({ services: { agent: "run {port}" }, spawnImpl, allocatePortImpl });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const fired = Array.from({ length: MAX_PER_PEER + 4 }, () =>
+    call(routes, "/service/agent/start", { caller: sol }),
+  );
+  const outcomes = await Promise.all(fired);
+
+  assert.equal(outcomes.filter((r) => !r[REFUSE]).length, MAX_PER_PEER, "the cap holds even when starts race");
+  assert.equal(plugin.listRunning().length, MAX_PER_PEER, "and the table reflects it, no over-admission");
+  plugin.stop();
+});
+
+test("a child erroring after stop records no phantom", async () => {
+  const { spawnImpl, spawned } = fakeSpawn();
+  const plugin = createServicePlugin({ services: { agent: "run {port}" }, spawnImpl, allocatePortImpl: fixedPort });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const { id } = await call(routes, "/service/agent/start", { caller: sol });
+  await call(routes, "/service/agent/stop", { caller: sol, body: { id } });
+  spawned[0].child.emit("error"); // a late error from the deliberately-stopped child
+
+  assert.deepEqual(
+    plugin.history().map((e) => e.event),
+    ["started", "stopped"],
+    "the audit log carries no 'failed to start' phantom for a service the operator stopped",
+  );
+  plugin.stop();
+});
+
+test("a failed port allocation frees the reserved slot", async () => {
+  const { spawnImpl } = fakeSpawn();
+  const plugin = createServicePlugin({
+    services: { agent: "run {port}" },
+    spawnImpl,
+    allocatePortImpl: () => Promise.reject(new Error("no ports")),
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const refused = await call(routes, "/service/agent/start", { caller: sol });
+  assert.equal(refused[REFUSE], true, "allocation failure refuses the start");
+  assert.equal(plugin.listRunning().length, 0, "and leaves no reserved ghost holding a slot");
+  plugin.stop();
+});

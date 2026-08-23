@@ -124,3 +124,16 @@ exists.
   them is the fiddly part.
 - **Should starting be rate-limited the way `command:pair` is?** Starting a
   process is heavier than minting a token, so almost certainly yes, and lower.
+- **The port is a claim, not a fact — and the real fix lives at the bridge.**
+  The machine allocates a port by binding `:0`, reading the number, and closing
+  the probe; the child binds it a few milliseconds later. Between the close and
+  the child's bind the port is free, so on a shared box a foreign process can win
+  it, and the caller — handed `{id, port}` — then tunnels to *that* listener
+  believing it is the declared service. A confused deputy. The plugin narrows
+  what it cheaply can and documents the rest: `start` returning a port means the
+  child was *asked* to bind it, and `status` reports the service running, not
+  what is listening. The class only truly closes when the child reports its own
+  bound port back instead of being told one — and because this plugin exists to
+  spawn `bridge --listen {port}`, that fix is genuinely available at the bridge
+  end (bind `:0`, print the chosen port, let the plugin read it). Until then the
+  port is a routing hint. Single-user phone or box: negligible. Shared host: real.
