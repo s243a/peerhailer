@@ -71,6 +71,7 @@ export function capabilityFor(name) {
  *   now?: () => number,
  *   connectImpl?: typeof connect,
  *   sweepMs?: number,
+ *   ownPorts?: number[],
  * }} [options]
  */
 export function createTunnelPlugin({
@@ -78,7 +79,21 @@ export function createTunnelPlugin({
   now = Date.now,
   connectImpl = connect,
   sweepMs = 30_000,
+  ownPorts = [],
 } = {}) {
+  // A tunnel is a port forward, and the most dangerous target it can have is
+  // this daemon's own control port: reaching it hands a remote peer the local
+  // API, which trusts loopback precisely because nothing remote should reach it.
+  // Refused at declaration, so a self-pointing endpoint never becomes a route.
+  const reserved = new Set(ownPorts.map(Number));
+  for (const [name, address] of Object.entries(endpoints)) {
+    const port = Number(String(address).split(":").pop());
+    if (reserved.has(port)) {
+      throw new Error(
+        `peerhailer: tunnel '${name}' points at this daemon's own port ${port} — that forwards the local API to peers`,
+      );
+    }
+  }
   /** id -> {socket, chunks, closed, error, peerKey, endpoint, touched} */
   const open = new Map();
 

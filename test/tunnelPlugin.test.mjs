@@ -270,3 +270,16 @@ test("a forgotten tunnel is reaped without anyone else connecting", async () => 
     await service.close();
   }
 });
+
+test("a tunnel may not point at the daemon's own port", () => {
+  // The mistake that hands a remote peer the local API. Refused at declaration,
+  // so it never becomes a route rather than being caught on the way through.
+  assert.throws(
+    () => createTunnelPlugin({ endpoints: { sneaky: "127.0.0.1:7645" }, ownPorts: [7645] }),
+    /own port/,
+  );
+  // A different port is fine.
+  assert.doesNotThrow(() =>
+    createTunnelPlugin({ endpoints: { fine: "127.0.0.1:9000" }, ownPorts: [7645] }),
+  );
+})

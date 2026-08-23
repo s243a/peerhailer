@@ -384,7 +384,9 @@ switch (command) {
     const plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
-      ...(Object.keys(tunnels).length ? [createTunnelPlugin({ endpoints: tunnels })] : []),
+      ...(Object.keys(tunnels).length
+        ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
+        : []),
       ...(Object.keys(declaredCommands).length
         ? [
             createCommandPlugin({
@@ -438,7 +440,9 @@ switch (command) {
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
-        ...(Object.keys(nextTunnels).length ? [createTunnelPlugin({ endpoints: nextTunnels })] : []),
+        ...(Object.keys(nextTunnels).length
+          ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
+          : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
       ];
       return {
