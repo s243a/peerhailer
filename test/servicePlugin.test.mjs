@@ -21,13 +21,22 @@ function fakeSpawn() {
   const spawned = [];
   const spawnImpl = (command) => {
     const handlers = {};
+    const stdoutData = new Set();
+    const on = (event, fn) => (handlers[event] ??= new Set()).add(fn);
     const child = {
       pid: 1000 + spawned.length,
-      on: (event, fn) => (handlers[event] = fn),
+      on,
+      once: on,
       kill: () => {},
-      emit: (event) => handlers[event]?.(),
+      emit: (event) => handlers[event]?.forEach((fn) => fn()),
+      stdout: {
+        on: (event, fn) => event === "data" && stdoutData.add(fn),
+        off: (event, fn) => event === "data" && stdoutData.delete(fn),
+      },
     };
-    spawned.push({ command, child });
+    // `say` pushes a chunk to whoever is reading stdout — how a report-mode
+    // child announces its bound port in these tests.
+    spawned.push({ command, child, say: (text) => stdoutData.forEach((fn) => fn(text)) });
     return child;
   };
   return { spawnImpl, spawned };
@@ -228,5 +237,59 @@ test("a failed port allocation frees the reserved slot", async () => {
   const refused = await call(routes, "/service/agent/start", { caller: sol });
   assert.equal(refused[REFUSE], true, "allocation failure refuses the start");
   assert.equal(plugin.listRunning().length, 0, "and leaves no reserved ghost holding a slot");
+  plugin.stop();
+});
+
+test("report mode: the caller gets the port the child announced, not an allocated one", async () => {
+  const { spawnImpl, spawned } = fakeSpawn();
+  const plugin = createServicePlugin({
+    services: { agent: { command: "bridge --listen 0 --announce-port", reportsPort: true } },
+    spawnImpl,
+    // allocatePort must never be consulted in report mode; make it fail loudly.
+    allocatePortImpl: () => Promise.reject(new Error("report mode must not allocate")),
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const pending = call(routes, "/service/agent/start", { caller: sol });
+  assert.equal(spawned[0].command, "bridge --listen 0 --announce-port", "run verbatim — no {port} substitution");
+  spawned[0].say("booting...\n"); // noise before the announcement is ignored
+  spawned[0].say('{"port":54321}\n');
+  const result = await pending;
+
+  assert.equal(result.port, 54321, "the announced port is what the caller receives");
+  assert.equal(plugin.listRunning()[0].port, 54321, "and what the table records");
+  plugin.stop();
+});
+
+test("report mode: a child that never announces is refused, not guessed", async () => {
+  const { spawnImpl } = fakeSpawn();
+  const plugin = createServicePlugin({
+    services: { agent: { command: "run", reportsPort: true } },
+    spawnImpl,
+    announceMs: 20,
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const refused = await call(routes, "/service/agent/start", { caller: sol });
+  assert.equal(refused[REFUSE], true, "silence is a refusal, never a returned port");
+  assert.equal(plugin.listRunning().length, 0, "and it leaves no reserved slot behind");
+  assert.ok(plugin.history().some((e) => e.event === "no port announced"));
+  plugin.stop();
+});
+
+test("report mode: a child that dies before announcing is refused", async () => {
+  const { spawnImpl, spawned } = fakeSpawn();
+  const plugin = createServicePlugin({
+    services: { agent: { command: "run", reportsPort: true } },
+    spawnImpl,
+    announceMs: 5000,
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  const pending = call(routes, "/service/agent/start", { caller: sol });
+  spawned[0].child.emit("exit"); // dies before saying a port
+  const refused = await pending;
+  assert.equal(refused[REFUSE], true, "an early exit fails closed");
+  assert.equal(plugin.listRunning().length, 0);
   plugin.stop();
 });

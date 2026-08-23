@@ -44,6 +44,9 @@ export const IDLE_MS = 30 * 60_000;
 /** A service never lives past this, touched or not — a backstop on a leak. */
 export const MAX_LIFETIME_MS = 12 * 60 * 60_000;
 
+/** How long a report-mode service has to announce its bound port before we give up. */
+export const ANNOUNCE_MS = 10_000;
+
 /**
  * The capability a declared service requires.
  *
@@ -68,11 +71,12 @@ function allocatePort() {
 
 /**
  * @param {{
- *   services?: Record<string, string>,
+ *   services?: Record<string, string | {command: string, reportsPort?: boolean}>,
  *   now?: () => number,
  *   spawnImpl?: typeof spawn,
  *   allocatePortImpl?: () => Promise<number>,
  *   sweepMs?: number,
+ *   announceMs?: number,
  * }} [options]
  */
 export function createServicePlugin({
@@ -81,7 +85,24 @@ export function createServicePlugin({
   spawnImpl = spawn,
   allocatePortImpl = allocatePort,
   sweepMs = 30_000,
+  announceMs = ANNOUNCE_MS,
 } = {}) {
+  // A service is declared either as a command string — claim mode, where the
+  // machine allocates a port, substitutes `{port}`, and hands the caller a port
+  // the child was *told* to bind — or as `{ command, reportsPort: true }`, where
+  // the child binds its own port and prints `{"port":N}` to stdout, and that
+  // announced port is what the caller gets. Report mode's returned port is a
+  // fact, not a claim: there is no allocate-then-release window because the
+  // machine never allocates. See docs/services.md.
+  /** @type {Record<string, {command: string, reportsPort: boolean}>} */
+  const declared = Object.fromEntries(
+    Object.entries(services).map(([name, decl]) => [
+      name,
+      typeof decl === "string"
+        ? { command: decl, reportsPort: false }
+        : { command: decl.command, reportsPort: Boolean(decl.reportsPort) },
+    ]),
+  );
   /**
    * id -> a running service.
    * @type {Map<string, {name: string, peerKey: string, port: number, child: any,
@@ -157,10 +178,77 @@ export function createServicePlugin({
     return service.peerKey && sameKey(caller?.publicKey, service.peerKey) ? service : null;
   };
 
+  /**
+   * A child that dies leaves the table. Both handlers guard on identity — a late
+   * event from a slot already reused (stopped, reaped, replaced) must not delete
+   * the newcomer or record a phantom against it. The `error` guard is symmetric
+   * with `exit` on purpose; round 7 found it missing.
+   * @param {any} child @param {string} id @param {any} service
+   */
+  const wireLifecycle = (child, id, service) => {
+    child.on("exit", () => {
+      if (running.get(id) === service) {
+        running.delete(id);
+        record({ name: service.name, peerKey: service.peerKey, port: service.port, event: "exited" });
+      }
+    });
+    child.on("error", () => {
+      if (running.get(id) === service) {
+        running.delete(id);
+        record({ name: service.name, peerKey: service.peerKey, port: service.port, event: "failed to start" });
+      }
+    });
+  };
+
+  /**
+   * A report-mode service's own account of the port it bound: a `{"port":N}`
+   * line on stdout. Reading it — rather than allocating and hoping — is what
+   * makes the returned port a fact. Resolves the port, or null if the child
+   * exits, errors, or stays silent past the deadline: every one of those is a
+   * refusal, never a guessed port.
+   * @param {any} child
+   * @param {number} timeoutMs
+   * @returns {Promise<number | null>}
+   */
+  const readAnnouncedPort = (child, timeoutMs) =>
+    new Promise((resolve) => {
+      let buf = "";
+      let done = false;
+      /** @param {number | null} value */
+      const finish = (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        child.stdout?.off?.("data", onData);
+        resolve(value);
+      };
+      /** @param {any} chunk */
+      const onData = (chunk) => {
+        buf += String(chunk);
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          try {
+            const p = JSON.parse(line)?.port;
+            if (Number.isInteger(p) && p > 0 && p < 65536) return finish(p);
+          } catch {
+            // Not the announcement line — a report-mode child may print other
+            // things; only a JSON object carrying a valid port counts.
+          }
+        }
+      };
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      timer.unref?.();
+      child.stdout?.on?.("data", onData);
+      child.once?.("exit", () => finish(null));
+      child.once?.("error", () => finish(null));
+    });
+
   return {
     name: "service",
     description: "Starts long-running processes this machine's operator declared, for peers holding their capability.",
-    capabilities: Object.keys(services).map(capabilityFor),
+    capabilities: Object.keys(declared).map(capabilityFor),
 
     /** For a host that discards the plugin without ending the process. */
     stop: () => {
@@ -174,7 +262,7 @@ export function createServicePlugin({
     listRunning: () =>
       [...running.values()].map((s) => ({ name: s.name, port: s.port, peerKey: s.peerKey, startedAt: s.startedAt })),
 
-    routes: Object.entries(services).map(([name, line]) => {
+    routes: Object.entries(declared).map(([name, decl]) => {
       const capability = capabilityFor(name);
       return [
         {
@@ -200,62 +288,64 @@ export function createServicePlugin({
             // them registers — one peer clears MAX_PER_PEER in a single tick. The
             // placeholder makes `running.size` and the per-peer count honest
             // across the allocate window; port and child fill in once they exist.
+            // Reserve the slot before either await below. The cap checks above
+            // are synchronous; both the allocate (claim) and the announcement
+            // wait (report) yield the event loop, so without a reservation N
+            // concurrent starts each pass the caps before any registers — one
+            // peer clears MAX_PER_PEER in a single tick. The placeholder makes
+            // the count honest across the window; port and child fill in after.
             const id = `${name}-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             /** @type {{name: string, peerKey: string, port: number, child: any, startedAt: number, touched: number}} */
             const service = { name, peerKey: caller.publicKey, port: 0, child: null, startedAt: now(), touched: now() };
             running.set(id, service);
 
-            let port;
-            try {
-              // The machine picks the port; the caller never sends one. A real
-              // allocated integer, so substituting it into the declared line
-              // cannot inject — it is a number, not caller text.
-              port = await allocatePortImpl();
-            } catch {
-              running.delete(id);
-              return { [REFUSE]: true, reason: "could not allocate a port for the service" };
-            }
-            service.port = port;
-            const command = String(line).replaceAll("{port}", String(port));
-
             // Detached so the child leads its own group and the whole tree can be
             // killed; the declared line goes to a shell because the operator
             // wrote it and may want a pipe — their machine, their decision.
-            const child = spawnImpl(command, { shell: true, detached: true });
-            service.child = child;
-
-            // A service that dies on its own is gone from the table, not a
-            // phantom the caller thinks is up. Both handlers guard on identity:
-            // a late event from a child whose slot was already reused — stopped,
-            // reaped, replaced — must not delete the newcomer or record a phantom
-            // event against it. The `error` guard is the one round 7 review found
-            // missing; without it a child erroring after `stop` wrote a spurious
-            // "failed to start" into the audit log for a deliberately-stopped
-            // service.
-            child.on("exit", () => {
-              if (running.get(id) === service) {
+            let port;
+            if (decl.reportsPort) {
+              // No allocation at all: the child binds its own port and tells us,
+              // so the port we return is one it holds — there is no freed-then-
+              // rebound window a foreign process could win. The command runs as
+              // the operator wrote it; the child chooses the port and announces
+              // it. Silence, an early exit, or an error is a refusal, never a
+              // guessed port — fail closed.
+              const child = spawnImpl(decl.command, { shell: true, detached: true });
+              service.child = child;
+              port = await readAnnouncedPort(child, announceMs);
+              if (port == null) {
+                kill(service);
                 running.delete(id);
-                record({ name, peerKey: caller.publicKey, port, event: "exited" });
+                record({ name, peerKey: caller.publicKey, port: 0, event: "no port announced" });
+                return { [REFUSE]: true, reason: "the service did not report a port in time" };
               }
-            });
-            child.on("error", () => {
-              if (running.get(id) === service) {
+              service.port = port;
+              wireLifecycle(child, id, service);
+            } else {
+              try {
+                // The machine picks the port; the caller never sends one. A real
+                // allocated integer, so substituting it into the declared line
+                // cannot inject — it is a number, not caller text.
+                port = await allocatePortImpl();
+              } catch {
                 running.delete(id);
-                record({ name, peerKey: caller.publicKey, port, event: "failed to start" });
+                return { [REFUSE]: true, reason: "could not allocate a port for the service" };
               }
-            });
+              service.port = port;
+              const command = String(decl.command).replaceAll("{port}", String(port));
+              const child = spawnImpl(command, { shell: true, detached: true });
+              service.child = child;
+              wireLifecycle(child, id, service);
+            }
 
             record({ name, peerKey: caller.publicKey, port, event: "started" });
             hostLog(`[service] ${caller.name} started ${name} on port ${port}`);
-            // The port is where the child was *told* to bind and what a caller
-            // tunnels to — this machine's loopback port. It is a claim, not a
-            // fact: `allocatePort` frees the port before the child takes it, so a
-            // response carrying a port says the child was asked to bind it, not
-            // that it did, and `status` reports the service running, not what is
-            // listening. On a shared box a foreign process can win the freed port
-            // in that window, leaving the caller's tunnel pointed at it. Closing
-            // the gap needs the child to report its own bound port back — see
-            // docs/services.md; until then the port is a routing hint, not proof.
+            // In report mode the port is the child's own bound port — a fact. In
+            // claim mode it is where the child was *told* to bind: `allocatePort`
+            // frees the port before the child takes it, so on a shared box a
+            // foreign process can win it in that window, and `status` reports the
+            // service running, not what is listening. Prefer report mode for
+            // anything reachable across a tunnel; see docs/services.md.
             return { id, name, port };
           },
         },

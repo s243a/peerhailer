@@ -112,6 +112,36 @@ configuration rather than new code each time:
 Steps 1–2 are this document. Step 3 is the bridge's unbuilt client side. Step 4
 exists.
 
+## Two port modes: claim and report
+
+A declared service names a port one of two ways, and the difference is whether
+the port the caller receives is a *fact* or a *claim*.
+
+- **Claim mode** (a plain command string with `{port}`). The machine allocates a
+  port by binding `:0`, reading the number, closing the probe, and substituting
+  it into the line; the child binds it a few milliseconds later. Between the
+  close and the child's bind the port is free, so on a shared box a foreign
+  process can win it, and the caller — handed `{id, port}` — then tunnels to
+  *that* listener believing it is the declared service. A confused deputy. So in
+  claim mode `start` returning a port means the child was *asked* to bind it, and
+  `status` reports the service running, not what is listening. Single-user phone
+  or box: negligible. Shared host: real. Claim mode exists for services that
+  simply cannot report their own port.
+
+- **Report mode** (`{ command, reportsPort: true }`, or `--reports-port` on the
+  CLI). The machine allocates *nothing*: the child binds its own port and prints
+  one line, `{"port":N}`, to stdout; the plugin reads that and hands it to the
+  caller. There is no freed-then-rebound window because there was never an
+  allocation — the returned port is one the child holds. Silence, an early exit,
+  or a malformed line is a refusal, never a guessed port. The bridge implements
+  the contract with `--announce-port`, so the canonical service is
+  `bridge --listen 0 --announce-port` declared with `--reports-port`.
+
+**Prefer report mode for anything reached across a tunnel.** The contract is
+general — any cooperating program that prints `{"port":N}` on stdout once bound
+can be a report-mode service — but it exists first for the bridge, which is what
+this plugin was built to spawn.
+
 ## Open
 
 - **Does the caller ever need to influence the agent choice?** "Start a claude
@@ -124,16 +154,3 @@ exists.
   them is the fiddly part.
 - **Should starting be rate-limited the way `command:pair` is?** Starting a
   process is heavier than minting a token, so almost certainly yes, and lower.
-- **The port is a claim, not a fact — and the real fix lives at the bridge.**
-  The machine allocates a port by binding `:0`, reading the number, and closing
-  the probe; the child binds it a few milliseconds later. Between the close and
-  the child's bind the port is free, so on a shared box a foreign process can win
-  it, and the caller — handed `{id, port}` — then tunnels to *that* listener
-  believing it is the declared service. A confused deputy. The plugin narrows
-  what it cheaply can and documents the rest: `start` returning a port means the
-  child was *asked* to bind it, and `status` reports the service running, not
-  what is listening. The class only truly closes when the child reports its own
-  bound port back instead of being told one — and because this plugin exists to
-  spawn `bridge --listen {port}`, that fix is genuinely available at the bridge
-  end (bind `:0`, print the chosen port, let the plugin read it). Until then the
-  port is a routing hint. Single-user phone or box: negligible. Shared host: real.

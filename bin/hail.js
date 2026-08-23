@@ -572,12 +572,23 @@ switch (command) {
     const declared = stored.services ?? {};
 
     if (action === "add") {
-      const line = rest.slice(2).join(" ").trim();
-      if (!name || !line) fail('usage: hail services add <name> "<command line, with {port}>"');
+      // --reports-port: the child binds its own port and prints `{"port":N}` to
+      // stdout, and that announced port is what a caller gets — a fact, not the
+      // claim `{port}` substitution makes. Prefer it for anything tunnelled to.
+      // The global parser lifts `--reports-port` into `flags`; when it precedes
+      // the command it swallows it as its value, so recover the line from either.
+      const rp = flags["reports-port"];
+      const reportsPort = rp !== undefined;
+      const line = (typeof rp === "string" ? rp : rest.slice(2).join(" ")).trim();
+      if (!name || !line) fail('usage: hail services add <name> "<command line, {port} unless --reports-port>" [--reports-port]');
       if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a service name is letters, digits and dashes");
-      stored.services = { ...declared, [name]: line };
+      if (!reportsPort && !line.includes("{port}")) {
+        fail('a claim-mode service needs {port} in its line, or pass --reports-port if the child announces its own');
+      }
+      stored.services = { ...declared, [name]: reportsPort ? { command: line, reportsPort: true } : line };
       persist();
       log(`service ${name} runs: ${line}`);
+      log(reportsPort ? 'port: read from the child\'s announced {"port":N}' : "port: allocated and substituted for {port} (a routing hint, not proof)");
       log(`peers need service:${name}; no profile grants it yet`);
       log(`this runs as ${process.env.USER ?? "this user"}, and stays running — declare only what you mean`);
       break;
@@ -595,7 +606,12 @@ switch (command) {
       log('no services declared. hail services add <name> "<command line with {port}>"');
       break;
     }
-    for (const entry of names) log(`  ${entry.padEnd(12)} runs: ${declared[entry]}   needs service:${entry}`);
+    for (const entry of names) {
+      const decl = declared[entry];
+      const cmd = typeof decl === "string" ? decl : decl.command;
+      const mode = typeof decl === "object" && decl.reportsPort ? " (reports its port)" : "";
+      log(`  ${entry.padEnd(12)} runs: ${cmd}${mode}   needs service:${entry}`);
+    }
     break;
   }
 
