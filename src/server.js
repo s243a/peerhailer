@@ -581,6 +581,30 @@ export function createDaemon({
         });
       }
 
+      // What peers have actually run here.
+      //
+      // Kept in the daemon's memory rather than the directory file, because a
+      // record of who ran what is not a credential and not a peer — and because
+      // writing per run is how a state file becomes an amplification target.
+      // That makes this page the only place it can be read, which is the whole
+      // reason the route exists: a record nothing surfaces reads as covered
+      // while telling nobody anything.
+      if (scope === "control" && url.pathname === "/api/command-history" && request.method === "GET") {
+        const entries = plugins
+          .filter((plugin) => typeof plugin.history === "function")
+          .flatMap((plugin) => plugin.history())
+          .map((entry) => ({
+            capability: entry.capability,
+            // A fingerprint, not the key: this is for recognising a peer, and a
+            // page full of PEMs is a page nobody reads.
+            peer: entry.peerKey ? fingerprint(entry.peerKey) : "unknown",
+            runs: entry.runs,
+            last: entry.last,
+          }))
+          .sort((left, right) => (right.last ?? 0) - (left.last ?? 0));
+        return send(response, 200, { entries });
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.

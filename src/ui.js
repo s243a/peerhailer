@@ -219,6 +219,14 @@ const RENDER = {
       gateChip(peer.effective?.profile ?? "?", peer.effective?.profile !== "blocked"))).join("");
   },
 
+  async ran() {
+    const { entries } = await api("/api/command-history");
+    if (!entries.length) return '<div class="leaf">nothing has been run here</div>';
+    return entries.map((entry) =>
+      leaf(entry.peer, entry.capability + " — " + entry.runs + "x, last " +
+        (entry.last ? new Date(entry.last).toISOString() : "never"))).join("");
+  },
+
   async shared() {
     const profiles = await api("/api/profiles");
     return profiles.map((p) => node("shared:" + p.name, esc(p.name))).join("");
@@ -296,6 +304,7 @@ $("tree").innerHTML = [
   node("self", "self"),
   node("peers", "peers"),
   node("shared", "what a caller receives"),
+  node("ran", "what peers have run here"),
 ].join("");
 
 refresh();

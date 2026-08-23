@@ -146,3 +146,38 @@ test("a name nobody could route is refused at construction, not silently dropped
   }
   assert.doesNotThrow(() => createCommandPlugin({ commands: { "pair-2": "echo hi" } }));
 });
+
+test("what a peer ran is visible somewhere a person looks", async () => {
+  const { createDaemon } = await import("../src/server.js");
+  const { createDirectory } = await import("../src/directory.js");
+  const { generateIdentity, signPayload, fingerprint } = await import("../src/identity.js");
+
+  const me = generateIdentity();
+  const runner = generateIdentity();
+  const directory = createDirectory({ self: { name: "me", publicKey: me.publicKey } });
+  directory.useProfiles({ driver: { name: "driver", allows: ["hail", "command:greet"] } });
+  directory.admit({ name: "sol", publicKey: runner.publicKey, profile: "driver" });
+
+  const plugin = createCommandPlugin({ commands: { greet: "echo hi" } });
+  const daemon = createDaemon({ directory, identity: me, plugins: [plugin] });
+  const { port } = await daemon.listen({ port: 0 });
+
+  try {
+    const from = { name: "sol", at: Date.now() };
+    const ran = await fetch(`http://127.0.0.1:${port}/command/greet/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ from, signature: signPayload(from, runner.privateKey) }),
+    });
+    assert.equal(ran.status, 200);
+
+    // A record nothing surfaces reads as covered while telling nobody anything.
+    const seen = await (await fetch(`http://127.0.0.1:${port}/api/command-history`)).json();
+    assert.equal(seen.entries.length, 1);
+    assert.equal(seen.entries[0].capability, "command:greet");
+    assert.equal(seen.entries[0].runs, 1);
+    assert.equal(seen.entries[0].peer, fingerprint(runner.publicKey), "by fingerprint, not by PEM");
+  } finally {
+    await daemon.close();
+  }
+});
