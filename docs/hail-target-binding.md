@@ -94,32 +94,79 @@ The transition has to be **per-peer and authenticated**, not global and optional
    `to`-less path entirely: require `to` from everyone. This is the only fully
    closed state; steps 1–2 are how to reach it without a synchronized upgrade.
 
-The subtlety in step 2: the "does X support it" bit must come from X's signed
-record and nothing weaker. A capability advertised in an *unsigned* per-hail field,
-or inferred from behavior, is strippable, and a strippable upgrade signal is a
-forced downgrade. Binding the signal to the signed record is what makes the
-require-clause safe.
+Two subtleties in step 2, and both are load-bearing.
+
+**The support signal must be signed *and* sticky.** Binding it to X's signed
+record stops it being *stripped* in transit — a record's signature covers its
+body, so removing the bit breaks the signature. But signed is not *recent*:
+records carry no nonce and no expiry, and `verifyRecord` accepts a validly signed
+record of any age, so every pre-upgrade record a peer ever signed stays valid and
+keeps circulating in gossip. A *rollback* — presenting an older, genuinely-signed,
+support-absent record — would clear the require-clause without forging anything.
+So the observation must be **monotone**: once a directory has seen any valid
+signed record in which caller C advertises target-binding, it never un-sees it,
+and no older record can lower it. Merge with OR (or, if the signal is a wire-
+format *version integer*, keep `max(seen)` — which gives the stickiness for free,
+one more reason to prefer a version integer over a capability bit). Sticky-plus-
+signed narrows the residual to "verifiers that genuinely never saw C after C
+upgraded", which is the honest statement of what the migration buys before flag
+day.
+
+**A per-hail unsigned claim would be strippable.** The bit cannot live in an
+unsigned per-hail field or be inferred from behavior; either is a forced
+downgrade. The signed record is the only place it is safe.
+
+**And `to` is mandatory whenever a hail carries a `grant`, from day one — not
+migrated.** A grant-presenting caller is, by construction, one the verifier may
+hold *no record* for (`identify` falls back to the grant's subject key precisely
+for unadmitted peers). No record means no support observation means the
+require-clause can never fire — so throughout the migration a grant-carried hail
+would be accepted `to`-less, and grant-carried hails are the highest-value replay
+target, since a grant is how an unadmitted peer acts at all. There is nothing to
+migrate here: with no support-check to consult, `to` is simply required on any
+hail bearing a grant. The cost is only that a subject of an old grant-issuer
+cannot present grants at an upgraded verifier until it too signs `to` — which is
+the correct failure direction — and it closes the widest window on day one.
 
 ## The cheaper interim, and whether it is enough
 
-Kimi's alternative closes the leak without touching the contract: **`callPeer`
-dials only trusted-transport addresses.** The leak is identity material reaching
-an *untrusted address*; if callPeer refuses to send a signed hail to an address
-whose transport is not trusted — send only over the tailnet, over a pinned-TLS
-link, or to an operator-typed address, never to a gossiped or DNS-resolved one —
-then the party being called cannot choose where the credential goes, and the
-replay target cannot be an attacker's box.
+The alternative closes the leak without touching the contract: **`callPeer` sends
+signed material only to an address whose provenance it trusts.** But "trusted
+transport" must be stated carefully, because a naive reading of it trusts the
+attacker. Two traps:
 
-This is smaller, non-breaking, and closes the *leak* today. What it does not give
+- **The `transport` field is a label the wire supplies.** `normalizeAddresses`
+  takes `transport` from untrusted input, so a gossiped or self-reported address
+  can *claim* `transport: "tailscale"` while pointing at any box. A rule keyed on
+  `address.transport` alone therefore trusts an attacker-chosen string. What
+  partly saves it — a claimed tailnet address cannot earn `lastOk` unless the real
+  peer answers there, and an attacker cannot put a box on our tailnet — does not
+  save the *first* dial, which is sent before any verification: the credential
+  leaks on contact.
+
+- **Gossip crowds the dial set even when it cannot overwrite.** `mergePeerRecord`
+  keeps an operator/verified address (`lastOk` survives; gossiped ones enter with
+  `lastOk: null`), so a typed address is not lost — but a *fresh* gossiped address
+  can sort into an earlier `orderForDialing` band and be tried first.
+
+So the interim rule is **provenance plus shape**, not a transport label: send
+signed material only to an address that is **operator-entered**, or that **carries
+`lastOk` *and* a value whose shape matches its claimed transport** (a `tailscale`
+label on a `100.64/10` address — `presumedLifetime` already does exactly this
+shape check, so the vocabulary exists). A label alone is not provenance, and the
+rule must gate the *first* dial, since that is where the credential goes.
+
+Stated that way, it is smaller, non-breaking, and closes the *leak* today. What it does not give
 is the positive property target-binding gives: even a hail that legitimately
 reaches the wrong peer (a misconfigured record, a shared address) is inert there.
-Target-binding makes the credential meaningless off-target; trusted-transport
+Target-binding makes the credential meaningless off-target; the provenance rule
 makes the credential hard to *misdeliver*. The first is a stronger guarantee; the
 second is available now and composes with the first later.
 
-**Recommendation.** Ship the trusted-transport restriction now (it is a `callPeer`
-change and an address-provenance tag, no protocol move), and treat target-binding
-as the eventual contract change, sequenced by the signed-advertisement migration
+**Recommendation.** Ship the provenance-plus-shape restriction now (it is a
+`callPeer` change and an address-provenance check, no protocol move), and treat
+target-binding as the eventual contract change, sequenced by the signed-
+advertisement migration
 above — most naturally landed *with* the TLS work, since both want the same
 "address, key, and now `to`, all from one signed record read once" discipline, and
 TLS is already a coordinated version bump.
@@ -136,8 +183,8 @@ TLS is already a coordinated version bump.
   are already the weakest path (`identify` refuses a keyless peer without a grant);
   target-binding simply does not apply until the key is bound on first verified
   contact, which is the same moment everything else about that peer becomes real.
-- **Grant-carried identity.** A hail can carry a `grant` naming a subject key
-  instead of being from an admitted peer. The `to` binding is orthogonal — it
-  constrains *where* the hail is valid regardless of *how* the caller is
-  identified — but the migration's require-clause must treat a grant-presenting
-  caller by the same signed-support rule, which needs its own line when built.
+- **Grant-carried identity** is no longer open — it is the mandatory-on-grant
+  rule in the migration section above: because a grant-presenter may have no
+  record to carry a support signal, there is nothing to migrate, so `to` is
+  simply required on any hail bearing a grant, from day one. Left here only as a
+  pointer, since a reader arriving at "open questions" would otherwise expect it.
