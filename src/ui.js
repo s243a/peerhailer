@@ -69,7 +69,9 @@ export function renderPage(self) {
 </p>
 <div id="candidates"></div>
 
-<h2>What this machine holds and shares</h2>
+<h2>What this machine holds and shares
+  <button id="reload" style="margin-left:.6rem">reload config</button>
+</h2>
 <p class="muted" style="margin:.2rem 0 .6rem">
   Opening a branch fetches it; closing one discards what was fetched, so nothing
   read stays behind. Re-opening asks again.
@@ -142,6 +144,19 @@ async function refresh() {
 document.addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
+
+  if (target.id === "reload") {
+    // Declaring a tunnel or a command at a terminal reaches disk and not this
+    // process. This is the door for that, without ending the process and losing
+    // what it is holding.
+    try {
+      const result = await api("/api/reload", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      $("error").textContent = "reloaded: " + result.routes + " routes, " + result.profiles + " profiles";
+    } catch (cause) {
+      $("error").textContent = String(cause.message ?? cause);
+    }
+    return;
+  }
   const { admit, block, forget } = target.dataset;
   try {
     if (admit) await api("/api/peers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: admit }) });

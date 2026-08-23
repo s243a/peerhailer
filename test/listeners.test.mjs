@@ -137,3 +137,68 @@ test("a named origin is allowed, and only that one", async () => {
     await daemon.close();
   }
 });
+
+test("reload picks up a command declared while the daemon was running", async () => {
+  const { createCommandPlugin } = await import("../src/builtin/commandPlugin.js");
+  const identity = generateIdentity();
+  const directory = createDirectory({ self: { name: "me", publicKey: identity.publicKey } });
+
+  // Started with nothing declared, as a daemon usually is.
+  let declared = {};
+  const daemon = createDaemon({
+    directory,
+    identity,
+    plugins: [hailPlugin],
+    onReload: () =>
+      daemon.reload({
+        plugins: [hailPlugin, ...(Object.keys(declared).length ? [createCommandPlugin({ commands: declared })] : [])],
+      }),
+  });
+  const { port } = await daemon.listen({ port: 0 });
+  const url = `http://127.0.0.1:${port}`;
+
+  try {
+    const before = await fetch(`${url}/command/greet/run`, { method: "POST", body: "{}" }).catch(() => null);
+    assert.equal(before?.status, 404, "not declared, so not served");
+
+    // Someone runs `hail commands add` at another terminal: it reaches disk, and
+    // the running process knows nothing about it.
+    declared = { greet: "echo hi" };
+    const reloaded = await fetch(`${url}/api/reload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reloaded.status, 200);
+
+    const after = await fetch(`${url}/command/greet/run`, { method: "POST", body: "{}" })
+      .then((r) => r.status)
+      .catch(() => "dropped");
+    assert.notEqual(after, 404, "declared and reloaded, so the route exists");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("reload is a local decision, not a peer's", async () => {
+  const identity = generateIdentity();
+  const directory = createDirectory({ self: { name: "me", publicKey: identity.publicKey } });
+  const daemon = createDaemon({ directory, identity, plugins: [hailPlugin], onReload: () => ({ routes: 0 }) });
+  const control = await daemon.listen({ port: 0 });
+  const [hail] = await daemon.listenHail({ port: 0, hosts: ["127.0.0.1"] });
+
+  try {
+    // It changes what peers may reach, so it lives on the control door only.
+    const onHail = await fetch(`http://127.0.0.1:${hail.port}/api/reload`, { method: "POST", body: "{}" });
+    assert.equal(onHail.status, 404, "a peer cannot reload this machine");
+
+    const onControl = await fetch(`http://127.0.0.1:${control.port}/api/reload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(onControl.status, 200);
+  } finally {
+    await daemon.close();
+  }
+});

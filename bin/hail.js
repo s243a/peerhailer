@@ -425,6 +425,29 @@ switch (command) {
         : [];
     if (allowedOrigins.length) log(`[api] also answering ${allowedOrigins.join(", ")}`);
 
+    /**
+     * Rebuild what the daemon serves from the state file as it is now.
+     *
+     * The daemon cannot do this itself: only here knows that `stored.tunnels`
+     * becomes a tunnel plugin and `stored.commands` becomes a command plugin.
+     */
+    const rebuild = () => {
+      const fresh = loadState(statePath);
+      const nextTunnels = fresh.tunnels ?? {};
+      const nextCommands = fresh.commands ?? {};
+      const nextPlugins = [
+        hailPlugin,
+        createDiagnosticsPlugin(diagnostics),
+        ...(Object.keys(nextTunnels).length ? [createTunnelPlugin({ endpoints: nextTunnels })] : []),
+        ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
+      ];
+      return {
+        plugins: nextPlugins,
+        profiles: { ...collectProfiles(nextPlugins), ...(fresh.profiles ?? {}) },
+        state: fresh,
+      };
+    };
+
     const daemon = createDaemon({
       directory,
       identity,

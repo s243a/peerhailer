@@ -74,6 +74,7 @@ function readBody(request) {
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
  *   allowedOrigins?: string[],
+ *   onReload?: () => any,
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   log?: (message: string) => void,
  * }} options
@@ -81,9 +82,9 @@ function readBody(request) {
 export function createDaemon({
   directory,
   identity,
-  profiles = {},
+  profiles: initialProfiles = {},
   diagnostics,
-  plugins = [],
+  plugins: initialPlugins = [],
   /**
    * Origins allowed to use the control API from a browser. Empty by default:
    * a page you did not write has no business admitting peers, and the common
@@ -94,9 +95,17 @@ export function createDaemon({
    * browser while appearing to permit.
    */
   allowedOrigins = [],
+  onReload,
   applyChange,
   log = () => {},
 }) {
+  // Rebindable by `reload`, so declaring a tunnel or a command does not cost a
+  // restart. Declared here rather than beside their first use, because a `let`
+  // below its first reference is a temporal dead zone error that a syntax check
+  // does not catch.
+  let plugins = initialPlugins;
+  let profiles = initialProfiles;
+
   /**
    * Every runtime mutation goes through here: applied to what is on disk now,
    * then adopted in memory. Declared before its users rather than after,
@@ -416,7 +425,11 @@ export function createDaemon({
   // Resolved once: a route table that changes per request is one nobody can
   // reason about, and a conflict is worth refusing at startup rather than
   // settling by whichever plugin happened to be listed first.
-  const pluginRoutes = collectRoutes(plugins, { log });
+  // Rebuildable, because declaring a tunnel or a command should not cost a
+  // restart. Restarting a daemon is not something a daemon can do to itself
+  // without a supervisor, and it would throw away the run history and every open
+  // tunnel to pick up one line of configuration.
+  let pluginRoutes = collectRoutes(plugins, { log });
 
   /**
    * Refuse anything a web page could have sent on your behalf.
@@ -581,6 +594,20 @@ export function createDaemon({
         });
       }
 
+      // Pick up configuration changed at another terminal.
+      //
+      // On the control door only: it changes what peers may reach, so it is a
+      // local decision, not one a peer makes. The host supplies the rebuilding,
+      // because only the host knows how its plugins are constructed.
+      if (scope === "control" && url.pathname === "/api/reload" && request.method === "POST") {
+        if (!onReload) return send(response, 501, { error: "this host cannot reload" });
+        try {
+          return send(response, 200, onReload());
+        } catch (error) {
+          return send(response, 500, { error: String(error instanceof Error ? error.message : error) });
+        }
+      }
+
       // What peers have actually run here.
       //
       // Kept in the daemon's memory rather than the directory file, because a
@@ -697,6 +724,34 @@ export function createDaemon({
 
   return {
     server: control,
+
+    /**
+     * Pick up configuration that changed while this was running.
+     *
+     * Routes, profiles and plugins are read once at startup, and the daemon
+     * never re-reads its own state file — so a `hail tunnels add` at another
+     * terminal reached disk and not the running process. This is the door for
+     * that, without the process ending.
+     *
+     * Anything a departing plugin was holding is released first: a tunnel whose
+     * endpoint was removed should not survive the removal.
+     *
+     * @param {{plugins?: any[], profiles?: Record<string, any>, state?: any}} next
+     */
+    reload: ({ plugins: nextPlugins, profiles: nextProfiles, state } = {}) => {
+      if (Array.isArray(nextPlugins)) {
+        for (const plugin of plugins) plugin.stop?.();
+        plugins = nextPlugins;
+        pluginRoutes = collectRoutes(plugins, { log });
+      }
+      if (nextProfiles) {
+        profiles = nextProfiles;
+        directory.useProfiles(nextProfiles);
+      }
+      if (state) directory.adopt(state);
+      log(`[daemon] reloaded: ${pluginRoutes.size} routes, ${Object.keys(profiles).length} profiles`);
+      return { routes: pluginRoutes.size, profiles: Object.keys(profiles).length };
+    },
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */
     listen: ({ port = 8787, host = "127.0.0.1" } = {}) =>
       new Promise((resolve) => {
