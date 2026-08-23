@@ -896,3 +896,28 @@ obtain control of my T3*.
 It also removes the last reason to wait for a plugin system: the credential path
 needs no T3 plugin, because the CLI is already an interface.
 
+## The operator chooses the surface
+
+Worth stating as a principle, because it is the point of the plugin architecture
+rather than a side effect. Everything is off until turned on: a capability is
+granted and never inherited, a plugin is loaded and never assumed, the page and
+the chat and each tunnel endpoint are separate opt-ins. So **the attack surface
+is exactly what the operator chose, and nothing more** — a headless relay has no
+inbox, a machine that declares no command cannot run one, and `tunnel:acp` says
+nothing about `service:agent`. Nobody carries a feature they did not ask for,
+which means nobody carries its risk.
+
+## A third plugin shape: services
+
+Tunnels connect to something already listening; commands run and finish. Neither
+can *start a thing that keeps running* — which is what spawning `bridge --listen`
+on a remote machine, so a peer can drive an agent there, requires. Designed in
+[services.md](services.md): the operator declares the service, the caller names
+it, the machine picks the port and returns it, and reaching it is a tunnel.
+
+It is the top of the danger ladder — `service:agent` starts a process that runs
+arbitrary commands, unattended, which is more than any fixed dangerous capability
+does. So its own capability, an encrypted arrival without exception, per-peer
+bounds, and a life tied to the peer that started it. The last, most dangerous,
+and most deliberately-granted thing the fabric can offer.
+
