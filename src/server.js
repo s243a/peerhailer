@@ -591,8 +591,7 @@ export function createDaemon({
       // while telling nobody anything.
       if (scope === "control" && url.pathname === "/api/command-history" && request.method === "GET") {
         const entries = plugins
-          .filter((plugin) => typeof plugin.history === "function")
-          .flatMap((plugin) => plugin.history())
+          .flatMap((plugin) => (typeof plugin.history === "function" ? plugin.history() : []))
           .map((entry) => ({
             capability: entry.capability,
             // A fingerprint, not the key: this is for recognising a peer, and a
