@@ -109,6 +109,31 @@ test("a shell is refused on a plaintext hail listener, served where arrival is a
   }
 });
 
+test("a shell is refused through a control door bound to a non-loopback host", async () => {
+  const me = generateIdentity();
+  const caller = generateIdentity();
+  const directory = createDirectory({ self: { name: "target", publicKey: me.publicKey } });
+  directory.useProfiles({ sysadmin: { name: "sysadmin", allows: ["hail", "shell:sh"] } });
+  directory.admit({ name: "caller", publicKey: caller.publicKey, profile: "sysadmin" });
+
+  const shell = createShellPlugin({ shells: { sh: "sh" } });
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin, shell] });
+  // Control bound to the wildcard is not loopback, so its "trusted arrival" no
+  // longer holds — marked routes must 404 there even reached over 127.0.0.1.
+  const bound = await daemon.listen({ port: 0, host: "0.0.0.0" });
+  try {
+    const record = { name: "target", addresses: [{ value: `http://127.0.0.1:${bound.port}` }], publicKey: me.publicKey };
+    const opened = await openShell(
+      (path, body) => callPeer(record, path, body, { as: { name: "caller", privateKey: caller.privateKey } }),
+      "sh",
+    );
+    assert.equal(opened.ok, false, "a non-loopback control door does not serve cleartext shells");
+  } finally {
+    shell.stop();
+    await daemon.close();
+  }
+});
+
 test("a caller without the capability is refused the shell", async () => {
   const me = generateIdentity();
   const stranger = generateIdentity();

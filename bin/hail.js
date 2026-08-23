@@ -532,26 +532,31 @@ switch (command) {
     }
 
     // `--hail-on wlan0,tailscale0` — interface names, resolved now, because the
-    // name is the stable half and the address is not.
-    const hailOn = typeof flags["hail-on"] === "string" ? flags["hail-on"].split(",") : [];
-    const hosts = [...new Set(hailOn.flatMap(addressesFor))];
-    for (const spec of hailOn) {
-      if (addressesFor(spec).length === 0) log(`[daemon] ${spec.trim()} has no address to bind`);
+    // name is the stable half and the address is not. The encrypted assertion is
+    // per interface, not per invocation: `--hail-on` is plaintext arrival,
+    // `--hail-on-encrypted` asserts the arrival is encrypted (a tainet, pinned
+    // TLS later). Two flags rather than one boolean over a mixed list, so
+    // asserting the tailnet cannot silently vouch for wifi in the same breath.
+    const resolveHosts = (spec) => {
+      const parts = typeof spec === "string" ? spec.split(",") : [];
+      for (const part of parts) {
+        if (addressesFor(part).length === 0) log(`[daemon] ${part.trim()} has no address to bind`);
+      }
+      return [...new Set(parts.flatMap(addressesFor))];
+    };
+    const plainHosts = resolveHosts(flags["hail-on"]);
+    const encryptedHosts = resolveHosts(flags["hail-on-encrypted"]);
+    const hosts = [...plainHosts, ...encryptedHosts];
+
+    if (plainHosts.length && Object.keys(declaredShells).length) {
+      log("[daemon] WARNING: shells are declared, but --hail-on interfaces are plaintext —");
+      log("[daemon]          shell routes are NOT served there. Move an interface to");
+      log("[daemon]          --hail-on-encrypted only if its arrival is encrypted (a tailnet,");
+      log("[daemon]          pinned TLS). A plaintext shell is never offered.");
     }
-    // `--hail-encrypted` is the operator asserting these interfaces carry an
-    // encrypted arrival (a tailnet, or pinned TLS later). Without it, routes
-    // that require encryption — the shell — are not served on the hail
-    // listeners at all, which is the safe default.
-    const hailEncrypted = flags["hail-encrypted"] === true;
-    if (hosts.length && Object.keys(declaredShells).length && !hailEncrypted) {
-      log("[daemon] WARNING: shells are declared but --hail-encrypted was not passed —");
-      log("[daemon]          shell routes will NOT be served on these hail listeners.");
-      log("[daemon]          Pass --hail-encrypted only for interfaces whose arrival is");
-      log("[daemon]          encrypted (a tailnet, pinned TLS). A plaintext shell is not offered.");
-    }
-    if (hosts.length) {
-      await daemon.listenHail({ port: Number.isFinite(port) ? port : 8787, hosts, encrypted: hailEncrypted });
-    }
+    const hailPort = Number.isFinite(port) ? port : 8787;
+    if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });
+    if (encryptedHosts.length) await daemon.listenHail({ port: hailPort, hosts: encryptedHosts, encrypted: true });
     if (!wantsUi && hosts.length === 0) {
       log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");
     }
@@ -923,6 +928,7 @@ switch (command) {
         "    ... --ui                   also serve the page (off by default; it is the only",
         "                                  reason a browser can reach this daemon at all)",
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
+        "    ... --hail-on-encrypted tailscale0  hails on an interface whose arrival is encrypted (serves shells)",
         "    ... --chat                 accept short messages from peers holding `chat`",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",

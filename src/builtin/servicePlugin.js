@@ -323,6 +323,7 @@ export function createServicePlugin({
                 child = spawnImpl(decl.command, { shell: true, detached: true });
               } catch {
                 running.delete(id);
+                record({ name, peerKey: caller.publicKey, port: service.port, event: "failed to start" });
                 return { [REFUSE]: true, reason: "could not start the service" };
               }
               service.child = child;
@@ -352,6 +353,7 @@ export function createServicePlugin({
                 child = spawnImpl(command, { shell: true, detached: true });
               } catch {
                 running.delete(id);
+                record({ name, peerKey: caller.publicKey, port: service.port, event: "failed to start" });
                 return { [REFUSE]: true, reason: "could not start the service" };
               }
               service.child = child;

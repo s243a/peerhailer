@@ -496,6 +496,7 @@ export function createDaemon({
    * not listening on the external interface, so there is nothing to reach.
    *
    * @param {"control" | "hail"} scope
+   * @param {{ encryptedArrival?: boolean | (() => boolean) }} [options]
    * @returns {import("node:http").RequestListener}
    */
   const handlerFor = (scope, { encryptedArrival = false } = {}) => async (request, response) => {
@@ -504,6 +505,9 @@ export function createDaemon({
     try {
       const pluginRoute = pluginRoutes.get(`${request.method} ${url.pathname}`);
       if (pluginRoute) {
+        // Evaluated per request: the control door's answer depends on the host
+        // it was bound to, which is not known when the handler is created.
+        const arrivalEncrypted = typeof encryptedArrival === "function" ? encryptedArrival() : encryptedArrival;
         // A route that requires an encrypted arrival is simply not served where
         // arrival is not encrypted — it 404s exactly as an undeclared route
         // would, revealing nothing. This is where the shell plugin's
@@ -511,7 +515,7 @@ export function createDaemon({
         // it is as if the route does not exist, so a plaintext remote shell is
         // impossible rather than merely discouraged. The listener is the only
         // place that knows whether arrival is encrypted, so the check lives here.
-        if (pluginRoute.requiresEncryptedArrival && !encryptedArrival) return nothingHere(response);
+        if (pluginRoute.requiresEncryptedArrival && !arrivalEncrypted) return nothingHere(response);
 
         const body = JSON.parse((await readBody(request)) || "{}");
         // Authentication and capability happen here, in the core, before the
@@ -719,10 +723,17 @@ export function createDaemon({
    */
   const controlNames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
-  // The control listener is loopback — the local API door — so arrival there is
-  // as trusted as it gets: a local shell over loopback is fine. Marked routes
-  // are served here. The network-facing hail listeners assert their own.
-  const control = createServer(handlerFor("control", { encryptedArrival: true }));
+  // The control door counts as an encrypted arrival only while it is loopback —
+  // local traffic over `127.0.0.1` needs no wire encryption. Bound to a LAN
+  // interface it is neither loopback nor asserted-encrypted, so marked routes
+  // (the shell) 404 there rather than being served in cleartext through the door
+  // the two-listener split never meant to expose. Set at `listen()` from host.
+  let controlLoopback = true;
+  const isLoopbackHost = (/** @type {string} */ h) => {
+    const s = String(h).toLowerCase();
+    return s === "localhost" || s === "::1" || s === "[::1]" || s.startsWith("127.");
+  };
+  const control = createServer(handlerFor("control", { encryptedArrival: () => controlLoopback }));
   /** @type {import("node:http").Server[]} */
   const hailServers = [];
 
@@ -777,6 +788,7 @@ export function createDaemon({
       new Promise((resolve) => {
         // Whatever it was told to bind is a name it may answer to.
         controlNames.add(String(host).toLowerCase());
+        controlLoopback = isLoopbackHost(host);
         control.listen(port, host, () => {
           // A TCP listen always yields AddressInfo; the union covers pipes.
           const address = /** @type {import("node:net").AddressInfo} */ (control.address());
