@@ -538,8 +538,19 @@ switch (command) {
     for (const spec of hailOn) {
       if (addressesFor(spec).length === 0) log(`[daemon] ${spec.trim()} has no address to bind`);
     }
+    // `--hail-encrypted` is the operator asserting these interfaces carry an
+    // encrypted arrival (a tailnet, or pinned TLS later). Without it, routes
+    // that require encryption — the shell — are not served on the hail
+    // listeners at all, which is the safe default.
+    const hailEncrypted = flags["hail-encrypted"] === true;
+    if (hosts.length && Object.keys(declaredShells).length && !hailEncrypted) {
+      log("[daemon] WARNING: shells are declared but --hail-encrypted was not passed —");
+      log("[daemon]          shell routes will NOT be served on these hail listeners.");
+      log("[daemon]          Pass --hail-encrypted only for interfaces whose arrival is");
+      log("[daemon]          encrypted (a tailnet, pinned TLS). A plaintext shell is not offered.");
+    }
     if (hosts.length) {
-      await daemon.listenHail({ port: Number.isFinite(port) ? port : 8787, hosts });
+      await daemon.listenHail({ port: Number.isFinite(port) ? port : 8787, hosts, encrypted: hailEncrypted });
     }
     if (!wantsUi && hosts.length === 0) {
       log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");

@@ -78,6 +78,37 @@ test("a session held by id keeps shell state across separate calls", async () =>
   }
 });
 
+test("a shell is refused on a plaintext hail listener, served where arrival is asserted encrypted", async () => {
+  const me = generateIdentity();
+  const caller = generateIdentity();
+  const directory = createDirectory({ self: { name: "target", publicKey: me.publicKey } });
+  directory.useProfiles({ sysadmin: { name: "sysadmin", allows: ["hail", "shell:sh"] } });
+  directory.admit({ name: "caller", publicKey: caller.publicKey, profile: "sysadmin" });
+
+  const shell = createShellPlugin({ shells: { sh: "sh" } });
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin, shell] });
+  const as = { name: "caller", privateKey: caller.privateKey };
+  const reach = (bound) => (path, body) =>
+    callPeer({ name: "target", addresses: [{ value: `http://127.0.0.1:${bound[0].port}` }], publicKey: me.publicKey }, path, body, { as });
+
+  try {
+    // Plaintext arrival: the marked route is not served — it 404s as if absent,
+    // so callPeer reports no answer. This is the headline hole closed.
+    const plain = await daemon.listenHail({ port: 0, hosts: ["127.0.0.1"], encrypted: false });
+    const refused = await openShell(reach(plain), "sh");
+    assert.equal(refused.ok, false, "no plaintext remote shell — the route is not served there");
+
+    // The operator asserting encryption (a tailnet, pinned TLS) serves it.
+    const encrypted = await daemon.listenHail({ port: 0, hosts: ["127.0.0.1"], encrypted: true });
+    const opened = await openShell(reach(encrypted), "sh");
+    assert.equal(opened.ok, true, "served where arrival is asserted encrypted");
+    await closeShell(reach(encrypted), "sh", opened.response.id);
+  } finally {
+    shell.stop();
+    await daemon.close();
+  }
+});
+
 test("a caller without the capability is refused the shell", async () => {
   const me = generateIdentity();
   const stranger = generateIdentity();

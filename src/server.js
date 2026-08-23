@@ -498,12 +498,21 @@ export function createDaemon({
    * @param {"control" | "hail"} scope
    * @returns {import("node:http").RequestListener}
    */
-  const handlerFor = (scope) => async (request, response) => {
+  const handlerFor = (scope, { encryptedArrival = false } = {}) => async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
       const pluginRoute = pluginRoutes.get(`${request.method} ${url.pathname}`);
       if (pluginRoute) {
+        // A route that requires an encrypted arrival is simply not served where
+        // arrival is not encrypted — it 404s exactly as an undeclared route
+        // would, revealing nothing. This is where the shell plugin's
+        // `requiresEncryptedArrival` becomes real: on a plaintext hail listener
+        // it is as if the route does not exist, so a plaintext remote shell is
+        // impossible rather than merely discouraged. The listener is the only
+        // place that knows whether arrival is encrypted, so the check lives here.
+        if (pluginRoute.requiresEncryptedArrival && !encryptedArrival) return nothingHere(response);
+
         const body = JSON.parse((await readBody(request)) || "{}");
         // Authentication and capability happen here, in the core, before the
         // plugin is reached. A plugin cannot opt out of this, which is what
@@ -710,7 +719,10 @@ export function createDaemon({
    */
   const controlNames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
-  const control = createServer(handlerFor("control"));
+  // The control listener is loopback — the local API door — so arrival there is
+  // as trusted as it gets: a local shell over loopback is fine. Marked routes
+  // are served here. The network-facing hail listeners assert their own.
+  const control = createServer(handlerFor("control", { encryptedArrival: true }));
   /** @type {import("node:http").Server[]} */
   const hailServers = [];
 
@@ -785,13 +797,19 @@ export function createDaemon({
      * the daemon down with it: a laptop whose wifi is not up yet should still
      * answer on its tailnet.
      *
-     * @param {{port?: number, hosts: string[]}} options
+     * `encrypted` is the operator's assertion that arrival on these hosts is
+     * encrypted — a tailnet today, pinned TLS later. It gates the routes that
+     * require it (the shell): false, and a marked route 404s here as if it did
+     * not exist. Default false, so the fail-closed direction is the one an
+     * operator gets without saying anything.
+     *
+     * @param {{port?: number, hosts: string[], encrypted?: boolean}} options
      */
-    listenHail: async ({ port = 8787, hosts }) => {
+    listenHail: async ({ port = 8787, hosts, encrypted = false }) => {
       /** @type {{host: string, port: number}[]} */
       const bound = [];
       for (const host of hosts) {
-        const server = createServer(handlerFor("hail"));
+        const server = createServer(handlerFor("hail", { encryptedArrival: encrypted }));
         try {
           await new Promise((resolve, reject) => {
             server.once("error", reject);

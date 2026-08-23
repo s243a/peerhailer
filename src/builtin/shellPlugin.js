@@ -157,7 +157,13 @@ export function createShellPlugin({
   const forget = (id, session, event) => {
     if (open.get(id) !== session) return;
     open.delete(id);
-    record({ name: session.name, peerKey: session.peerKey, event, ms: now() - session.openedAt });
+    // Idempotent record: the overflow path records the real reason before the
+    // kill's `exit` event would log a plain "closed: exited" over it, so guard
+    // against the second write rather than losing why the session ended.
+    if (!session.recorded) {
+      session.recorded = true;
+      record({ name: session.name, peerKey: session.peerKey, event, ms: now() - session.openedAt });
+    }
   };
 
   const reap = () => {
@@ -260,6 +266,7 @@ export function createShellPlugin({
               buffered: 0,
               closed: false,
               error: null,
+              recorded: false,
               openedAt: now(),
               lastByte: now(),
             };
@@ -270,8 +277,13 @@ export function createShellPlugin({
             const onOutput = (/** @type {Buffer} */ chunk) => {
               if (session.buffered + chunk.length > MAX_BUFFERED) {
                 session.error = "the shell produced more output than the session will hold";
-                kill(session);
                 session.closed = true;
+                // Record the real reason now — the kill below fires `exit`,
+                // whose `forget` would otherwise log this as "closed: exited"
+                // and lose why. `recorded` makes that second write a no-op.
+                session.recorded = true;
+                record({ name, peerKey: session.peerKey, event: "closed: output limit", ms: now() - session.openedAt });
+                kill(session);
                 return;
               }
               session.chunks.push(chunk);

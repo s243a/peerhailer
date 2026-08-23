@@ -220,6 +220,10 @@ export function createServicePlugin({
         done = true;
         clearTimeout(timer);
         child.stdout?.off?.("data", onData);
+        // Keep the pipe draining after we stop parsing: a chatty child whose
+        // stdout nobody reads fills its buffer and blocks on write — running but
+        // wedged. Flowing with no listener discards, which is what we want.
+        child.stdout?.resume?.();
         resolve(value);
       };
       /** @param {any} chunk */
@@ -237,6 +241,10 @@ export function createServicePlugin({
             // things; only a JSON object carrying a valid port counts.
           }
         }
+        // A legitimate announcement is ~20 bytes on its own line. A child that
+        // floods newline-free output is not announcing; cap the buffer so it
+        // cannot grow the daemon's heap for the whole announce window.
+        if (buf.length > 65536) finish(null);
       };
       const timer = setTimeout(() => finish(null), timeoutMs);
       timer.unref?.();
@@ -310,7 +318,13 @@ export function createServicePlugin({
               // the operator wrote it; the child chooses the port and announces
               // it. Silence, an early exit, or an error is a refusal, never a
               // guessed port — fail closed.
-              const child = spawnImpl(decl.command, { shell: true, detached: true });
+              let child;
+              try {
+                child = spawnImpl(decl.command, { shell: true, detached: true });
+              } catch {
+                running.delete(id);
+                return { [REFUSE]: true, reason: "could not start the service" };
+              }
               service.child = child;
               port = await readAnnouncedPort(child, announceMs);
               if (port == null) {
@@ -333,7 +347,13 @@ export function createServicePlugin({
               }
               service.port = port;
               const command = String(decl.command).replaceAll("{port}", String(port));
-              const child = spawnImpl(command, { shell: true, detached: true });
+              let child;
+              try {
+                child = spawnImpl(command, { shell: true, detached: true });
+              } catch {
+                running.delete(id);
+                return { [REFUSE]: true, reason: "could not start the service" };
+              }
               service.child = child;
               wireLifecycle(child, id, service);
             }

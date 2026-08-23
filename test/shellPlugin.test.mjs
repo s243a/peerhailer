@@ -218,5 +218,9 @@ test("a shell that floods output past the buffer is closed, not a memory leak", 
   const polled = call(routes, "/shell/bash/poll", { caller: sol, body: { id } });
   assert.equal(polled.closed, true);
   assert.match(polled.error, /more output than the session will hold/);
+  assert.ok(
+    plugin.history().some((e) => e.event === "closed: output limit"),
+    "the audit log records why it closed, not a generic exit",
+  );
   plugin.stop();
 });

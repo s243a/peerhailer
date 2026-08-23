@@ -62,6 +62,11 @@ export async function hailPeer(record, options = {}) {
  * calling, and the encrypted arrival the sensitive routes require is what covers
  * *what* they carry.
  *
+ * The merge order is load-bearing: `hailBody(as)` spreads *last*, so the signed
+ * identity always wins. A `body` carrying `from`/`signature` — relayed from
+ * untrusted input, or a careless wrapper — cannot silently replace the identity
+ * this call authenticated as. `grant` still flows, since `hailBody` never sets it.
+ *
  * This is the caller side every route-plugin needs and none had: a driver for
  * `/shell/*`, `/tunnel/*`, `/command/*`, `/service/*` from another machine.
  *
@@ -88,7 +93,7 @@ export async function callPeer(record, path, body = {}, { fetchImpl = fetch, tim
       const response = await fetchImpl(`${address.value.replace(/\/$/, "")}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...hailBody(as), ...body }),
+        body: JSON.stringify({ ...body, ...hailBody(as) }),
         signal: controller.signal,
       });
       if (!response.ok) {
