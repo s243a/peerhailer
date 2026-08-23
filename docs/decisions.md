@@ -921,3 +921,29 @@ does. So its own capability, an encrypted arrival without exception, per-peer
 bounds, and a life tied to the peer that started it. The last, most dangerous,
 and most deliberately-granted thing the fabric can offer.
 
+## TLS pinned to the peer's key
+
+Designed in [tls.md](tls.md). The thing that makes an encrypted arrival possible
+without Tailscale — a direct peer-to-peer wire the tunnels can run on. The one
+rule shapes it: no hand-rolled cipher, because that would be the most dangerous
+code in a project whose safety is that it is small enough to read. Node's `tls`
+does the crypto; this project writes only the *pinning* — a self-signed cert
+carrying the peer's existing Ed25519 identity key, verified by comparing its key
+to the one the directory holds, the same check every hail already makes. Not a
+CA, not the web PKI, and not trust-on-first-use: the key is pinned before the
+connection, from the directory, and a cert whose key we do not already hold is
+refused rather than remembered.
+
+## A shell plugin is the top of the ladder
+
+Designed in [shell.md](shell.md), and framed there without softening: an
+interactive PTY a peer can open is remote shell access — SSH through the fabric.
+It is the one plugin that cannot hold the rule every other one does (nothing a
+caller sends reaches a shell), because letting a peer choose what runs is its
+entire purpose. So it gets its own capability in no built-in profile, an
+encrypted arrival without exception, an always-on recorded session, and bounds —
+and it deliberately screens nothing, because deciding security by parsing shell
+input is the mistake this project already refused twice. The narrower answer is a
+`command:` for the specific thing; `shell` is for when you actually mean a
+terminal, and it is the natural place the supervisor should be requireable.
+
