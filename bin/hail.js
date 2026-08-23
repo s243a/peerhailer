@@ -28,6 +28,7 @@ import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
+import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -382,6 +383,7 @@ switch (command) {
     // service not being there.
     const tunnels = stored.tunnels ?? {};
     const declaredCommands = stored.commands ?? {};
+    const declaredServices = stored.services ?? {};
     // An inbox is opt-in: someone running a headless relay should not inherit
     // one, same principle as the page.
     const wantsChat = flags.chat === true || stored.chat === true;
@@ -392,6 +394,7 @@ switch (command) {
         ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
+      ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
       ...(Object.keys(declaredCommands).length
         ? [
             createCommandPlugin({
@@ -411,6 +414,9 @@ switch (command) {
     }
     for (const name of Object.keys(declaredCommands)) {
       log(`[command] ${name} (needs command:${name})`);
+    }
+    for (const name of Object.keys(declaredServices)) {
+      log(`[service] ${name} (needs service:${name})`);
     }
     if (wantsChat) log(`[chat] on (needs chat)`);
     // Profiles a plugin suggests have to be known before anyone is asked
@@ -443,6 +449,7 @@ switch (command) {
       const fresh = loadState(statePath);
       const nextTunnels = fresh.tunnels ?? {};
       const nextCommands = fresh.commands ?? {};
+      const nextServices = fresh.services ?? {};
       const nextChat = flags.chat === true || fresh.chat === true;
       const nextPlugins = [
         hailPlugin,
@@ -451,6 +458,7 @@ switch (command) {
         ...(Object.keys(nextTunnels).length
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
+        ...(Object.keys(nextServices).length ? [createServicePlugin({ services: nextServices })] : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
         // The externally-loaded ones too. Dropping them silently on reload
         // vanishes the profiles they declare, so a peer holding a capability one
@@ -556,6 +564,38 @@ switch (command) {
   case "id": {
     // For handing to another machine: `hail id > sol.pub`.
     process.stdout.write(identity.publicKey.endsWith("\n") ? identity.publicKey : `${identity.publicKey}\n`);
+    break;
+  }
+
+  case "services": {
+    const [action, name] = rest;
+    const declared = stored.services ?? {};
+
+    if (action === "add") {
+      const line = rest.slice(2).join(" ").trim();
+      if (!name || !line) fail('usage: hail services add <name> "<command line, with {port}>"');
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a service name is letters, digits and dashes");
+      stored.services = { ...declared, [name]: line };
+      persist();
+      log(`service ${name} runs: ${line}`);
+      log(`peers need service:${name}; no profile grants it yet`);
+      log(`this runs as ${process.env.USER ?? "this user"}, and stays running — declare only what you mean`);
+      break;
+    }
+    if (action === "remove") {
+      if (!name) fail("usage: hail services remove <name>");
+      const { [name]: _gone, ...rest2 } = declared;
+      stored.services = rest2;
+      persist();
+      log(`service ${name} removed`);
+      break;
+    }
+    const names = Object.keys(declared);
+    if (names.length === 0) {
+      log('no services declared. hail services add <name> "<command line with {port}>"');
+      break;
+    }
+    for (const entry of names) log(`  ${entry.padEnd(12)} runs: ${declared[entry]}   needs service:${entry}`);
     break;
   }
 
@@ -734,6 +774,7 @@ switch (command) {
         "  hail id                      print this machine's public key",
         "  hail tunnels [add|remove]    endpoints a peer may reach, by name",
         "  hail commands [add|remove]   commands a peer may run, by name",
+        "  hail services [add|remove]   long-running processes a peer may start",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",
