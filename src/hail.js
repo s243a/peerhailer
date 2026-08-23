@@ -47,7 +47,31 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string}}} [options]
  * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
  */
-export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, as } = {}) {
+export async function hailPeer(record, options = {}) {
+  return callPeer(record, "/hail", {}, options);
+}
+
+/**
+ * Call one route on a peer, over the first address that answers.
+ *
+ * The general form of `hailPeer`: it signs the same `{from, signature}` the hail
+ * carries — which is the whole of a caller's authentication, since the server
+ * looks a caller up by name and verifies that signature against the key it holds
+ * — and merges the route's own `body` alongside. The body is not itself signed,
+ * exactly as a tunnel's `send` data is not: authentication proves *who* is
+ * calling, and the encrypted arrival the sensitive routes require is what covers
+ * *what* they carry.
+ *
+ * This is the caller side every route-plugin needs and none had: a driver for
+ * `/shell/*`, `/tunnel/*`, `/command/*`, `/service/*` from another machine.
+ *
+ * @param {any} record
+ * @param {string} path
+ * @param {Record<string, any>} [body]
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string}}} [options]
+ * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
+ */
+export async function callPeer(record, path, body = {}, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, as } = {}) {
   const peer = makePeerRecord(record);
   if (!peer) return { ok: false, error: "not a usable peer record" };
   if (peer.addresses.length === 0) return { ok: false, error: `no known address for ${peer.name}` };
@@ -61,10 +85,10 @@ export async function hailPeer(record, { fetchImpl = fetch, timeoutMs = DEFAULT_
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetchImpl(`${address.value.replace(/\/$/, "")}/hail`, {
+      const response = await fetchImpl(`${address.value.replace(/\/$/, "")}${path}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(hailBody(as)),
+        body: JSON.stringify({ ...hailBody(as), ...body }),
         signal: controller.signal,
       });
       if (!response.ok) {

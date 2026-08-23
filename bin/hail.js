@@ -30,9 +30,10 @@ import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
+import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
-import { walk } from "../src/hail.js";
+import { walk, callPeer } from "../src/hail.js";
 import { createDaemon } from "../src/server.js";
 import { defaultStatePath, loadState, updateState } from "../src/state.js";
 
@@ -575,6 +576,68 @@ switch (command) {
     break;
   }
 
+  case "shell": {
+    // Drive a shell on *another* peer (client side), distinct from `shells`
+    // which declares one on this machine. Low-level open/send/poll/close so a
+    // session survives across separate invocations — hold the id, drive it a
+    // call at a time — plus `exec` for a one-shot command.
+    const [peerName, name, action, ...more] = rest;
+    if (!peerName || !name || !action) {
+      fail("usage: hail shell <peer> <name> <open|send|poll|close|exec> [args]");
+    }
+    const record = directory.get(peerName);
+    if (!record) fail(`unknown peer ${peerName} — see hail peers`);
+    const as = { name: directory.self.name, privateKey: identity.privateKey };
+    const call = (path, body) => callPeer(record, path, body, { as });
+    const need = (result) => {
+      if (!result.ok) fail(result.error);
+      return result.response;
+    };
+
+    if (action === "open") {
+      const res = need(await openShell(call, name));
+      log(`id: ${res.id}`);
+      log(`then: hail shell ${peerName} ${name} send ${res.id} "<command>"`);
+      log(`      hail shell ${peerName} ${name} poll ${res.id}`);
+      log(`      hail shell ${peerName} ${name} close ${res.id}`);
+      break;
+    }
+    const id = more[0];
+    if (action === "send") {
+      if (!id) fail(`usage: hail shell ${peerName} ${name} send <id> <text...>`);
+      // A trailing newline runs the line; --raw sends the bytes untouched, for
+      // control characters and partial input.
+      const text = more.slice(1).join(" ") + (flags.raw === true ? "" : "\n");
+      need(await sendShell(call, name, id, text));
+      log("sent");
+      break;
+    }
+    if (action === "poll") {
+      if (!id) fail(`usage: hail shell ${peerName} ${name} poll <id>`);
+      const res = need(await pollShell(call, name, id));
+      if (res.data) process.stdout.write(Buffer.from(res.data, "base64").toString());
+      if (res.closed) log(`\n[shell closed${res.error ? `: ${res.error}` : ""}]`);
+      break;
+    }
+    if (action === "close") {
+      if (!id) fail(`usage: hail shell ${peerName} ${name} close <id>`);
+      need(await closeShell(call, name, id));
+      log("closed");
+      break;
+    }
+    if (action === "exec") {
+      const command = more.join(" ");
+      if (!command) fail(`usage: hail shell ${peerName} ${name} exec <command...>`);
+      const res = await execShell(call, name, command);
+      if (!res.ok) fail(res.error);
+      process.stdout.write(res.output.endsWith("\n") ? res.output : res.output + "\n");
+      if (!res.complete) log("[did not finish within the poll window — the session was closed]");
+      break;
+    }
+    fail(`unknown shell action ${action} — open|send|poll|close|exec`);
+    break;
+  }
+
   case "shells": {
     const [action, name] = rest;
     const declared = stored.shells ?? {};
@@ -833,6 +896,7 @@ switch (command) {
         "  hail commands [add|remove]   commands a peer may run, by name",
         "  hail services [add|remove]   long-running processes a peer may start",
         "  hail shells [add|remove]     an interactive shell a peer may open (remote shell access)",
+        "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",
