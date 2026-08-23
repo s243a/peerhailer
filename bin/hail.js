@@ -27,6 +27,7 @@ import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
+import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk } from "../src/hail.js";
@@ -381,12 +382,16 @@ switch (command) {
     // service not being there.
     const tunnels = stored.tunnels ?? {};
     const declaredCommands = stored.commands ?? {};
+    // An inbox is opt-in: someone running a headless relay should not inherit
+    // one, same principle as the page.
+    const wantsChat = flags.chat === true || stored.chat === true;
     const plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
       ...(Object.keys(tunnels).length
         ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
         : []),
+      ...(wantsChat ? [createChatPlugin()] : []),
       ...(Object.keys(declaredCommands).length
         ? [
             createCommandPlugin({
@@ -407,6 +412,7 @@ switch (command) {
     for (const name of Object.keys(declaredCommands)) {
       log(`[command] ${name} (needs command:${name})`);
     }
+    if (wantsChat) log(`[chat] on (needs chat)`);
     // Profiles a plugin suggests have to be known before anyone is asked
     // whether they hold one — bundled plugins included, which is where the
     // `operator` profile comes from.
@@ -437,9 +443,11 @@ switch (command) {
       const fresh = loadState(statePath);
       const nextTunnels = fresh.tunnels ?? {};
       const nextCommands = fresh.commands ?? {};
+      const nextChat = flags.chat === true || fresh.chat === true;
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
+        ...(nextChat ? [createChatPlugin()] : []),
         ...(Object.keys(nextTunnels).length
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
@@ -735,6 +743,7 @@ switch (command) {
         "    ... --ui                   also serve the page (off by default; it is the only",
         "                                  reason a browser can reach this daemon at all)",
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
+        "    ... --chat                 accept short messages from peers holding `chat`",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",
         "",
