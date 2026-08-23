@@ -138,9 +138,30 @@ tailscale-cli serve status
 
 Userspace networking creates no `tailscale0` interface, so
 `--hail-on tailscale0` has nothing to bind inside Termux. Keep peerhailer on
-loopback and publish the loopback port with Tailscale Serve, or run a separate
-loopback hail-only listener. The address other peers use is the Termux node, for
-example:
+loopback and publish the loopback port with Tailscale Serve:
+
+```sh
+node bin/hail.js daemon --port 7645 --ui
+tailscale-cli serve --bg --http=7645 --yes 127.0.0.1:7645
+tailscale-cli serve status
+```
+
+The local phone can verify only the Serve configuration. A healthy status shows
+the Termux node forwarding to loopback:
+
+```text
+http://termux-tailscale-s24.<tailnet>.ts.net:7645 (tailnet only)
+|-- / proxy http://127.0.0.1:7645
+```
+
+The real inbound check needs a second tailnet machine:
+
+```sh
+curl -i http://termux-tailscale-s24.<tailnet>.ts.net:7645/
+```
+
+A 403 from peerhailer proves the request reached the loopback service; a timeout
+does not. The address other peers store is the Termux node, for example:
 
 ```sh
 hail add phone http://termux-tailscale-s24.<tailnet>.ts.net:7645 \
@@ -157,6 +178,15 @@ that proxy when environment proxy support is enabled:
 
 ```sh
 NODE_USE_ENV_PROXY=1 HTTP_PROXY=http://127.0.0.1:1055 hail walk
+```
+
+On Play Store Termux, this repo's `npm run typecheck` can fail before checking
+code because TypeScript 7 resolves a native package named
+`@typescript/typescript-android-arm64`, which is not published. Use TypeScript 5
+for phone-local typechecks until the native preview has an Android arm64 build:
+
+```sh
+npx -y -p typescript@5.9.3 tsc --noEmit
 ```
 
 ## When it does not work
