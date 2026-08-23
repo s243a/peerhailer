@@ -132,9 +132,13 @@ repeating the socket flag:
 
 ```sh
 tailscale-cli status --self
-tailscale-cli serve --bg --http=7645 --yes 127.0.0.1:7645
-tailscale-cli serve status
 ```
+
+Note `TS_SOCKET` does **not** work on every build — it is silently ignored and
+the CLI falls back to the default socket, which fails with the same
+`tailscaled.sock: no such file` error and looks like the daemon being down.
+`--socket=` or the `tailscale-cli` wrapper is the reliable way to point at the
+userspace daemon.
 
 Userspace networking creates no `tailscale0` interface, so
 `--hail-on tailscale0` has nothing to bind inside Termux. Keep peerhailer on
@@ -142,29 +146,42 @@ loopback and publish the loopback port with Tailscale Serve:
 
 ```sh
 node bin/hail.js daemon --port 7645 --ui
-tailscale-cli serve --bg --http=7645 --yes 127.0.0.1:7645
+tailscale-cli serve reset
+tailscale-cli serve --bg 7645
 tailscale-cli serve status
 ```
+
+Use `serve --bg 7645` — the port alone, which publishes loopback `7645` over
+**HTTPS on 443**. The `--http=7645` form sets up a split config that terminates
+plaintext on `7645` and left the backend unreached (a 502 from another machine);
+resetting first clears it.
 
 The local phone can verify only the Serve configuration. A healthy status shows
 the Termux node forwarding to loopback:
 
 ```text
-http://termux-tailscale-s24.<tailnet>.ts.net:7645 (tailnet only)
+https://termux-tailscale-s24.<tailnet>.ts.net (tailnet only)
 |-- / proxy http://127.0.0.1:7645
 ```
 
-The real inbound check needs a second tailnet machine:
+The real inbound check needs a second tailnet machine. Serve terminates TLS and
+needs the hostname for SNI, so a machine without MagicDNS uses `--resolve`:
 
 ```sh
-curl -i http://termux-tailscale-s24.<tailnet>.ts.net:7645/
+curl -ik --resolve termux-tailscale-s24.<tailnet>.ts.net:443:<node-ip> \
+  https://termux-tailscale-s24.<tailnet>.ts.net/
 ```
 
-A 403 from peerhailer proves the request reached the loopback service; a timeout
-does not. The address other peers store is the Termux node, for example:
+A 403 from peerhailer proves the request reached the loopback service; a 502
+means Serve could not reach the backend; a timeout means inbound is not working.
+**Verified this way:** a desktop hailed an inbound-configured phone and the
+phone's reply signature checked against its key — a phone is a full bidirectional
+peer, not outbound-only, once userspace `tailscaled` and Serve are up.
+
+The address other peers store is the Termux node over HTTPS, for example:
 
 ```sh
-hail add phone http://termux-tailscale-s24.<tailnet>.ts.net:7645 \
+hail add phone https://termux-tailscale-s24.<tailnet>.ts.net \
   --transport tailscale \
   --key "$(cat phone.pub)"
 ```
