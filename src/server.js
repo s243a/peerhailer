@@ -742,6 +742,11 @@ export function createDaemon({
      * @param {{plugins?: any[], profiles?: Record<string, any>, state?: any}} next
      */
     reload: ({ plugins: nextPlugins, profiles: nextProfiles, state } = {}) => {
+      // This function must never gain an `await`. Its safety is that the swap
+      // below is synchronous — single-threaded, so no request handler can see a
+      // half-swapped route table. The caller does the async work (rebuilding
+      // plugins) *before* calling this; an await moved inside here would reopen
+      // exactly that window.
       if (Array.isArray(nextPlugins)) {
         for (const plugin of plugins) plugin.stop?.();
         plugins = nextPlugins;
