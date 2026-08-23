@@ -22,7 +22,7 @@
  */
 import { createServer } from "node:http";
 
-import { sameKey, verifyPayload } from "./identity.js";
+import { normalizeKey, sameKey, verifyPayload } from "./identity.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
@@ -283,13 +283,19 @@ export function createDaemon({
       return debugRefusal(`unknown peer ${claim.name}, and no grant naming a key`, claim.name);
     }
     if (!verifyPayload(claim, body?.signature, presenterKey)) {
-      // A peer we hold a key for, failing to sign as itself, is the same event
-      // `walk` records when something answers at a peer's address with another
-      // key — and it is what the real owner looks like after losing a race to
-      // bind its own name. Recorded so it does not read as ordinary noise.
-      if (known?.publicKey) {
-        change((peers) => peers.noteKeyConflict(claim.name, presenterKey));
-      }
+      // Deliberately not recorded as a key conflict. Two reasons, and both were
+      // learned by writing it the other way first: on this path `presenterKey`
+      // *is* the held key, so the call compared a key with itself and recorded
+      // nothing — and a hail carries `{name, at}`, so the signer's actual key
+      // appears nowhere for us to record even in principle. `walk` can do this
+      // because the signed record carries the competing key; here there is none.
+      //
+      // Worse, `change` writes whether or not a mutation changes anything, so
+      // the no-op call meant a full state-file write for every failed signature
+      // — from anyone who knows an admitted peer's name, which gossip publishes.
+      //
+      // The event is not lost: `debugRefusal` records it in diagnostics, which
+      // is in memory, bounded, and what a debug window is for.
       return debugRefusal(`signature from ${claim.name} did not verify`, claim.name);
     }
     // Compare the grant's own subject against the key we hold. Comparing
@@ -322,7 +328,15 @@ export function createDaemon({
       change((peers) => peers.bindKey(claim.name, presenterKey));
     }
 
-    return { name: claim.name, key: presenterKey, known: directory.get(claim.name) ?? known ?? null };
+    // Normalized here, once, because a PEM carries whitespace that is not part
+    // of the key and a grant-path caller supplies its own. Anything downstream
+    // that buckets by this string — a rate limit, a history — would otherwise
+    // count one key as many, and the caller chooses how many.
+    return {
+      name: claim.name,
+      key: normalizeKey(presenterKey) ?? presenterKey,
+      known: directory.get(claim.name) ?? known ?? null,
+    };
   };
 
   /**
@@ -350,6 +364,8 @@ export function createDaemon({
       // assignment — which inverts what a grant is: a peer nobody admitted,
       // vouched for deliberately.
       return {
+        // `key` arrives normalized from `identify`, so a plugin bucketing on it
+        // counts one key once however the caller spelled it.
         ...(known ?? { name, publicKey: key }),
         viaGrant: viaGrant.issuer,
         grantedCapabilities: [...(viaGrant.capabilities ?? [])],

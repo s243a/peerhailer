@@ -104,3 +104,45 @@ test("who ran what is recorded for a person to read", async () => {
   assert.equal(entry.capability, "command:pair");
   assert.equal(entry.runs, 2, "a credential minted while nobody watched is worth a list afterwards");
 });
+
+test("the same key spelled differently is still the same peer", async () => {
+  const { generateIdentity } = await import("../src/identity.js");
+  const identity = generateIdentity();
+  const plugin = createCommandPlugin({ commands: { pair: "echo token" } });
+  const routes = collectRoutes([plugin], { log: () => {} });
+
+  // A grant-path caller supplies its own key string, and a PEM tolerates
+  // whitespace that is not part of the key. Bucketing on the raw string would
+  // make every variant a fresh allowance — five runs per minute per spelling,
+  // which is no limit at all when the caller picks the spelling.
+  const spellings = [
+    identity.publicKey.trimEnd(),
+    `${identity.publicKey.trimEnd()}\n`,
+    `${identity.publicKey.trimEnd()}\n\n`,
+    `  ${identity.publicKey.trim()}  `,
+  ];
+
+  const outcomes = [];
+  for (let i = 0; i < MAX_RUNS + 3; i += 1) {
+    const publicKey = spellings[i % spellings.length];
+    outcomes.push(await call(routes, "/command/pair/run", { caller: { name: "sol", publicKey } }));
+  }
+
+  assert.ok(
+    outcomes.filter((r) => r[REFUSE]).length >= 3,
+    "one key is one allowance however it is spelled",
+  );
+});
+
+test("a name nobody could route is refused at construction, not silently dropped", () => {
+  // The CLI checks this, and the CLI is one of several writers — a programmatic
+  // host or a hand-edited state file reaches the plugin directly.
+  for (const bad of ["../etc", "has space", "", "-leading"]) {
+    assert.throws(
+      () => createCommandPlugin({ commands: { [bad]: "echo hi" } }),
+      /usable command name/,
+      `${JSON.stringify(bad)} must be refused`,
+    );
+  }
+  assert.doesNotThrow(() => createCommandPlugin({ commands: { "pair-2": "echo hi" } }));
+});
