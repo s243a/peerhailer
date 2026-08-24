@@ -1,8 +1,11 @@
 # TLS, pinned to the peer's key
 
-**Status: designed, not built.** The thing that makes tunnels work off the
-tailnet — and the one place this project uses cryptography it did not already
-have, so the design is deliberately conservative.
+**Status: designed; the Node stdlib spike is done and green.** The thing that
+makes tunnels work off the tailnet — and the one place this project uses
+cryptography it did not already have, so the design is deliberately conservative.
+The one unknown ("does Node's stdlib do what RFC 8410 says") was run before
+writing more; results and the corrections they forced are in
+[Spike results](#spike-results-done).
 
 ## What it is for
 
@@ -123,12 +126,20 @@ someone *between* the machines, not against the machine you are talking to.
 **Not authentication on its own — pinning is.** Plain TLS with
 `rejectUnauthorized: false` and no pin authenticates nothing; it encrypts to
 whoever answered. The pin is the half that makes the encryption meaningful, so
-the pin check is not optional and not skippable. And Node's API makes the skip
-*easy* — `checkServerIdentity` returning `undefined` accepts — so the failure
-shape must be explicit: **the pin callback is total.** Every branch returns a
-verified key or throws; `getPeerCertificate()` returning empty (handshake
-weirdness, post-handshake auth) throws, never falls through. A pin that can
-return `undefined` is a pin that fails open.
+the pin check is not optional and not skippable.
+
+And here the spike changed the design: **`checkServerIdentity` is the wrong
+hook.** Setting `rejectUnauthorized: false` — which we must, to stop Node
+applying the web PKI — skips certificate verification *entirely*, and
+`checkServerIdentity` is never called (confirmed: the callback did not fire). So
+the pin cannot live there. It lives in the **`secureConnect` handler** (client)
+and the **connection handler** (server, under `requestCert: true`): read the
+presented cert with `getPeerCertificate(true)`, take its key
+(`new X509Certificate(peer.raw).publicKey`), compare its SPKI to the key the
+directory holds, and **`socket.destroy()` on any failure** before a single byte
+of application data is read. That handler is total: a mismatch, a missing cert,
+a parse error all destroy the socket; nothing falls through to "accepted". A pin
+that can reach the request handler without matching is a pin that fails open.
 
 **Not a new identity.** The cert key is a *subkey*, vouched for by the existing
 Ed25519 identity. Nothing new is *exchanged* — a peer still holds only the
@@ -136,24 +147,78 @@ identity key, and verifies the subkey's certificate against it, so there is no
 second key to distribute. The subkey is disposable and locally regenerable; the
 identity, which `hail rotate` covers, remains the one thing peers pin to.
 
+## Spike results (done)
+
+The one thing to prove before building — that Node's stdlib does RFC 8410 the way
+the design needs — was run on Node 22. All green, with one correction to the
+design (above):
+
+- **Node serves and reads Ed25519 certs.** A `tls` server with an Ed25519
+  key/cert handshakes fine, and a client reads the peer's Ed25519 public key from
+  `getPeerCertificate(true).raw` via `new X509Certificate(raw).publicKey`.
+- **The cert is generatable in pure Node — no dependency.** A ~40-line DER builder
+  (SEQUENCE/OID/BIT-STRING helpers) assembles the TBSCertificate, signs it with
+  `crypto.sign(null, tbs, ed25519Key)`, and Node parses the result as a valid
+  ed25519 cert. So the "generate once, self-signed" step needs no `openssl`
+  subprocess and no library — peerhailer stays zero-dependency. The DER encoding
+  is serialization, not cryptography, so it does not violate the no-hand-rolled-
+  cipher rule: the one cryptographic operation is Node's `sign`.
+- **mTLS mutual pinning works** (see the resolved Open item).
+- **The `checkServerIdentity` correction** (see *What it is not*): the pin moves to
+  the `secureConnect`/connection handler, because `rejectUnauthorized: false`
+  skips `checkServerIdentity` entirely. A negative test — presenting a *different*
+  cert — was rejected, confirming the pin actually discriminates.
+
+The spike scripts are throwaway; what survives is this design, now accurate.
+
+## When TLS is on, and when it is not
+
+TLS is not a global switch; it is **what makes a listener's arrival count as
+encrypted**, which is exactly the property the shell and tunnels already require
+(`requiresEncryptedArrival`). So the default follows the wire, not a preference:
+
+| Arrival      | Wire encryption          | peerhailer TLS |
+| ------------ | ------------------------ | -------------- |
+| **loopback** | none needed (local)      | off — already trusted |
+| **tailnet**  | WireGuard already encrypts | off — TLS on top is redundant |
+| **LAN / direct** | plaintext            | **on** — the only place it earns its keep |
+
+A pinned-TLS LAN listener *becomes* an encrypted arrival, so the operator no
+longer has to *assert* `--hail-on-encrypted` on a LAN NIC (the footgun the
+enforcement warns against) — the handshake **proves** it. That is the whole point
+of building this: it is what lets a shell or a tunnel run on a household LAN,
+off any tailnet.
+
+**Self-signed is right for the fabric; a CA cert is only for browsers.** The pin
+is peerhailer verifying peerhailer — no browser, no CA, no Chrome rejection,
+nothing published. The one case that needs a real (CA) certificate is a *browser*
+connecting **directly** to a TLS endpoint — the web page over TLS, or a browser
+reaching a `tunnel:devtools` endpoint itself — because a browser wants a trust
+store, not a pin. That is a separate, opt-in concern, not the default, and on a
+LAN it is barely available anyway: a bare LAN IP has no public DNS, so Let's
+Encrypt cannot issue for it and the only options are a locally-trusted cert or a
+non-browser path.
+
+**Let's Encrypt via Tailscale does not expose you.** `tailscale serve` (what a
+phone runs to front `127.0.0.1:7645`) uses a real Let's Encrypt cert for the
+`<node>.<tailnet>.ts.net` name and serves it **tailnet-only** — the internet-
+exposing command is the *different* `tailscale funnel`. So the tailnet already
+has proper, browser-valid TLS for free, which is a second reason peerhailer does
+nothing there. The only cost is that the hostname lands in public Certificate
+Transparency logs — a fingerprinting leak, not an exposure, and the same tracking
+concern noted below.
+
 ## Open
 
 - **Rotation and the cert.** When `hail rotate` replaces a peer's key, the pinned
   cert check must follow the new key — trivial if pinning reads the directory
   live per connection rather than caching, which it should.
-- **Which end presents a cert.** A tunnel is client→server; the server (the peer
-  being reached) presents its identity cert and the client pins it. Whether the
-  *client* also presents one — mutual TLS, so the server pins the caller too — is
-  worth it: the fabric already authenticates the caller via the signed hail, but
-  a mutual pin would bind the TLS session to that same identity rather than
-  trusting a separate authentication step. Lean yes, because it closes the gap
-  between "who opened this socket" and "who the fabric authenticated."
-- **Verifying Node's Ed25519-cert support end to end.** RFC 8410 certs are
-  supported, but the exact API path — generating the self-signed cert from an
-  existing Ed25519 key without a new keypair, reading the peer cert's SPKI in
-  `checkServerIdentity` — needs a spike before the design is called done. This is
-  the one place "conservative" means "prove the stdlib does what the RFC says
-  before relying on it."
+- **Which end presents a cert — resolved: both (mTLS).** The spike confirmed
+  mutual pinning works with `requestCert: true` on the server: the client pins
+  the server's key and the server pins the client's, each by the same
+  `getPeerCertificate` read. So the TLS session is bound to *both* identities the
+  fabric authenticates, closing the gap between "who opened this socket" and "who
+  the hail said it was." Build it mutual.
 - **The cert as a fingerprinting surface.** A stable identity cert presented on
   every TLS connection is a stable identifier, the same tracking concern the
   discovery beacon has. On a network you do not trust, that is the covert-mode
