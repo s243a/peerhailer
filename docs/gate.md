@@ -59,11 +59,25 @@ survive a restart (and a password change).
   constant-time. The plaintext password never touches disk or argv.
 - **Brute force:** failed logins are counted per source address and, past a
   threshold, locked out for a window — and a correct password is refused while
-  the lockout stands.
+  the lockout stands. One caveat behind a **loopback-terminating proxy**
+  (`tailscale serve`): every client then arrives from `127.0.0.1`, so the
+  per-source lockout becomes one global bucket — an attacker's guesses can lock
+  the operator out, and per-source accounting buys nothing. Pass
+  `--trust-forwarded` there and the gate keys the lockout on the proxy's
+  `X-Forwarded-For` (the real client) instead. Only set it behind a proxy that
+  overwrites that header — on a direct connection it is client-supplied and must
+  not be trusted.
 - **Sessions:** a signed token carrying only an expiry (the gate has one
   principal — whoever holds the password — so there is no identity to carry). A
   tampered or expired cookie falls back to the login page and never reaches the
-  app; `GET /__peerhailer_gate__/logout` clears it.
+  app; `GET /__peerhailer_gate__/logout` clears it. Changing the password
+  **revokes every live session** (the cookie-signing secret is rotated), which is
+  the point of changing it — pass `--keep-sessions` to `set-password` only if you
+  deliberately want existing sessions to survive.
+- **CSRF:** the login POST carries no CSRF token, and does not need one — the
+  cookie is `SameSite=Strict`, and a login-CSRF has no payoff on a one-principal
+  gate whose session carries no identity. Stated so nobody "fixes" it into a
+  regression later.
 - **One principal.** This is a shared-password gate, not per-user accounts. It
   raises the bar in front of an app that has none of its own; it is not an
   identity system. If you need per-person access with revocation, that is the
@@ -90,9 +104,13 @@ handles certs generally.
 ## What this is not
 
 - **Not per-user auth.** One password, one principal. See above.
-- **Not a relay.** It proxies to a *local* target only — the operator's declared
-  URL, never one a caller supplies. It does not reach a machine you could not
-  otherwise reach; that boundary is [network-trust.md](network-trust.md)'s.
+- **Not a relay.** It proxies to the **operator's declared target**, never one a
+  caller supplies — a browser cannot name a destination. A local port is the
+  intended use, and a non-local target is allowed but logs a note on startup
+  (fronting an internal service on another host is an operator's call, the same
+  "operator declares" trust the tunnel rests on). A *caller* still cannot reach a
+  machine they could not otherwise reach; that boundary is
+  [network-trust.md](network-trust.md)'s.
 - **Not a substitute for the app's own auth** where the app has real accounts —
   it is a bar in front of an app that does not, or a second bar in front of one
   that does.

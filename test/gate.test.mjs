@@ -60,13 +60,14 @@ function backend() {
 }
 
 /** A gate (TLS not required, so the test can use plain http) in front of a backend. */
-async function bootGate({ password = "s3cret", rate, now } = {}) {
+async function bootGate({ password = "s3cret", rate, now, trustForwarded = false } = {}) {
   const back = await backend();
   const gate = createGate({
     target: `http://127.0.0.1:${back.port}`,
     passwordHash: hashPassword(password),
     secret: newSecret(),
     requireTls: false,
+    trustForwarded,
     ...(rate ? { rate } : {}),
     ...(now ? { now } : {}),
   });
@@ -104,10 +105,10 @@ function cookieFrom(res) {
   return set.split(";")[0]; // "phgate=<token>"
 }
 
-const login = (port, password, next = "/") =>
+const login = (port, password, next = "/", headers = {}) =>
   http(port, `${GATE_PREFIX}/login`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
     body: `password=${encodeURIComponent(password)}&next=${encodeURIComponent(next)}`,
   });
 
@@ -158,6 +159,24 @@ test("with the session cookie, requests reach the backend; a tampered cookie doe
   }
 });
 
+test("the post-login redirect can only be a local path — no open redirect", async () => {
+  const g = await bootGate();
+  try {
+    // A scheme-relative target via `//` or a backslash (which a browser treats
+    // as `/` in a Location) must not send the signed-in operator off-site.
+    for (const evil of ["//evil.com", "/\\evil.com", "https://evil.com", "/\tx", "/ok\\bad"]) {
+      const res = await login(g.port, "s3cret", evil);
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.location, "/", `redirect to a hostile next (${JSON.stringify(evil)}) is refused → /`);
+    }
+    // A genuine local path is honored.
+    const ok = await login(g.port, "s3cret", "/app/deep/page");
+    assert.equal(ok.headers.location, "/app/deep/page", "a local path is kept");
+  } finally {
+    await g.close();
+  }
+});
+
 test("failed logins are rate-limited into a lockout", async () => {
   let t = 1000;
   const g = await bootGate({ rate: { max: 3, windowMs: 60_000, lockoutMs: 60_000 }, now: () => t });
@@ -168,6 +187,24 @@ test("failed logins are rate-limited into a lockout", async () => {
     assert.match(locked.body, /Too many attempts/);
     // Even the *correct* password is refused while locked out.
     assert.equal((await login(g.port, "s3cret")).status, 429, "the lockout does not care that this one is correct");
+  } finally {
+    await g.close();
+  }
+});
+
+test("with trustForwarded, lockout is per X-Forwarded-For client, not per socket", async () => {
+  // Behind a loopback-terminating proxy every socket is 127.0.0.1; trusting the
+  // proxy's X-Forwarded-For keeps one client's failures from locking out another.
+  let t = 1000;
+  const g = await bootGate({ trustForwarded: true, rate: { max: 2, windowMs: 60_000, lockoutMs: 60_000 }, now: () => t });
+  try {
+    const xffA = { "x-forwarded-for": "100.64.0.1" };
+    const xffB = { "x-forwarded-for": "100.64.0.2" };
+    assert.equal((await login(g.port, "wrong", "/", xffA)).status, 401);
+    assert.equal((await login(g.port, "wrong", "/", xffA)).status, 401);
+    assert.equal((await login(g.port, "wrong", "/", xffA)).status, 429, "client A is locked out");
+    // Client B, a different forwarded address, is unaffected — no shared bucket.
+    assert.equal((await login(g.port, "s3cret", "/", xffB)).status, 302, "client B still signs in");
   } finally {
     await g.close();
   }

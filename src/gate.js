@@ -188,9 +188,18 @@ function parseForm(/** @type {string} */ body) {
   return out;
 }
 
-/** A `next` path is only honored if it is a local absolute path — never an open redirect. */
+/**
+ * A `next` path is only honored if it is a *local* absolute path — otherwise `/`.
+ *
+ * Guards an open redirect after login. A leading `/` alone is not enough: a
+ * browser follows `//evil.com` **and** `/\evil.com` (it treats `\` as `/` in a
+ * Location) as scheme-relative navigation off-site, which is exactly the phish
+ * hook a password door must not hand out. So: one leading slash, the next
+ * character neither `/` nor `\`, and no backslashes or control characters
+ * anywhere.
+ */
 function safeNext(/** @type {any} */ next) {
-  return typeof next === "string" && next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  return typeof next === "string" && /^\/(?![/\\])[^\x00-\x1f\\]*$/.test(next) ? next : "/";
 }
 
 /**
@@ -204,6 +213,7 @@ function safeNext(/** @type {any} */ next) {
  *   sessionMs?: number,
  *   cookieName?: string,
  *   requireTls?: boolean,
+ *   trustForwarded?: boolean,
  *   rate?: {max: number, windowMs: number, lockoutMs: number},
  *   now?: () => number,
  *   requestImpl?: typeof httpRequest,
@@ -217,6 +227,7 @@ export function createGate({
   sessionMs = DEFAULT_SESSION_MS,
   cookieName = DEFAULT_COOKIE,
   requireTls = true,
+  trustForwarded = false,
   rate = DEFAULT_RATE,
   now = Date.now,
   requestImpl,
@@ -232,7 +243,22 @@ export function createGate({
   const attempts = new Map();
   const MAX_TRACKED = 4096;
 
-  const sourceOf = (/** @type {any} */ req) => req.socket?.remoteAddress ?? "unknown";
+  // Who a login attempt is from, for rate-limiting. Normally the socket peer —
+  // but behind a loopback-terminating proxy (`tailscale serve`) every client is
+  // 127.0.0.1, which collapses the per-source lockout into one global bucket and
+  // hands an attacker a way to lock the operator out. `trustForwarded` takes the
+  // last hop of `X-Forwarded-For` instead, which such a proxy sets to the real
+  // client — safe **only** because the proxy is trusted to overwrite it; on a
+  // direct connection the header is client-supplied and must not be trusted, so
+  // this is opt-in.
+  const sourceOf = (/** @type {any} */ req) => {
+    if (trustForwarded) {
+      const xff = req.headers?.["x-forwarded-for"];
+      const last = (Array.isArray(xff) ? xff.join(",") : xff)?.split(",").pop()?.trim();
+      if (last) return last;
+    }
+    return req.socket?.remoteAddress ?? "unknown";
+  };
 
   /** @returns {number} ms remaining on a lockout, or 0 */
   const lockedFor = (/** @type {string} */ source) => {
@@ -313,7 +339,7 @@ export function createGate({
 
     // Logout: clear the cookie and show the login page.
     if (url.pathname === `${GATE_PREFIX}/logout`) {
-      res.writeHead(302, { "set-cookie": `${cookieName}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`, location: `${GATE_PREFIX}/login` });
+      res.writeHead(302, { "set-cookie": `${cookieName}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`, "cache-control": "no-store", location: `${GATE_PREFIX}/login` });
       res.end();
       return;
     }
@@ -336,7 +362,7 @@ export function createGate({
       if (passwordHash && verifyPassword(password ?? "", passwordHash)) {
         clearFailures(source);
         const token = mintSession(secret, now() + sessionMs);
-        res.writeHead(302, { "set-cookie": cookieHeader(token, sessionMs), location: safeNext(next) });
+        res.writeHead(302, { "set-cookie": cookieHeader(token, sessionMs), "cache-control": "no-store", location: safeNext(next) });
         res.end();
         log(`[gate] sign-in from ${source}`);
       } else {

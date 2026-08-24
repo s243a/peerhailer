@@ -254,12 +254,12 @@ const describe = (peer) => {
  */
 async function readPassword(prompt) {
   if (typeof flags["password-file"] === "string") {
-    return readFileSync(flags["password-file"], "utf8").replace(/\r?\n$/, "");
+    return readFileSync(flags["password-file"], "utf8").replace(/\r?\n+$/, "");
   }
   if (!process.stdin.isTTY) {
     let data = "";
     for await (const chunk of process.stdin) data += chunk;
-    return data.replace(/\r?\n$/, "");
+    return data.replace(/\r?\n+$/, "");
   }
   process.stderr.write(prompt);
   process.stdin.setRawMode(true);
@@ -945,11 +945,16 @@ switch (command) {
     if (action === "set-password") {
       const pw = await readPassword("New gate password: ");
       if (!pw) fail("no password given");
-      // The secret signs session cookies; keep the existing one so live sessions
-      // survive a password change, mint one on first use.
-      stored.gate = { passwordHash: hashPassword(pw), secret: stored.gate?.secret ?? newSecret() };
+      // Rotate the cookie-signing secret by default, which invalidates every live
+      // session: a password change usually means the old one may be compromised,
+      // and a stateless token minted under the old secret would otherwise keep
+      // working until it expired. `--keep-sessions` makes survival the opt-in.
+      const keepSessions = flags["keep-sessions"] === true;
+      const secret = keepSessions && stored.gate?.secret ? stored.gate.secret : newSecret();
+      stored.gate = { passwordHash: hashPassword(pw), secret };
       persist();
       log("gate password set (stored hashed, never in the clear).");
+      log(keepSessions ? "existing sessions kept (--keep-sessions)." : "all existing sessions were revoked.");
       log("serve it with:  hail gate serve --target http://127.0.0.1:<app-port> --port <n>");
       break;
     }
@@ -957,16 +962,30 @@ switch (command) {
     if (action === "serve") {
       const target = typeof flags.target === "string" ? flags.target : null;
       if (!target) fail("usage: hail gate serve --target http://127.0.0.1:<app-port> [--port N] [--host H] [--tls-cert C --tls-key K]");
+      let targetUrl;
       try {
         // Validate early with a clear message rather than an opaque throw later.
-        // eslint-disable-next-line no-new
-        new URL(target);
+        targetUrl = new URL(target);
       } catch {
         fail(`--target is not a URL: ${target}`);
       }
       if (!stored.gate?.passwordHash) fail("no gate password set — run: hail gate set-password");
 
-      const gate = createGate({ target, passwordHash: stored.gate.passwordHash, secret: stored.gate.secret, log });
+      // The intended target is a local app. A non-local one is allowed (an
+      // operator may front an internal service on another host — the tunnel's
+      // "operator declares" trust), but say so out loud: an authenticated proxy
+      // to a remote host is a bigger thing than a bastion for a local port.
+      const targetHost = targetUrl.hostname;
+      const localTarget = /^(127\.|::1$|\[::1\]$|localhost$|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(targetHost);
+      if (!localTarget) log(`[gate] note: --target ${targetHost} is not local — this gates an authenticated proxy to a remote host`);
+
+      const gate = createGate({
+        target,
+        passwordHash: stored.gate.passwordHash,
+        secret: stored.gate.secret,
+        trustForwarded: flags["trust-forwarded"] === true,
+        log,
+      });
 
       // Provided (Let's Encrypt) cert for a clean browser load, else the
       // identity's self-signed one — which works but warns, since a browser
