@@ -16,6 +16,7 @@
  *   hail daemon [--port N]         answer hails from other machines
  */
 import { readFileSync } from "node:fs";
+import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
@@ -34,6 +35,8 @@ import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/s
 import { collectProfiles, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
+import { createGate, hashPassword, newSecret } from "../src/gate.js";
+import { selfSignedCert } from "../src/cert.js";
 import { createDaemon } from "../src/server.js";
 import { defaultStatePath, loadState, updateState } from "../src/state.js";
 
@@ -239,6 +242,51 @@ const describe = (peer) => {
     `    !   hail rotate ${peer.name} --key-file <new.pub>`,
   ].join("\n");
 };
+
+/**
+ * Read a password without it landing in argv or shell history. In order of
+ * preference: a `--password-file`, then piped stdin, then a hidden interactive
+ * prompt. Never a command-line flag — an argument is visible in `ps` and saved
+ * by the shell.
+ *
+ * @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function readPassword(prompt) {
+  if (typeof flags["password-file"] === "string") {
+    return readFileSync(flags["password-file"], "utf8").replace(/\r?\n$/, "");
+  }
+  if (!process.stdin.isTTY) {
+    let data = "";
+    for await (const chunk of process.stdin) data += chunk;
+    return data.replace(/\r?\n$/, "");
+  }
+  process.stderr.write(prompt);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  let pw = "";
+  for await (const chunk of process.stdin) {
+    for (const ch of chunk.toString()) {
+      const code = ch.charCodeAt(0);
+      if (code === 10 || code === 13 || code === 4) {
+        // Enter (\n / \r) or Ctrl-D: done.
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+        process.stderr.write("\n");
+        return pw;
+      }
+      if (code === 3) {
+        // Ctrl-C: abort.
+        process.stdin.setRawMode(false);
+        process.stderr.write("\n");
+        process.exit(1);
+      }
+      if (code === 127 || code === 8) pw = pw.slice(0, -1); // backspace / delete
+      else pw += ch;
+    }
+  }
+  return pw;
+}
 
 switch (command) {
   case "status": {
@@ -887,6 +935,74 @@ switch (command) {
     break;
   }
 
+  case "gate": {
+    // A password door in front of a local web app — a bastion for serving
+    // something like T3 to a browser without exposing it directly. Not a plugin
+    // (a browser holds no key to authenticate as a peer); its own door, in
+    // src/gate.js. See docs/gate.md.
+    const [action] = rest;
+
+    if (action === "set-password") {
+      const pw = await readPassword("New gate password: ");
+      if (!pw) fail("no password given");
+      // The secret signs session cookies; keep the existing one so live sessions
+      // survive a password change, mint one on first use.
+      stored.gate = { passwordHash: hashPassword(pw), secret: stored.gate?.secret ?? newSecret() };
+      persist();
+      log("gate password set (stored hashed, never in the clear).");
+      log("serve it with:  hail gate serve --target http://127.0.0.1:<app-port> --port <n>");
+      break;
+    }
+
+    if (action === "serve") {
+      const target = typeof flags.target === "string" ? flags.target : null;
+      if (!target) fail("usage: hail gate serve --target http://127.0.0.1:<app-port> [--port N] [--host H] [--tls-cert C --tls-key K]");
+      try {
+        // Validate early with a clear message rather than an opaque throw later.
+        // eslint-disable-next-line no-new
+        new URL(target);
+      } catch {
+        fail(`--target is not a URL: ${target}`);
+      }
+      if (!stored.gate?.passwordHash) fail("no gate password set — run: hail gate set-password");
+
+      const gate = createGate({ target, passwordHash: stored.gate.passwordHash, secret: stored.gate.secret, log });
+
+      // Provided (Let's Encrypt) cert for a clean browser load, else the
+      // identity's self-signed one — which works but warns, since a browser
+      // cannot pin the way a peer does.
+      const providedCert = typeof flags["tls-cert"] === "string" ? readFileSync(flags["tls-cert"], "utf8") : undefined;
+      const providedKey = typeof flags["tls-key"] === "string" ? readFileSync(flags["tls-key"], "utf8") : undefined;
+      const tlsOptions = providedCert && providedKey ? { cert: providedCert, key: providedKey } : selfSignedCert(identity);
+
+      const server = createHttpsServer(tlsOptions, gate.onRequest);
+      server.on("upgrade", gate.onUpgrade);
+      const host = typeof flags.host === "string" ? flags.host : "127.0.0.1";
+      const gatePort = typeof flags.port === "string" && /^\d+$/.test(flags.port) ? Number(flags.port) : 8443;
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(gatePort, host, () => resolve(undefined));
+      });
+      const bound = /** @type {import("node:net").AddressInfo} */ (server.address());
+      log(`[gate] ${target} is now behind a password at https://${host}:${bound.port}`);
+      if (!providedCert) {
+        log("[gate] using a self-signed cert — a browser will warn. For a clean load pass --tls-cert/--tls-key");
+        log("[gate] (e.g. a Let's Encrypt cert fronted by `tailscale serve`).");
+      }
+      const stop = () => server.close(() => process.exit(0));
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      break;
+    }
+
+    log(
+      stored.gate?.passwordHash
+        ? "gate password is set. Serve it with: hail gate serve --target http://127.0.0.1:<app-port> --port <n>"
+        : "no gate password set. Run: hail gate set-password",
+    );
+    break;
+  }
+
   case "profiles": {
     const [action, target] = rest;
     if (action === "add") {
@@ -963,6 +1079,8 @@ switch (command) {
         "  hail commands [add|remove]   commands a peer may run, by name",
         "  hail services [add|remove]   long-running processes a peer may start",
         "  hail shells [add|remove]     an interactive shell a peer may open (remote shell access)",
+        "  hail gate set-password       gate a local web app behind a password, for a browser",
+        "  hail gate serve --target U   serve that app over TLS at --port N (a bastion for e.g. T3)",
         "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",

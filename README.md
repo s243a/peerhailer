@@ -303,6 +303,24 @@ and none of `tunnel:`, `command:`, `service:`, `shell:` is in a built-in profile
 each is granted deliberately. Full catalog, the security posture of each, and
 per-plugin detail: **[docs/plugins.md](docs/plugins.md)**.
 
+## A password gate for a web app
+
+Those capabilities are for *peers* — machines holding a key. For a **browser**,
+which holds no key, there is a separate door: `hail gate` puts a local web app
+(T3, a dashboard, anything with a port) behind a **password over TLS**, then
+reverse-proxies it — WebSockets included — so a person reaches it only after
+signing in, without the app itself being exposed.
+
+```bash
+hail gate set-password                                   # scrypt-hashed, never in argv
+hail gate serve --target http://127.0.0.1:3000 --port 8443
+```
+
+It is deliberately *not* a plugin: a browser cannot sign a hail, so the gate is
+its own door with its own auth (password + a signed session cookie), kept out of
+the peer-authenticated core. Hardening, the cert story, and why reverse-proxy
+rather than an iframe: **[docs/gate.md](docs/gate.md)**.
+
 ## What it does not do
 
 Not a router — peers do not currently relay for one another, though whether they
