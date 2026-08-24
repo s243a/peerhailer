@@ -25,7 +25,7 @@ import { createServer as createHttpsServer } from "node:https";
 
 import { normalizeKey, sameKey, verifyPayload } from "./identity.js";
 import { selfSignedCert, certVouchedBy } from "./cert.js";
-import { signRecord } from "./peerRecord.js";
+import { signRecord, TARGET_BINDING_VERSION } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
 import { isBlocked } from "./trust.js";
@@ -358,6 +358,7 @@ export function createDaemon({
     //    for. The residual the migration shrinks to zero.
     const to = claim.to;
     const carriesGrant = Boolean(body?.grant);
+    let callerBoundToUs = false;
     if (typeof to === "string" && to.length > 0) {
       // Fail closed if we cannot check it: a present `to` we cannot compare
       // (no identity of our own) is refused, not waved through. Such a daemon
@@ -366,6 +367,7 @@ export function createDaemon({
       if (!selfFingerprint || to !== selfFingerprint) {
         return debugRefusal(`hail from ${claim.name} was addressed to another peer`, claim.name);
       }
+      callerBoundToUs = true;
     } else if (carriesGrant) {
       return debugRefusal(`grant-bearing hail from ${claim.name} named no target`, claim.name);
     } else if (known?.bindingSeen) {
@@ -388,6 +390,19 @@ export function createDaemon({
       // reintroduced exactly the disk divergence that made a daemon overwrite a
       // second terminal's work.
       change((peers) => peers.bindKey(claim.name, presenterKey));
+    }
+
+    // Learn "this caller binds targets" from the hail itself. A correct `to` is
+    // signed proof the caller's client computes our fingerprint and signs it —
+    // the same fact a `walk` would read from its record's version, but observed
+    // here in real time and without dialing anyone, so it needs no MagicDNS and
+    // no reload. That closes the gap where the running daemon only learned
+    // support from a CLI walk: from the first correctly-bound hail on, a later
+    // `to`-less hail from this caller is refused as a downgrade. Through
+    // `change` so it persists and is immediate; guarded so only that first hail
+    // writes, never one per request.
+    if (callerBoundToUs && known && (known.bindingSeen ?? 0) < TARGET_BINDING_VERSION) {
+      change((peers) => peers.noteBinding(claim.name, TARGET_BINDING_VERSION));
     }
 
     // Normalized here, once, because a PEM carries whitespace that is not part

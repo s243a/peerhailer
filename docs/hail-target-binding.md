@@ -15,28 +15,41 @@ record read once"). What landed:
   there is nothing to migrate.
 - **The signed, sticky support signal.** A peer advertises `v` in its signed
   self-record (`TARGET_BINDING_VERSION`); a verifier records it monotone by
-  `max` (`directory.noteBinding`, kept through `keepOurs`, set on a verified
-  `walk` reply), and refuses a `to`-less hail from any caller it knows binds —
-  the downgrade guard.
-- **The flag day.** `createDaemon({requireTargetBinding: true})` refuses every
-  `to`-less hail — the fully-closed state, for a fleet that has finished moving.
+  `max` (`directory.noteBinding`, kept through `keepOurs`), and refuses a
+  `to`-less hail from any caller it knows binds — the downgrade guard. It is fed
+  two ways: **passively**, when `identify` sees a correctly-bound hail (no DNS,
+  real time), and **proactively**, from a `walk` reply's version. See "How the
+  running daemon learns support" below.
+- **The flag day.** `--require-target-binding` (the daemon flag, or
+  `createDaemon({requireTargetBinding: true})`) refuses every `to`-less hail —
+  the fully-closed state, for a fleet that has finished moving.
 
 What was **not** built: the cheaper `callPeer` provenance-plus-shape interim
 (below). Target-binding is the strictly stronger guarantee — it makes the
 credential meaningless off-target rather than merely hard to misdeliver — so the
 interim is left as documented composable defence-in-depth, not a shipped path.
 
-**One operational limit worth stating.** The downgrade guard is fed by `walk`,
-which the CLI runs and persists; the long-running daemon adopts disk state only
-through its change/reload path, not by re-reading behind itself. So after a
-`hail walk` first learns that caller X binds, a running daemon keeps tolerating a
-`to`-less hail from X until it next applies a change or reloads. The guard is the
-*downgrade* backstop, not the primary defence — the always-checked present-`to`
-rule and the day-one grant rule need no such freshness — but a deployment that
-leans on the sticky guard should walk on a schedule (or reload after one) rather
-than assume the daemon learns support on its own. Closing this properly (a timed
-re-adopt, or the daemon walking itself) is a follow-up, noted here so it is not
-mistaken for already-live.
+**How the running daemon learns support.** The downgrade guard needs to know a
+caller binds. It learns this two ways, and the first needs nothing dialed:
+
+- **Passively, from the hail itself (primary; no DNS).** A correct `to` in a
+  received hail is signed proof the caller computes our fingerprint and signs it
+  — the same fact a walk reads from a record's version, observed in real time.
+  So `identify` records it (through `change`, persisted and immediate) the first
+  time a caller sends a correctly-bound hail, and every later `to`-less hail from
+  that caller is then refused as a downgrade. No walk, no reload, no MagicDNS in
+  the path — which is what makes it the fallback for a caller or host without
+  name resolution.
+- **Proactively, from a walk (complement; uses DNS).** `hail walk` dials peers
+  and reads the version from each signed record, so a peer that *supports*
+  binding but has not yet hailed us is learned before it ever does. This is the
+  only path that needs to resolve a peer's `.ts.net` name, so it is the one that
+  wants MagicDNS — and when it cannot resolve a peer, that peer is simply skipped
+  and the passive path still covers it once it hails.
+
+The guard is in any case the *downgrade* backstop, not the primary defence: the
+always-checked present-`to` rule and the day-one grant rule need no support
+signal at all.
 
 The design below is kept as the record of why each choice is what it is.
 

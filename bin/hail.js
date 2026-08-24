@@ -489,6 +489,11 @@ switch (command) {
       profiles,
       diagnostics,
       plugins,
+      // The fully-closed target-binding state: refuse every hail that does not
+      // name its target. Off by default (a mixed fleet still interoperates);
+      // turn it on once every peer that hails this machine sends `to`. See
+      // docs/hail-target-binding.md.
+      requireTargetBinding: flags["require-target-binding"] === true,
       onReload: async () => daemon.reload(await rebuild()),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
@@ -947,6 +952,7 @@ switch (command) {
         "    ... --hail-on-encrypted tailscale0  hails on an interface whose arrival is encrypted (serves shells)",
         "    ... --hail-on-tls eth0        hails over pinned TLS on a LAN interface (serves shells, no assertion)",
         "    ... --tls-cert C --tls-key K  serve a provided (Let's Encrypt) cert on --hail-on-tls, for browsers/CA clients",
+        "    ... --require-target-binding  refuse any hail that does not name its target (fully-closed; once every peer sends `to`)",
         "    ... --chat                 accept short messages from peers holding `chat`",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",

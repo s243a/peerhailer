@@ -155,6 +155,27 @@ test("once a caller is known to bind, a to-less hail from it is refused (downgra
   }
 });
 
+test("the daemon learns a caller binds from a correct-`to` hail — no walk, no DNS", async () => {
+  // Closes the gap where a running daemon only learned support from a CLI walk.
+  // A correct `to` in a received hail is signed proof the caller binds, so the
+  // daemon records it in real time — and a later to-less hail is then a refused
+  // downgrade, with nothing dialed. (Kimi review, finding 3.)
+  const caller = generateIdentity();
+  const { me, directory, url, daemon } = await daemonThatKnows(caller.publicKey);
+  try {
+    assert.ok(!directory.get("caller").bindingSeen, "not known to bind at first");
+
+    assert.equal(await post(url, hail(caller, "caller", fingerprint(me.publicKey))), 200, "a correctly-bound hail is answered");
+    assert.equal(directory.get("caller").bindingSeen, TARGET_BINDING_VERSION, "and taught the daemon this caller binds, passively");
+
+    // From here a to-less hail from that caller is a downgrade — refused, with no
+    // walk, no reload, no MagicDNS in the path.
+    assert.notEqual(await post(url, hail(caller, "caller", null)), 200, "a later to-less hail from it is refused");
+  } finally {
+    await daemon.close();
+  }
+});
+
 test("require-target-binding refuses every to-less hail — the fully-closed state", async () => {
   const caller = generateIdentity();
   const { me, url, daemon } = await daemonThatKnows(caller.publicKey, { requireTargetBinding: true });
