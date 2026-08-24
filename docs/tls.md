@@ -1,15 +1,25 @@
 # TLS, pinned to the peer's key
 
-**Status: a first version is built.** `src/cert.js` (the pure-Node cert + the
-pin), `src/pinnedFetch.js` (the client side), and `--hail-on-tls <iface>` on the
-daemon, which serves pinned TLS on a LAN interface — the handshake makes the
-arrival encrypted, so a shell or tunnel runs there off any tailnet, and the
-caller pins the server's key before its signed hail leaves. What is *not* yet
-built: the certified **subkey** (this version reuses the identity key as the cert
-key — see the module note in `src/cert.js`), and **mutual** pinning (the server
-requests the client cert but does not yet pin it; the hail signature still
-authenticates the caller). The spike that de-risked all of this is below; the
-design remains the target the subkey and mTLS steps complete.
+**Status: built.** `src/cert.js` (the pure-Node cert + the pin), `src/pinnedFetch.js`
+(the client side), and `--hail-on-tls <iface>` on the daemon, which serves pinned
+TLS on a LAN interface — the handshake makes the arrival encrypted, so a shell or
+tunnel runs there off any tailnet. All three layers of the design are in place:
+
+- **Certified subkey.** A fresh Ed25519 key does the TLS; the identity signs a
+  *vouch* for it (`{k: cert-key, u: until}`) carried in the cert's SAN URI, and
+  the client verifies that vouch against the identity key it holds. The identity
+  key never enters the TLS stack.
+- **Mutual pinning (mTLS).** The client pins the server's key before its signed
+  hail leaves; the server, on a TLS arrival, requires the caller's own client
+  cert to be vouched by the caller's identity — so a replayed hail over an
+  attacker's socket, lacking that cert, is refused even though its signature is
+  valid.
+- **An optional provided cert.** `--tls-cert`/`--tls-key` serve a real (Let's
+  Encrypt) cert for clients that validate against a CA — a browser — on which
+  mutual pinning is off, since a browser cannot present a peerhailer client cert.
+  Peers use the self-signed listener; this one is the browser case.
+
+The spike that de-risked all of this is below.
 
 ## What it is for
 

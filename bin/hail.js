@@ -359,7 +359,7 @@ switch (command) {
 
   case "walk": {
     const result = await walk(directory, {
-      as: { name: directory.self.name, privateKey: identity.privateKey },
+      as: { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey },
     });
     persist();
     for (const peer of result.reached) log(`reached ${peer.name} via ${peer.via.value}`);
@@ -561,7 +561,18 @@ switch (command) {
     const hailPort = Number.isFinite(port) ? port : 8787;
     if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });
     if (encryptedHosts.length) await daemon.listenHail({ port: hailPort, hosts: encryptedHosts, encrypted: true });
-    if (tlsHosts.length) await daemon.listenHail({ port: hailPort, hosts: tlsHosts, tls: true });
+    // A provided (real / Let's Encrypt) cert overrides the self-signed one on the
+    // TLS listeners — for clients that validate against a CA, e.g. a browser.
+    const providedCert = typeof flags["tls-cert"] === "string" ? readFileSync(flags["tls-cert"], "utf8") : undefined;
+    const providedKey = typeof flags["tls-key"] === "string" ? readFileSync(flags["tls-key"], "utf8") : undefined;
+    if (tlsHosts.length) {
+      await daemon.listenHail({
+        port: hailPort,
+        hosts: tlsHosts,
+        tls: true,
+        ...(providedCert && providedKey ? { cert: providedCert, key: providedKey } : {}),
+      });
+    }
     if (!wantsUi && hosts.length === 0) {
       log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");
     }
@@ -608,7 +619,7 @@ switch (command) {
     }
     const record = directory.get(peerName);
     if (!record) fail(`unknown peer ${peerName} — see hail peers`);
-    const as = { name: directory.self.name, privateKey: identity.privateKey };
+    const as = { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey };
     const call = (path, body) => callPeer(record, path, body, { as });
     const need = (result) => {
       if (!result.ok) fail(result.error);
@@ -935,6 +946,7 @@ switch (command) {
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
         "    ... --hail-on-encrypted tailscale0  hails on an interface whose arrival is encrypted (serves shells)",
         "    ... --hail-on-tls eth0        hails over pinned TLS on a LAN interface (serves shells, no assertion)",
+        "    ... --tls-cert C --tls-key K  serve a provided (Let's Encrypt) cert on --hail-on-tls, for browsers/CA clients",
         "    ... --chat                 accept short messages from peers holding `chat`",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",

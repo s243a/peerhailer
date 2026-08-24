@@ -16,15 +16,15 @@
  */
 import { request as httpsRequest } from "node:https";
 
-import { certMatchesKey } from "./cert.js";
+import { certVouchedBy } from "./cert.js";
 
 /**
  * @param {string} url  an `https://` URL
- * @param {{ method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal }} init
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string, signal?: AbortSignal, clientCert?: { cert: string, key: string } }} init
  * @param {string | undefined} expectedKeyPem  the peer's identity key, from the directory
  * @returns {Promise<{ ok: boolean, status: number, json: () => Promise<any>, text: () => Promise<string> }>}
  */
-export function pinnedFetch(url, { method = "POST", headers = {}, body, signal } = {}, expectedKeyPem) {
+export function pinnedFetch(url, { method = "POST", headers = {}, body, signal, clientCert } = {}, expectedKeyPem) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const isIp = /^[\d.]+$/.test(u.hostname) || u.hostname.includes(":");
@@ -45,6 +45,9 @@ export function pinnedFetch(url, { method = "POST", headers = {}, body, signal }
         // No CA — we pin the key ourselves, below. Node would otherwise reject a
         // self-signed cert before we ever see it.
         rejectUnauthorized: false,
+        // Present our own cert too, so a TLS server can pin us back (mTLS): a
+        // replayed hail over an attacker's TLS session lacks this, and is refused.
+        ...(clientCert ? { key: clientCert.key, cert: clientCert.cert } : {}),
       },
       (res) => {
         /** @type {Buffer[]} */
@@ -67,7 +70,7 @@ export function pinnedFetch(url, { method = "POST", headers = {}, body, signal }
       socket.on("secureConnect", () => {
         // The pin, total: a matching key sends the request; anything else — wrong
         // key, no cert, a parse error — destroys the socket before a byte leaves.
-        if (certMatchesKey(/** @type {any} */ (socket).getPeerCertificate(true), expectedKeyPem)) {
+        if (certVouchedBy(/** @type {any} */ (socket).getPeerCertificate(true), expectedKeyPem)) {
           if (body) req.write(body);
           req.end();
         } else {

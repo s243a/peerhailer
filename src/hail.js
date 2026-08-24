@@ -19,6 +19,7 @@ import { signPayload } from "./identity.js";
 import { makePeerRecord, orderForDialing, verifyRecord } from "./peerRecord.js";
 import { INTRODUCE } from "./profiles.js";
 import { pinnedFetch } from "./pinnedFetch.js";
+import { clientCertFor } from "./cert.js";
 
 /**
  * What a hail says about itself.
@@ -45,7 +46,7 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * route that worked last time is the one most likely to work now.
  *
  * @param {any} record
- * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string}}} [options]
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string, publicKey?: string}}} [options]
  * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
  */
 export async function hailPeer(record, options = {}) {
@@ -74,7 +75,7 @@ export async function hailPeer(record, options = {}) {
  * @param {any} record
  * @param {string} path
  * @param {Record<string, any>} [body]
- * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string}}} [options]
+ * @param {{fetchImpl?: typeof fetch, timeoutMs?: number, as?: {name: string, privateKey: string, publicKey?: string}}} [options]
  * @returns {Promise<{ok: true, address: import("./peerRecord.js").PeerAddress, response: any} | {ok: false, error: string}>}
  */
 export async function callPeer(record, path, body = {}, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, as } = {}) {
@@ -106,7 +107,12 @@ export async function callPeer(record, path, body = {}, { fetchImpl = fetch, tim
           failures.push(`${address.value}: no key held to pin this TLS peer`);
           continue;
         }
-        response = await pinnedFetch(url, init, peer.publicKey);
+        // Present our own cert (mTLS) when we have the identity to build it, so a
+        // TLS server can pin us back — the hail's signer is then also the entity
+        // that holds this socket.
+        const clientCert =
+          as?.publicKey && as?.privateKey ? clientCertFor({ publicKey: as.publicKey, privateKey: as.privateKey }) : null;
+        response = await pinnedFetch(url, clientCert ? { ...init, clientCert } : init, peer.publicKey);
       } else {
         response = await fetchImpl(url, init);
       }

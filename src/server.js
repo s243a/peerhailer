@@ -24,7 +24,7 @@ import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 
 import { normalizeKey, sameKey, verifyPayload } from "./identity.js";
-import { selfSignedCert } from "./cert.js";
+import { selfSignedCert, certVouchedBy } from "./cert.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
@@ -498,10 +498,10 @@ export function createDaemon({
    * not listening on the external interface, so there is nothing to reach.
    *
    * @param {"control" | "hail"} scope
-   * @param {{ encryptedArrival?: boolean | (() => boolean) }} [options]
+   * @param {{ encryptedArrival?: boolean | (() => boolean), requireClientCert?: boolean }} [options]
    * @returns {import("node:http").RequestListener}
    */
-  const handlerFor = (scope, { encryptedArrival = false } = {}) => async (request, response) => {
+  const handlerFor = (scope, { encryptedArrival = false, requireClientCert = false } = {}) => async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
@@ -528,6 +528,16 @@ export function createDaemon({
         const proven = identify(body);
         const caller = authenticate(proven, body, pluginRoute.capability);
         if (!caller) return turnAway(response, refusalStyle(proven));
+
+        // On a TLS arrival, the caller must also present a client cert its own
+        // identity vouches for — mutual pinning. This binds the TLS session to
+        // the hail's signer: a valid but replayed hail arriving over an
+        // attacker's socket lacks that cert, and is refused here even though its
+        // signature verifies. `.encrypted` is only true on the TLS listeners, so
+        // a plaintext or loopback arrival skips this.
+        if (requireClientCert && !certVouchedBy(/** @type {any} */ (request.socket).getPeerCertificate(true), caller.publicKey)) {
+          return turnAway(response, refusalStyle(proven));
+        }
 
         const result = await pluginRoute.handler({ body, caller, directory, identity, log });
         if (result && result[REFUSE]) {
@@ -817,20 +827,31 @@ export function createDaemon({
      * not exist. Default false, so the fail-closed direction is the one an
      * operator gets without saying anything.
      *
-     * @param {{port?: number, hosts: string[], encrypted?: boolean, tls?: boolean}} options
+     * @param {{port?: number, hosts: string[], encrypted?: boolean, tls?: boolean, cert?: string, key?: string}} options
      */
-    listenHail: async ({ port = 8787, hosts, encrypted = false, tls = false }) => {
+    listenHail: async ({ port = 8787, hosts, encrypted = false, tls = false, cert, key }) => {
       /** @type {{host: string, port: number}[]} */
       const bound = [];
       // A pinned-TLS listener *is* an encrypted arrival — the handshake proves it,
-      // so the operator no longer asserts `encrypted` for it. The cert is this
-      // machine's identity key, self-signed; a caller pins it against the key it
-      // holds. `requestCert` invites the client's cert too, for a later mutual
-      // pin; not required now, since the hail signature authenticates the caller.
-      const tlsOptions = tls ? { ...selfSignedCert(identity), requestCert: true, rejectUnauthorized: false } : null;
+      // so the operator no longer asserts `encrypted`. Two shapes:
+      //   - self-signed (default): the cert is a subkey the identity vouches for;
+      //     the caller pins it, and `requestCert` + `requireClientCert` pin the
+      //     caller back (mutual TLS).
+      //   - provided cert (a real/Let's Encrypt one, via `cert`/`key`): for
+      //     clients that validate against a CA — a browser — which cannot present
+      //     a peerhailer client cert, so mutual pinning is off here. Peers use the
+      //     self-signed listener; this one is for the browser case.
+      let tlsOptions = null;
+      let requireClientCert = false;
+      if (tls && cert && key) {
+        tlsOptions = { cert, key };
+      } else if (tls) {
+        tlsOptions = { ...selfSignedCert(identity), requestCert: true, rejectUnauthorized: false };
+        requireClientCert = true;
+      }
       for (const host of hosts) {
         const server = tlsOptions
-          ? createHttpsServer(tlsOptions, handlerFor("hail", { encryptedArrival: true }))
+          ? createHttpsServer(tlsOptions, handlerFor("hail", { encryptedArrival: true, requireClientCert }))
           : createServer(handlerFor("hail", { encryptedArrival: encrypted }));
         try {
           await new Promise((resolve, reject) => {
@@ -840,7 +861,7 @@ export function createDaemon({
           const address = /** @type {import("node:net").AddressInfo} */ (server.address());
           hailServers.push(server);
           bound.push({ host, port: address.port });
-          log(`[daemon] hails on ${tlsOptions ? "https" : "http"}://${host}:${address.port}${tlsOptions ? " (pinned TLS)" : ""}`);
+          log(`[daemon] hails on ${tlsOptions ? "https" : "http"}://${host}:${address.port}${tlsOptions ? (requireClientCert ? " (pinned TLS, mutual)" : " (provided cert)") : ""}`);
         } catch (error) {
           log(`[daemon] not listening on ${host}: ${error instanceof Error ? error.message : error}`);
         }
