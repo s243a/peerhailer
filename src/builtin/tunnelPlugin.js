@@ -151,6 +151,12 @@ export function createTunnelPlugin({
       open.clear();
     },
     description: "Carries bytes to a locally declared endpoint, for peers holding its capability.",
+    // A tunnel is served only where arrival is encrypted, and refused on a
+    // plaintext listener — the bytes it carries are the whole point, and putting
+    // them in cleartext on a LAN is exactly what network-trust.md forbids. Not
+    // "mutual": a tunnel over a bare tailnet address (encrypted, unbound) is the
+    // ordinary case, and requiring a client cert there would refuse it.
+    requiresEncryptedArrival: true,
     capabilities: Object.keys(endpoints).map(capabilityFor),
 
     routes: Object.entries(endpoints).flatMap(([name, address]) => {

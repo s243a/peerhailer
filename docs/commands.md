@@ -72,10 +72,12 @@ deserve the same care.
 
 The first declared command being `t3 pair` sharpens it: **its output is a bearer
 credential.** Holding `command:pair` means *may obtain control of my T3*. That is
-not a capability to put in a general-purpose profile, and it is a good argument
-for requiring an encrypted arrival — a pairing URL read off the wire is a pairing
+not a capability to put in a general-purpose profile, and it is why the command
+plugin **requires an encrypted arrival** — its routes 404 on a plaintext
+listener, exactly as a shell's do. A pairing URL read off the wire is a pairing
 URL redeemed by somebody else, and the five-minute window does not help when the
-attacker is faster than the human.
+attacker is faster than the human. Encrypted, not mutual: a pairing over a bare
+tailnet address is the ordinary case and stays served.
 
 ## Why not just tunnel to T3 instead
 

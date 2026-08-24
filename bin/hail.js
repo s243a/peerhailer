@@ -579,11 +579,20 @@ switch (command) {
     const tlsHosts = resolveHosts(flags["hail-on-tls"]);
     const hosts = [...plainHosts, ...encryptedHosts, ...tlsHosts];
 
-    if (plainHosts.length && Object.keys(declaredShells).length) {
-      log("[daemon] WARNING: shells are declared, but --hail-on interfaces are plaintext —");
-      log("[daemon]          shell routes are NOT served there. Use --hail-on-tls to serve them");
-      log("[daemon]          over pinned TLS, or --hail-on-encrypted for a tailnet. A plaintext");
-      log("[daemon]          shell is never offered.");
+    // Shells, tunnels, and commands are all served only where arrival is
+    // encrypted; on a plaintext interface their routes 404. Warn once if any is
+    // declared alongside a plaintext listener, so the operator is not left
+    // wondering why a capability they declared is not answered.
+    const gatedDeclared = [
+      Object.keys(declaredShells).length && "shells",
+      Object.keys(tunnels).length && "tunnels",
+      Object.keys(declaredCommands).length && "commands",
+    ].filter(Boolean);
+    if (plainHosts.length && gatedDeclared.length) {
+      log(`[daemon] WARNING: ${gatedDeclared.join(", ")} are declared, but --hail-on interfaces are plaintext —`);
+      log("[daemon]          those routes are NOT served there, because they require an encrypted arrival.");
+      log("[daemon]          Use --hail-on-tls to serve them over pinned TLS, or --hail-on-encrypted for a");
+      log("[daemon]          tailnet. A plaintext shell, tunnel, or command is never offered.");
     }
     const hailPort = Number.isFinite(port) ? port : 8787;
     if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });

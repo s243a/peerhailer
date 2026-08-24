@@ -75,7 +75,9 @@ completion, and returns its output — the case Tailscale and a pairing flow lea
 open: "let this peer run *this one thing*." The operator writes the whole line; a
 caller only names it, and nothing a peer sends is interpolated in. A command that
 must vary is two declared commands, because validating a caller's value is the
-mistake this refuses to make. Rate-limited and recorded. See
+mistake this refuses to make. Rate-limited and recorded. Like the tunnel, it is
+served **only where arrival is encrypted** — its first intended use mints a
+bearer credential (`command:pair`), which must not cross a plaintext LAN. See
 [commands.md](commands.md).
 
 ## service — start a declared long-running process
