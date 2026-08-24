@@ -69,6 +69,9 @@ const GN_URI = (s) => tlv(0x86, Buffer.from(s));
 
 const ED25519_ALG = SEQ(OID([0x2b, 0x65, 0x70]));
 const nameCN = (/** @type {string} */ cn) => SEQ(SET(SEQ(OID([0x55, 0x04, 0x03]), UTF8(cn))));
+// Two-digit year (UTCTime). RFC 5280's 2050 rollover means a `notAfter` minted
+// after 2049 would encode wrong — fine for a 10-year cert until ~2040, a
+// GeneralizedTime swap before then.
 const utcTime = (/** @type {Date} */ date) => date.toISOString().replace(/[-:T]/g, "").slice(2, 14) + "Z";
 
 /** The SAN URI scheme carrying the identity's vouch: `<scheme><until>.<base64 sig>`. */
@@ -165,6 +168,10 @@ export function certVouchedBy(presented, identityKeyPem, nowMs = Date.now()) {
  * calls a session makes. The identity vouches for its own client subkey exactly
  * as a server does, so the far side pins it with the same `certVouchedBy`.
  *
+ * Keyed by the *private* key, not the public one, so an in-process identity
+ * rotation gets a fresh client cert rather than presenting the old identity's —
+ * which the server would pin against the new directory key and refuse.
+ *
  * @type {Map<string, { cert: string, key: string }>}
  */
 const clientCerts = new Map();
@@ -174,9 +181,9 @@ const clientCerts = new Map();
  * @returns {{ cert: string, key: string }}
  */
 export function clientCertFor(identity) {
-  const cached = clientCerts.get(identity.publicKey);
+  const cached = clientCerts.get(identity.privateKey);
   if (cached) return cached;
   const built = selfSignedCert(identity, { cn: "peerhailer-client" });
-  clientCerts.set(identity.publicKey, built);
+  clientCerts.set(identity.privateKey, built);
   return built;
 }

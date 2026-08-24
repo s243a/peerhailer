@@ -222,6 +222,30 @@ nothing there. The only cost is that the hostname lands in public Certificate
 Transparency logs — a fingerprinting leak, not an exposure, and the same tracking
 concern noted below.
 
+## Two doors, two replay postures — and the shell insists on the strong one
+
+TLS gives a listener an *encrypted* arrival, but not always a *bound* one, and
+the difference matters for the strongest routes. Three levels:
+
+- **Mutual** — a self-signed TLS listener that pins the client back (mTLS), or a
+  loopback bind where binding is moot because the arrival is local. The caller's
+  identity is bound to the socket, so a captured hail cannot be replayed here: a
+  replay over an attacker's socket lacks the vouched client cert.
+- **Encrypted but unbound** — a provided-cert listener a browser reaches (no
+  client cert), or a tailnet address bound directly (WireGuard encrypts the wire,
+  but nothing binds the peerhailer identity to the socket). A hail captured
+  elsewhere replays here within the freshness window. This is the *pre-TLS* replay
+  posture, retained deliberately for browser reachability.
+- **Plaintext** — refused for any route that requires encryption at all.
+
+Because these now differ, the **shell** — the strongest capability — is marked
+`requiresEncryptedArrival: "mutual"`, not merely `true`: it is served only on a
+mutual or loopback arrival, and **404s on an encrypted-but-unbound door** as if
+the route were absent. A browser can reach the page over a provided cert; it
+cannot reach a remote shell there. Lighter routes (`hail`, the page) still serve
+on the unbound door — the browser case they exist for. The general rule: the
+listener decides the posture, the route decides how much posture it demands.
+
 ## Open
 
 - **Rotation and the cert.** When `hail rotate` replaces a peer's key, the pinned

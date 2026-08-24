@@ -498,10 +498,10 @@ export function createDaemon({
    * not listening on the external interface, so there is nothing to reach.
    *
    * @param {"control" | "hail"} scope
-   * @param {{ encryptedArrival?: boolean | (() => boolean), requireClientCert?: boolean }} [options]
+   * @param {{ encryptedArrival?: boolean | (() => boolean), requireClientCert?: boolean, arrivalMutual?: boolean | (() => boolean) }} [options]
    * @returns {import("node:http").RequestListener}
    */
-  const handlerFor = (scope, { encryptedArrival = false, requireClientCert = false } = {}) => async (request, response) => {
+  const handlerFor = (scope, { encryptedArrival = false, requireClientCert = false, arrivalMutual = false } = {}) => async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
 
     try {
@@ -510,6 +510,7 @@ export function createDaemon({
         // Evaluated per request: the control door's answer depends on the host
         // it was bound to, which is not known when the handler is created.
         const arrivalEncrypted = typeof encryptedArrival === "function" ? encryptedArrival() : encryptedArrival;
+        const arrivalIsMutual = typeof arrivalMutual === "function" ? arrivalMutual() : arrivalMutual;
         // A route that requires an encrypted arrival is simply not served where
         // arrival is not encrypted — it 404s exactly as an undeclared route
         // would, revealing nothing. This is where the shell plugin's
@@ -518,6 +519,13 @@ export function createDaemon({
         // impossible rather than merely discouraged. The listener is the only
         // place that knows whether arrival is encrypted, so the check lives here.
         if (pluginRoute.requiresEncryptedArrival && !arrivalEncrypted) return nothingHere(response);
+        // The strongest routes (the shell) ask for a *mutual* arrival: mutual
+        // TLS, where the caller's identity is bound to the socket, or a
+        // trusted-local (loopback) one where binding is moot. A merely-encrypted
+        // door — a provided-cert listener a browser reaches, or a tailnet address
+        // bound directly — carries the pre-TLS replay posture (a captured hail
+        // replays within the freshness window), so a shell is not served there.
+        if (pluginRoute.requiresEncryptedArrival === "mutual" && !arrivalIsMutual) return nothingHere(response);
 
         const body = JSON.parse((await readBody(request)) || "{}");
         // Authentication and capability happen here, in the core, before the
@@ -529,6 +537,8 @@ export function createDaemon({
         const caller = authenticate(proven, body, pluginRoute.capability);
         if (!caller) return turnAway(response, refusalStyle(proven));
 
+        // Runs after `authenticate`, not before: the check needs `caller.publicKey`
+        // to know whose vouch to require, so it cannot move earlier however tempting.
         // On a TLS arrival, the caller must also present a client cert its own
         // identity vouches for — mutual pinning. This binds the TLS session to
         // the hail's signer: a valid but replayed hail arriving over an
@@ -745,7 +755,7 @@ export function createDaemon({
     const s = String(h).toLowerCase();
     return s === "localhost" || s === "::1" || s === "[::1]" || s.startsWith("127.");
   };
-  const control = createServer(handlerFor("control", { encryptedArrival: () => controlLoopback }));
+  const control = createServer(handlerFor("control", { encryptedArrival: () => controlLoopback, arrivalMutual: () => controlLoopback }));
   /** @type {import("node:http").Server[]} */
   const hailServers = [];
 
@@ -851,8 +861,13 @@ export function createDaemon({
       }
       for (const host of hosts) {
         const server = tlsOptions
-          ? createHttpsServer(tlsOptions, handlerFor("hail", { encryptedArrival: true, requireClientCert }))
-          : createServer(handlerFor("hail", { encryptedArrival: encrypted }));
+          ? createHttpsServer(
+              tlsOptions,
+              // Mutual when we pin the client (self-signed listener), or when the
+              // bind host is loopback (local-trusted, binding moot).
+              handlerFor("hail", { encryptedArrival: true, requireClientCert, arrivalMutual: requireClientCert || isLoopbackHost(host) }),
+            )
+          : createServer(handlerFor("hail", { encryptedArrival: encrypted, arrivalMutual: isLoopbackHost(host) }));
         try {
           await new Promise((resolve, reject) => {
             server.once("error", reject);

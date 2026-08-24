@@ -133,3 +133,33 @@ test("a provided cert is served, and mutual TLS is off for it (CA/browser client
     await daemon.close();
   }
 });
+
+test("the shell is refused on an encrypted-but-unbound listener (provided cert, no mutual TLS)", async () => {
+  const me = generateIdentity();
+  const caller = generateIdentity();
+  const provided = selfSignedCert(generateIdentity(), { cn: "example.com" }); // stands in for a CA cert
+  const directory = createDirectory({ self: { name: "target", publicKey: me.publicKey } });
+  directory.useProfiles({ sysadmin: { name: "sysadmin", allows: ["hail", "shell:sh"] } });
+  directory.admit({ name: "caller", publicKey: caller.publicKey, profile: "sysadmin" });
+  const shell = createShellPlugin({ shells: { sh: "sh" } });
+  const daemon = createDaemon({ directory, identity: me, plugins: [hailPlugin, shell] });
+  // Bind 0.0.0.0 (not loopback) so the listener is neither mutual nor local — the
+  // encrypted-but-unbound case a browser reaches. Connect over 127.0.0.1.
+  const bound = await daemon.listenHail({ port: 0, hosts: ["0.0.0.0"], tls: true, cert: provided.cert, key: provided.key });
+  try {
+    const from = { name: "caller", at: Date.now() };
+    const payload = JSON.stringify({ from, signature: signPayload(from, caller.privateKey) });
+    const status = await new Promise((resolve, reject) => {
+      const req = httpsRequest(
+        { hostname: "127.0.0.1", port: bound[0].port, path: "/shell/sh/open", method: "POST", headers: { "content-type": "application/json" }, rejectUnauthorized: false, agent: false },
+        (r) => { r.resume(); resolve(r.statusCode); },
+      );
+      req.on("error", reject);
+      req.end(payload);
+    });
+    assert.equal(status, 404, "the shell is not served on a merely-encrypted, unbound listener — as if the route is absent");
+  } finally {
+    shell.stop();
+    await daemon.close();
+  }
+});

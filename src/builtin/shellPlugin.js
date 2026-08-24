@@ -37,10 +37,12 @@
  * existing client already knows how to drive. This first cut pipes stdio (no
  * PTY); a real terminal is a stdio swap on-device, the route surface unchanged.
  *
- * **Encrypted arrival is non-negotiable** and, like the tunnel, is the listener's
- * to enforce: these routes must be served only where arrival is encrypted (over
- * Tailscale today, pinned TLS when it lands), never in plaintext. The marker
- * `requiresEncryptedArrival` says so to a host that honours it.
+ * **A mutual arrival is non-negotiable** and is the listener's to enforce: the
+ * shell is served only where the caller's identity is bound to the socket —
+ * mutual TLS, or a trusted-local (loopback) arrival — never on a merely-
+ * encrypted-but-unbound door (a provided-cert listener a browser reaches, or a
+ * tailnet address bound directly), where a captured hail could replay. The
+ * marker `requiresEncryptedArrival: "mutual"` says so to a host that honours it.
  *
  * @module builtin/shellPlugin
  */
@@ -220,7 +222,7 @@ export function createShellPlugin({
     capabilities: Object.keys(shells).map(capabilityFor),
     // A host that honours this serves these routes only where arrival is
     // encrypted. Stated as data so it need not be re-derived from prose.
-    requiresEncryptedArrival: true,
+    requiresEncryptedArrival: "mutual",
 
     /** For a host that discards the plugin without ending the process. */
     stop: () => {

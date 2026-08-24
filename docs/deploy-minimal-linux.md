@@ -48,8 +48,16 @@ tailscaled &
 tailscale up
 tailscale ip -4                 # note the 100.x.y.z
 node bin/hail.js --state /root/peerhailer/state.json \
-  daemon --hail-on-encrypted tailscale0 --port 7645
+  daemon --hail-on-tls tailscale0 --port 7645
 ```
+
+Note `--hail-on-tls`, not `--hail-on-encrypted`, when a **shell** is declared:
+the shell requires a *mutual* (bound) arrival, and `--hail-on-encrypted
+tailscale0` — binding the tainet address directly — is encrypted but not bound,
+so it serves lighter routes but 404s the shell. `--hail-on-tls` adds the mutual
+pin (the caller presents a vouched client cert), which is what a remote shell
+needs. Loopback binds count as bound, so Path B below serves the shell over
+`--hail-on-encrypted 127.0.0.1` with no extra TLS.
 
 **Path B — userspace only (no TUN; the Termux situation).** There is no
 `tailscale0` to bind, so front a loopback port with `serve`, which terminates TLS
@@ -65,7 +73,7 @@ tailscale --socket=/tmp/tsd.sock serve --bg 7645
 
 Pass `--socket=` explicitly rather than trusting `TS_SOCKET`, which has been
 unreliable on userspace builds. The caller then dials the tailnet address:
-`http://100.x.y.z:7645` on Path A, `https://<host>.<tailnet>.ts.net` on Path B.
+`https://100.x.y.z:7645` on Path A (it is `--hail-on-tls`), `https://<host>.<tailnet>.ts.net` on Path B.
 
 ## The one guardrail: assert encryption only where it is real
 
@@ -147,14 +155,14 @@ node bin/hail.js --state /root/peerhailer/state.json shells add debug "bash"
 node bin/hail.js --state /root/peerhailer/state.json profiles add remote-shell --allows hail,shell:debug
 node bin/hail.js --state /root/peerhailer/state.json id > puppy.pub
 node bin/hail.js --state /root/peerhailer/state.json add devbox --key-file devbox.pub --profile remote-shell
-node bin/hail.js --state /root/peerhailer/state.json daemon --hail-on-encrypted tailscale0 --port 7645
-#   ^ Path A; Path B binds 127.0.0.1 and adds `tailscale serve --bg 7645`
+node bin/hail.js --state /root/peerhailer/state.json daemon --hail-on-tls tailscale0 --port 7645
+#   ^ Path A (mutual TLS, for the shell); Path B binds 127.0.0.1 --hail-on-encrypted + `tailscale serve --bg 7645`
 ```
 
 Caller (dev box or phone):
 
 ```sh
-hail add puppy http://100.x.y.z:7645 --key-file puppy.pub
+hail add puppy https://100.x.y.z:7645 --key-file puppy.pub    # https: Path A serves the shell over mutual TLS
 hail shell puppy debug exec "uname -a; head -3 /etc/os-release"
 hail shell puppy debug open              # hold the id across steps, state persists
 hail shell puppy debug send <id> "cd /root && ls"

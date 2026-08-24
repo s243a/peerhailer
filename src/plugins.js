@@ -46,7 +46,7 @@
  *     identity: {publicKey: string, privateKey: string},
  *     log: (message: string) => void,
  *   }) => Promise<any> | any,
- *   requiresEncryptedArrival?: boolean,
+ *   requiresEncryptedArrival?: boolean | "mutual",
  * }} PluginRoute
  */
 
@@ -63,7 +63,7 @@
  *   }>,
  *   init?: (input: {directory: any, identity: any, log: (message: string) => void}) => void,
  *   history?: () => Array<{capability: string, peerKey: string, at: number, outcome: string}>,
- *   requiresEncryptedArrival?: boolean,
+ *   requiresEncryptedArrival?: boolean | "mutual",
  *   stop?: () => void,
  * }} Plugin
  */
@@ -204,7 +204,7 @@ export function collectRoutes(plugins, { log = () => {} } = {}) {
       // The encrypted-arrival requirement is a property of the plugin; carry it
       // onto each of its routes so a listener can refuse to serve a marked one
       // where arrival is not encrypted. Without this the marker is dead data.
-      routes.set(key, { ...route, plugin: plugin.name, requiresEncryptedArrival: Boolean(plugin.requiresEncryptedArrival) });
+      routes.set(key, { ...route, plugin: plugin.name, requiresEncryptedArrival: plugin.requiresEncryptedArrival ?? false });
     }
   }
   return routes;

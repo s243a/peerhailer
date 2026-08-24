@@ -93,7 +93,7 @@ test("a shell nobody declared has no route, and each carries its own capability"
   assert.equal(routes.get("POST /shell/database/open"), undefined);
   assert.equal(routes.get("POST /shell/admin/open").capability, "shell:admin");
   assert.equal(routes.get("POST /shell/sandboxed/open").capability, "shell:sandboxed");
-  assert.equal(plugin.requiresEncryptedArrival, true, "the host is told these need an encrypted arrival");
+  assert.equal(plugin.requiresEncryptedArrival, "mutual", "the host is told these need a mutual (bound) arrival");
 });
 
 test("a caller with no key cannot open a shell", () => {
