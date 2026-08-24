@@ -158,36 +158,33 @@ test("the shell's mutual gate, walked up the arrival ladder", async () => {
   }
 });
 
-test("tunnel and command require encrypted arrival; service is the one still ungated", async () => {
-  // Tunnel and command now carry the same gate as the shell (encrypted arrival):
-  // a tunnel's bytes and a command's bearer credential must not cross a plaintext
-  // LAN. They are `true` (encrypted), not `"mutual"` — a tunnel or a pairing over
-  // a bare tailnet address is the ordinary case, and requiring a client cert
+test("tunnel, command, and service all require an encrypted arrival", async () => {
+  // The three non-shell capability plugins now carry the same gate as the shell:
+  // a tunnel's bytes, a command's bearer credential, and a service's start
+  // request + handed-back port must none of them cross a plaintext LAN. All are
+  // `true` (encrypted), not `"mutual"` — a tunnel, pairing, or service started
+  // over a bare tailnet address is the ordinary case, and requiring a client cert
   // there would refuse it. So on plaintext they 404, and on an encrypted arrival
-  // they are served.
-  //
-  // `service` is deliberately NOT marked yet — it is the remaining decision. It
-  // starts a local process and hands back a port, arguably as sensitive; left
-  // ungated here so this test flags it (served over plaintext) rather than hiding
-  // it. Marking it is a one-line follow-up if the maintainers want it.
+  // they are served. Only the shell stays `"mutual"`, being interactive host
+  // control.
   const bridge = await bootBridge();
   try {
     const plaintext = await bridge.openIface("plaintext");
     const encrypted = await bridge.openIface("encrypted-mutual");
 
-    // Gated on plaintext...
+    // Gated on plaintext — the same 404 an undeclared route gives.
     assert.equal(await probe(plaintext.reach, "/tunnel/echo/open"), "gated", "no tunnel on a plaintext listener");
     assert.equal(await probe(plaintext.reach, "/command/echo/run"), "gated", "no command on a plaintext listener");
+    assert.equal(await probe(plaintext.reach, "/service/svc/status", { id: "nope" }), "gated", "no service on a plaintext listener");
 
-    // ...served where arrival is encrypted.
+    // Served where arrival is encrypted.
     const tunnel = await encrypted.reach("/tunnel/echo/open");
     assert.equal(tunnel.ok, true, "a tunnel opens where arrival is encrypted");
     await tidy(encrypted.reach, "tunnel", tunnel);
     assert.equal(await probe(encrypted.reach, "/command/echo/run"), "allowed", "a command runs where arrival is encrypted");
-
-    // service is still reachable over plaintext (a 403 at the handler for the
-    // bogus id proves the route was served past a — currently absent — gate).
-    assert.equal(await probe(plaintext.reach, "/service/svc/status", { id: "nope" }), "refused", "service is still served over plaintext — the remaining decision");
+    // service/status with a bogus id is refused at the handler ("not your
+    // service") — a 403, which proves the route was reached past the arrival gate.
+    assert.equal(await probe(encrypted.reach, "/service/svc/status", { id: "nope" }), "refused", "the service route is reached where arrival is encrypted");
   } finally {
     bridge.shell.stop();
     await bridge.echo.close();

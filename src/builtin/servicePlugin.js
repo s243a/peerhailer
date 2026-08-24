@@ -256,6 +256,12 @@ export function createServicePlugin({
   return {
     name: "service",
     description: "Starts long-running processes this machine's operator declared, for peers holding their capability.",
+    // Served only where arrival is encrypted, refused on plaintext — the same
+    // gate as the shell, tunnel, and command. A service starts a local process
+    // and hands the caller back a port to reach it on; both the start request and
+    // that port must not cross a plaintext LAN. Encrypted, not "mutual", so a
+    // service started over a bare tailnet address (the ordinary case) is served.
+    requiresEncryptedArrival: true,
     capabilities: Object.keys(declared).map(capabilityFor),
 
     /** For a host that discards the plugin without ending the process. */

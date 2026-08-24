@@ -587,12 +587,13 @@ switch (command) {
       Object.keys(declaredShells).length && "shells",
       Object.keys(tunnels).length && "tunnels",
       Object.keys(declaredCommands).length && "commands",
+      Object.keys(declaredServices).length && "services",
     ].filter(Boolean);
     if (plainHosts.length && gatedDeclared.length) {
       log(`[daemon] WARNING: ${gatedDeclared.join(", ")} are declared, but --hail-on interfaces are plaintext —`);
       log("[daemon]          those routes are NOT served there, because they require an encrypted arrival.");
       log("[daemon]          Use --hail-on-tls to serve them over pinned TLS, or --hail-on-encrypted for a");
-      log("[daemon]          tailnet. A plaintext shell, tunnel, or command is never offered.");
+      log("[daemon]          tailnet. A plaintext shell, tunnel, command, or service is never offered.");
     }
     const hailPort = Number.isFinite(port) ? port : 8787;
     if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });

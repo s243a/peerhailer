@@ -86,7 +86,9 @@ Capability `service:<name>`. Where a command runs and finishes, a service *keeps
 running* — spawning e.g. `bridge --listen {port}` so a peer can drive an agent on
 this machine. `{port}` is the one substitution, and the machine chooses it (a
 real allocated integer, never caller text). Starting returns a port; reaching it
-is a separate tunnel capability, by design. Bounded per peer and in total, idle-
+is a separate tunnel capability, by design. Like the tunnel, command, and shell,
+it is served **only where arrival is encrypted** — the start request and the port
+it hands back must not cross a plaintext LAN. Bounded per peer and in total, idle-
 and lifetime-reaped, killed as a process group. See [services.md](services.md).
 
 ## shell — an interactive shell
