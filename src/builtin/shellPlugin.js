@@ -71,8 +71,15 @@ export const MAX_BUFFERED = 1024 * 1024;
  * control-port address and no auth material this daemon holds can leak into a
  * process a peer types into. Denylists miss the next secret added; an allowlist
  * cannot. An operator who needs more sets it in the declared command itself.
+ *
+ * `PREFIX` is here for Termux, where it names the install root
+ * (`/data/data/com.termux/files/usr`) and countless scripts read it; without it
+ * a Termux shell comes back with an empty `$PREFIX` and those scripts break. It
+ * is a plain path, not a loader directive like `LD_PRELOAD` — nothing in libc
+ * interprets it — and its value comes from this daemon's own environment, never
+ * the caller, so it needs no value check beyond being on the list.
  */
-export const SAFE_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ", "COLUMNS", "LINES"];
+export const SAFE_ENV_KEYS = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR", "TZ", "COLUMNS", "LINES", "PREFIX"];
 
 /**
  * @param {NodeJS.ProcessEnv} source

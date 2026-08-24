@@ -65,6 +65,12 @@ test("scrubEnv keeps benign vars and drops everything else, secrets included", (
   assert.ok(!("HAIL_TOKEN" in env), "no auth material reaches the shell");
 });
 
+test("scrubEnv passes PREFIX through — Termux scripts read it, and it is a plain path", () => {
+  const prefix = "/data/data/com.termux/files/usr";
+  assert.equal(scrubEnv({ PATH: "/b", PREFIX: prefix }).PREFIX, prefix, "PREFIX reaches the shell so $PREFIX is not empty");
+  assert.ok(!("PREFIX" in scrubEnv({ PATH: "/b" })), "absent when the daemon's own env has none");
+});
+
 test("scrubEnv preserves the Termux exec shim, but no other LD_PRELOAD", () => {
   const shim = "/data/data/com.termux/files/usr/lib/libtermux-exec.so";
   // Without this, `shell: true` on Termux exits 126 the instant a shell opens.

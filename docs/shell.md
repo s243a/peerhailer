@@ -201,9 +201,8 @@ Android is not the desktop story.
   you are looking at the app node, not the Termux one.
 - **The caller may not resolve MagicDNS.** The peer dials the `.ts.net` name, so a
   caller whose OS does not wire Tailscale's resolver — WSL is the common case —
-  gets "could not resolve host" even though `tailscale ping` works. Fix it on the
-  caller: `tailscale set --accept-dns`, a `100.100.100.100` resolver, or a hosts
-  entry mapping the name to the tailnet IP.
+  gets "could not resolve host" even though `tailscale ping` works. This is a
+  caller-side fix, covered in its own section below.
 - **The daemon must survive its launching shell.** A peerhailer daemon started
   with a plain `node … &` from a command that then returns is killed with that
   shell on Termux (you will see `[1]+ Done` and a dead port). Start it detached —
@@ -212,6 +211,33 @@ Android is not the desktop story.
 
 The full step-by-step, Android and other minimal targets, is in
 [deploy-minimal-linux.md](deploy-minimal-linux.md).
+
+## Driving a shell from WSL (or any caller that cannot resolve MagicDNS)
+
+This is a *caller* concern, not a target one — it applies whenever you drive a
+shell from WSL, whatever the peer is. The caller dials the target by its
+`.ts.net` name, and some environments do not wire Tailscale's resolver even
+while the tailnet itself works. **WSL is the common one:** `tailscale ping <peer>`
+succeeds, but `hail shell …` reports *could not resolve host*. The name, not the
+route, is what is missing — so the fix is on the caller's DNS, not anything in
+peerhailer.
+
+Fix it once, and prefer the fix that keeps using the name:
+
+- **`tailscale set --accept-dns` (preferred).** Wires MagicDNS into the caller's
+  resolver, so every `.ts.net` name resolves — no per-command workaround and
+  nothing baked in.
+- **Point the resolver at `100.100.100.100`.** Tailscale's own DNS; add it to
+  `/etc/resolv.conf` (or your WSL resolver config). Same effect, more manual.
+- **A hosts entry (last resort).** Mapping the name to the tailnet IP in
+  `/etc/hosts` works, but it *bakes in an address*: if that node renumbers, the
+  entry goes silently stale — the exact failure the record's MagicDNS name exists
+  to avoid. So keep the peer's stored address as the `.ts.net` **name**, not a
+  resolved IP (a record survives renumbering; a pinned IP does not), and use a
+  hosts entry only to get unblocked.
+
+Any of these removes the need for the per-command DNS preload the shell
+otherwise required from WSL.
 
 ## Open
 
