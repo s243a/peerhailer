@@ -85,6 +85,24 @@ export const refuse = (reason) => ({ [REFUSE]: true, reason });
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE", "PATCH"]);
 
 /**
+ * The stricter of a route-level and a plugin-level arrival requirement.
+ *
+ * Ordered `false` (none) < `true` (encrypted) < `"mutual"`, so merging by the
+ * higher rank means a route can only ever tighten, never loosen — the safe
+ * direction for a security marker whose whole job is to keep a capability off a
+ * weaker arrival.
+ *
+ * @param {boolean | "mutual" | undefined} routeLevel
+ * @param {boolean | "mutual" | undefined} pluginLevel
+ * @returns {boolean | "mutual"}
+ */
+function strictestArrival(routeLevel, pluginLevel) {
+  const rank = (/** @type {boolean | "mutual" | undefined} */ v) => (v === "mutual" ? 2 : v === true ? 1 : 0);
+  const winner = rank(routeLevel) >= rank(pluginLevel) ? routeLevel : pluginLevel;
+  return winner ?? false;
+}
+
+/**
  * Check a plugin before letting it near anything.
  *
  * Refusing a malformed plugin loudly beats loading half of it: a route with no
@@ -201,10 +219,17 @@ export function collectRoutes(plugins, { log = () => {} } = {}) {
         log(`[plugin] ${plugin.name} wants ${key}, already served by ${existing.plugin} — refused`);
         continue;
       }
-      // The encrypted-arrival requirement is a property of the plugin; carry it
-      // onto each of its routes so a listener can refuse to serve a marked one
-      // where arrival is not encrypted. Without this the marker is dead data.
-      routes.set(key, { ...route, plugin: plugin.name, requiresEncryptedArrival: plugin.requiresEncryptedArrival ?? false });
+      // The encrypted-arrival requirement is usually a property of the plugin;
+      // carry it onto each of its routes so a listener can refuse to serve a
+      // marked one where arrival is not encrypted. A route may also carry its own
+      // marker to *tighten* one sensitive endpoint; the stricter of the two wins,
+      // so a plugin-level floor can never be silently loosened by a route, nor a
+      // route's tightening silently dropped.
+      routes.set(key, {
+        ...route,
+        plugin: plugin.name,
+        requiresEncryptedArrival: strictestArrival(route.requiresEncryptedArrival, plugin.requiresEncryptedArrival),
+      });
     }
   }
   return routes;

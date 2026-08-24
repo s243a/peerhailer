@@ -74,6 +74,39 @@ test("a plugin refused for being malformed is reported, not thrown", async () =>
   assert.ok(messages.some((message) => message.includes("declares no capability")));
 });
 
+test("a route's arrival requirement merges with the plugin's, stricter winning", () => {
+  const routeOf = (plugin) => collectRoutes([plugin], { log: () => {} }).get("POST /echo");
+
+  // Plugin-level marker reaches every route (the common case).
+  assert.equal(routeOf({ ...wellFormed, requiresEncryptedArrival: true }).requiresEncryptedArrival, true);
+
+  // A route may *tighten* one endpoint above the plugin's floor.
+  assert.equal(
+    routeOf({
+      ...wellFormed,
+      requiresEncryptedArrival: true,
+      routes: [{ ...wellFormed.routes[0], requiresEncryptedArrival: "mutual" }],
+    }).requiresEncryptedArrival,
+    "mutual",
+    "a route can tighten to mutual on an otherwise-encrypted plugin",
+  );
+
+  // A route cannot *loosen* below the plugin's floor — the stricter wins, so a
+  // security marker is never silently downgraded.
+  assert.equal(
+    routeOf({
+      ...wellFormed,
+      requiresEncryptedArrival: "mutual",
+      routes: [{ ...wellFormed.routes[0], requiresEncryptedArrival: false }],
+    }).requiresEncryptedArrival,
+    "mutual",
+    "a route cannot loosen below a plugin that requires mutual",
+  );
+
+  // Absent on both means unmarked.
+  assert.equal(routeOf(wellFormed).requiresEncryptedArrival, false);
+});
+
 test("two plugins cannot claim one path", () => {
   const messages = [];
   const routes = collectRoutes(

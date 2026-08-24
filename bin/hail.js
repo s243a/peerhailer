@@ -579,21 +579,19 @@ switch (command) {
     const tlsHosts = resolveHosts(flags["hail-on-tls"]);
     const hosts = [...plainHosts, ...encryptedHosts, ...tlsHosts];
 
-    // Shells, tunnels, and commands are all served only where arrival is
-    // encrypted; on a plaintext interface their routes 404. Warn once if any is
-    // declared alongside a plaintext listener, so the operator is not left
-    // wondering why a capability they declared is not answered.
-    const gatedDeclared = [
-      Object.keys(declaredShells).length && "shells",
-      Object.keys(tunnels).length && "tunnels",
-      Object.keys(declaredCommands).length && "commands",
-      Object.keys(declaredServices).length && "services",
-    ].filter(Boolean);
-    if (plainHosts.length && gatedDeclared.length) {
-      log(`[daemon] WARNING: ${gatedDeclared.join(", ")} are declared, but --hail-on interfaces are plaintext —`);
-      log("[daemon]          those routes are NOT served there, because they require an encrypted arrival.");
-      log("[daemon]          Use --hail-on-tls to serve them over pinned TLS, or --hail-on-encrypted for a");
-      log("[daemon]          tailnet. A plaintext shell, tunnel, command, or service is never offered.");
+    // Any plugin whose routes require an encrypted arrival is not served on a
+    // plaintext interface. Derived from the loaded plugins themselves rather than
+    // a hardcoded set of families, so a module-specifier plugin (`hail plugins
+    // add …`) that gates its routes is warned about too — otherwise the operator
+    // is left exactly where the warning exists to prevent them being: wondering
+    // why a declared capability is not answered.
+    const gatedPlugins = plugins
+      .filter((p) => p.requiresEncryptedArrival || (p.routes ?? []).some((r) => r.requiresEncryptedArrival))
+      .map((p) => p.name);
+    if (plainHosts.length && gatedPlugins.length) {
+      log(`[daemon] WARNING: ${gatedPlugins.join(", ")} require an encrypted arrival, but --hail-on interfaces are`);
+      log("[daemon]          plaintext — those routes are NOT served there. Use --hail-on-tls to serve them over");
+      log("[daemon]          pinned TLS, or --hail-on-encrypted for a tailnet. They are never offered in cleartext.");
     }
     const hailPort = Number.isFinite(port) ? port : 8787;
     if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });

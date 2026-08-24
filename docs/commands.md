@@ -79,6 +79,16 @@ URL redeemed by somebody else, and the five-minute window does not help when the
 attacker is faster than the human. Encrypted, not mutual: a pairing over a bare
 tailnet address is the ordinary case and stays served.
 
+Be clear about the strength of that protection: it is exactly as strong as the
+operator's interface assertion. `--hail-on-encrypted <iface>` is you asserting
+that arrival on that interface is encrypted, and the gate believes you — so
+`--hail-on-encrypted tailscale0` is safe (WireGuard), while
+`--hail-on-encrypted wlan0` would ship the credential in cleartext over WiFi
+while the gate reports it satisfied. Only assert `--hail-on-encrypted` for a
+tailnet or a loopback-behind-`serve`; for a bare LAN interface use
+`--hail-on-tls`, which makes the arrival encrypted rather than trusting a claim
+that it is.
+
 ## Why not just tunnel to T3 instead
 
 Because a tunnel gives a peer the *whole* interface behind the endpoint, bounded

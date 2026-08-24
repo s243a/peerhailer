@@ -132,10 +132,12 @@ test("the shell's mutual gate, walked up the arrival ladder", async () => {
     assert.equal(await probe(plaintext.reach, "/shell/sh/open"), "gated", "no shell on a plaintext listener");
 
     // Encrypted but not mutual (the bare tailnet address): encrypted is not
-    // enough for a shell — it wants a *bound* arrival, so it still 404s.
-    if (encryptedOnly.bound.length) {
-      assert.equal(await probe(encryptedOnly.reach, "/shell/sh/open"), "gated", "encrypted alone does not open a shell — mutual is required");
-    }
+    // enough for a shell — it wants a *bound* arrival, so it still 404s. This is
+    // the most security-relevant rung (the --hail-on-encrypted-misassertion
+    // stand-in), so if the environment cannot bind it, fail loudly rather than
+    // skip: the rung must be exercised, not quietly dropped.
+    assert.ok(encryptedOnly.bound.length > 0, "the encrypted-not-mutual listener bound (0.0.0.0) — the rung is exercised");
+    assert.equal(await probe(encryptedOnly.reach, "/shell/sh/open"), "gated", "encrypted alone does not open a shell — mutual is required");
 
     // Encrypted *and* mutual (loopback counts as bound): served.
     const onLoopback = await encryptedMutual.reach("/shell/sh/open");
