@@ -31,7 +31,7 @@ import { createServer as netServer } from "node:net";
 import { createDaemon } from "../src/server.js";
 import { createDirectory } from "../src/directory.js";
 import { generateIdentity } from "../src/identity.js";
-import { callPeer } from "../src/hail.js";
+import { callPeer, walk } from "../src/hail.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
@@ -189,6 +189,55 @@ test("tunnel, command, and service all require an encrypted arrival", async () =
     bridge.shell.stop();
     await bridge.echo.close();
     await bridge.daemon.close();
+  }
+});
+
+test("A→B→C: a walk carries C's introduction from B to A, but never a route to C", async () => {
+  // A can reach B; B knows C on an interface A is not on. peerhailer dials
+  // directly — there is no relay — so the walk demonstrates the honest boundary:
+  //   - it makes C a *candidate* in A's directory (knowledge crosses one hop),
+  //   - it never *admits* C (trust does not travel; admitting is a person's act),
+  //   - A's own reach to C is a direct dial to C's address, never forwarded
+  //     through B (bytes do not cross): unreachable there is unreachable, period.
+  // C is modeled as a record B holds at an address that does not answer from
+  // here (nothing listens on :1) — standing in for "C's interface, which A is
+  // not on", since one host cannot make an address reachable from B but not A.
+  const a = generateIdentity();
+  const b = generateIdentity();
+  const cKey = generateIdentity().publicKey;
+  const cAddress = "http://127.0.0.1:1";
+
+  // B: a real bridge. It admits A (so A may read its directory) and C (so C is in
+  // the list A reads), both under a profile that is hail-able and introduce-able.
+  const bDir = createDirectory({ self: { name: "B", publicKey: b.publicKey } });
+  bDir.useProfiles({ peer: { name: "peer", allows: ["hail", "directory", "introduce"] } });
+  bDir.admit({ name: "A", publicKey: a.publicKey, profile: "peer" });
+  bDir.admit({ name: "C", publicKey: cKey, addresses: [{ transport: "tailscale", value: cAddress }], profile: "peer" });
+  const bDaemon = createDaemon({ directory: bDir, identity: b, plugins: [hailPlugin] });
+  const bBound = await bDaemon.listenHail({ port: 0, hosts: ["127.0.0.1"], encrypted: false }); // hail rides plaintext
+
+  // A: admits B at B's reachable ("wifi") address, granting it `introduce` so A
+  // follows B's introductions.
+  const aDir = createDirectory({ self: { name: "A", publicKey: a.publicKey } });
+  aDir.useProfiles({ peer: { name: "peer", allows: ["hail", "directory", "introduce"] } });
+  aDir.admit({ name: "B", publicKey: b.publicKey, addresses: [{ transport: "lan", value: `http://127.0.0.1:${bBound[0].port}` }], profile: "peer" });
+
+  try {
+    const result = await walk(aDir, { as: { name: "A", publicKey: a.publicKey, privateKey: a.privateKey } });
+
+    // Knowledge crossed: A reached B and learned C as a candidate — but only that.
+    assert.ok(result.reached.some((r) => r.name === "B"), "A reached B");
+    assert.ok(result.candidates.some((c) => c.name === "C"), "A heard of C through B");
+    assert.equal(aDir.get("C"), null, "C was not admitted — trust did not travel with the introduction");
+
+    // Bytes do not cross: A's own reach to C is a direct dial to C's address,
+    // which A cannot reach; nothing routes it through B.
+    const cRecord = aDir.listCandidates().find((c) => c.name === "C");
+    const reachC = await callPeer(cRecord, "/hail", {}, { as: { name: "A", privateKey: a.privateKey } });
+    assert.equal(reachC.ok, false, "A cannot reach C — there is no relay through B");
+    assert.match(reachC.error, /http:\/\/127\.0\.0\.1:1\b/, "the failed dial went straight to C's address, never through B");
+  } finally {
+    await bDaemon.close();
   }
 });
 
