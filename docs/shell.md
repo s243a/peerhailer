@@ -146,6 +146,73 @@ and it is a nice-to-have for granting more widely, not a gate the first version
 waits behind. The plugin leaves the seam where it would attach and does not
 build it.
 
+## Running it on Android (Termux)
+
+The phone is a first-class target — "drive a shell on the machine at home from
+the one in your pocket, or the reverse" — and Termux has enough quirks that a
+working setup looks broken in unhelpful ways. These were all hit driving a real
+shell from a desktop into a Termux phone; none is theoretical.
+
+**The exec shim, and why the shell "opens" then dies.** Play Store Termux execs
+every binary through a shim it carries in `LD_PRELOAD=$PREFIX/lib/libtermux-exec.so`.
+The scrubbed environment (which strips everything not on its allowlist) removed
+it — and then `shell: true`, which goes through `/bin/sh` and `execve`, could not
+start the shell at all: the child died with exit 126 ("Permission denied") the
+instant the session opened. The symptom is maddening — `open` **succeeds** and
+returns an id, then every `send`/`poll` is refused *"not your shell"*, because the
+session was already gone. `scrubEnv` now preserves that one shim, matched by name
+so it stays an allowlist and never becomes arbitrary `.so` injection. Nothing to
+configure; noted because the failure points nowhere near its cause.
+
+**`$PREFIX` is empty in the session.** The scrub allowlist keeps `PATH` (so
+commands resolve) but not Termux's `$PREFIX`, so a script that reads `$PREFIX`
+finds nothing. If a declared shell needs it, put it in the command itself —
+`hail shells add debug "PREFIX=$PREFIX bash"` — rather than widening the scrub.
+
+**It runs as the Termux app user, non-root.** `id` in the session shows
+`u0_aXXX`, SELinux context `untrusted_app` — confined to Termux's own sandbox.
+That is the ceiling regardless of the fabric; the shell reaches no more of the
+phone than Termux itself does. Rooted Android is a separate question this does not
+change.
+
+**Process-group teardown works.** Verified on Termux: a detached spawn leads its
+own group and `process.kill(-pid)` takes the whole tree, so the shell's cleanup
+is sound on Android — the one primitive that could have differed does not.
+
+## Reaching it: Tailscale on Android
+
+The encrypted arrival the shell demands comes from Tailscale, and Tailscale on
+Android is not the desktop story.
+
+- **Userspace, no TUN.** Android hands Termux no TUN device, so `tailscaled` runs
+  `--tun=userspace-networking` and there is **no `tailscale0` interface to bind**.
+  You expose the loopback daemon over the tailnet with `tailscale serve --bg <port>`
+  (HTTPS on 443 → `127.0.0.1:<port>`), *not* `serve --http`, and the peer dials the
+  `https://<node>.<tailnet>.ts.net` name — `serve` terminates the TLS.
+- **The socket path is explicit.** `TS_SOCKET` is unreliable on Android builds;
+  pass `--socket=<path>` to *every* `tailscale` command, matching the `--socket=`
+  tailscaled was started with (often `~/.tailscale/tailscaled.sock`). A bare
+  `tailscale serve status` that says "failed to connect to local Tailscale
+  daemon" is this, not a dead daemon.
+- **The app node is not the Termux node.** The Tailscale Android app and the
+  in-Termux `tailscaled` are *different* tailnet peers. Only the in-Termux one can
+  `serve` a Termux-local port; the app keeps the phone on the tailnet but fronts
+  nothing in Termux. If the phone shows online but the serve URL never answers,
+  you are looking at the app node, not the Termux one.
+- **The caller may not resolve MagicDNS.** The peer dials the `.ts.net` name, so a
+  caller whose OS does not wire Tailscale's resolver — WSL is the common case —
+  gets "could not resolve host" even though `tailscale ping` works. Fix it on the
+  caller: `tailscale set --accept-dns`, a `100.100.100.100` resolver, or a hosts
+  entry mapping the name to the tailnet IP.
+- **The daemon must survive its launching shell.** A peerhailer daemon started
+  with a plain `node … &` from a command that then returns is killed with that
+  shell on Termux (you will see `[1]+ Done` and a dead port). Start it detached —
+  `setsid sh -c 'cd ~/Projects/peerhailer; exec node bin/hail.js daemon …' &` — so
+  it outlives the launcher.
+
+The full step-by-step, Android and other minimal targets, is in
+[deploy-minimal-linux.md](deploy-minimal-linux.md).
+
 ## Open
 
 - **PTY on the far side of a tunnel.** A shell is inherently interactive and

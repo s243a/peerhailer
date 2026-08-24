@@ -255,6 +255,27 @@ this machine can offer, never who may use it.
 
 Plugins load by name from your configuration, never by scanning a directory.
 
+### Built-in plugins
+
+The `hail` CLI ships these, gated by the capability in the middle column and
+listed from least to most consequential — each rung hands a peer more of your
+machine than the last:
+
+| Plugin      | Capability       | What a holder can do                                |
+| ----------- | ---------------- | --------------------------------------------------- |
+| hail        | `hail`           | learn this machine exists and who it knows          |
+| diagnostics | `diagnostics`    | read *why* their request was refused                |
+| chat        | `chat`           | leave and read short messages                       |
+| tunnel      | `tunnel:<name>`  | reach one declared local endpoint, byte for byte    |
+| command     | `command:<name>` | run one fixed command the operator wrote down       |
+| service     | `service:<name>` | start a declared long-running process, get its port |
+| shell       | `shell:<name>`   | type into a shell — **remote shell access**         |
+
+The dangerous ones share one rule — **the operator declares, the caller names** —
+and none of `tunnel:`, `command:`, `service:`, `shell:` is in a built-in profile;
+each is granted deliberately. Full catalog, the security posture of each, and
+per-plugin detail: **[docs/plugins.md](docs/plugins.md)**.
+
 ## What it does not do
 
 Not a router — peers do not currently relay for one another, though whether they
