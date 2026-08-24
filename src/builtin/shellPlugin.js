@@ -87,6 +87,15 @@ export function scrubEnv(source) {
   for (const [key, value] of Object.entries(source)) {
     if (key.startsWith("LC_") && typeof value === "string") env[key] = value;
   }
+  // Termux (Android) execs every binary through a shim it carries in
+  // LD_PRELOAD; strip it and `shell: true` — which goes through /bin/sh, then
+  // execve — cannot even start the shell (exit 126, "Permission denied"), so a
+  // session opens and dies at once. Preserve *only* that shim, matched by name,
+  // so this stays an allowlist and never becomes a way to preload an arbitrary
+  // .so into a shell a peer typed into. LD_PRELOAD is empty off Termux.
+  if (typeof source.LD_PRELOAD === "string" && /(^|\/)libtermux-exec\.so$/.test(source.LD_PRELOAD)) {
+    env.LD_PRELOAD = source.LD_PRELOAD;
+  }
   return env;
 }
 

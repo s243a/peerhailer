@@ -65,6 +65,15 @@ test("scrubEnv keeps benign vars and drops everything else, secrets included", (
   assert.ok(!("HAIL_TOKEN" in env), "no auth material reaches the shell");
 });
 
+test("scrubEnv preserves the Termux exec shim, but no other LD_PRELOAD", () => {
+  const shim = "/data/data/com.termux/files/usr/lib/libtermux-exec.so";
+  // Without this, `shell: true` on Termux exits 126 the instant a shell opens.
+  assert.equal(scrubEnv({ PATH: "/b", LD_PRELOAD: shim }).LD_PRELOAD, shim, "the shim is kept, matched by name");
+  // But it stays an allowlist — an arbitrary preload is not a way to inject a .so.
+  assert.ok(!("LD_PRELOAD" in scrubEnv({ PATH: "/b", LD_PRELOAD: "/tmp/evil.so" })), "a foreign LD_PRELOAD is dropped");
+  assert.ok(!("LD_PRELOAD" in scrubEnv({ PATH: "/b" })), "absent off Termux");
+});
+
 test("the shell is spawned with the scrubbed env and its own process group", () => {
   const { spawnImpl, spawned } = fakeSpawn();
   const plugin = createShellPlugin({ shells: { bash: "bash" }, spawnImpl, spawnEnv: { PATH: "/usr/bin" } });
