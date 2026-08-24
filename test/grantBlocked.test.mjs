@@ -11,13 +11,15 @@ import { test } from "node:test";
 
 import { createDaemon } from "../src/server.js";
 import { createDirectory } from "../src/directory.js";
-import { generateIdentity, signPayload } from "../src/identity.js";
+import { generateIdentity, signPayload, fingerprint } from "../src/identity.js";
 import { mintGrant } from "../src/grants.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 
 /** A signed hail carrying a grant, as a peer nobody admitted would send it. */
-async function hailWithGrant(url, { name, identity, grant }) {
-  const from = { name, at: Date.now() };
+async function hailWithGrant(url, { name, identity, grant, to }) {
+  // `to` binds the hail to this daemon: a grant-bearing hail must name its
+  // target, since a grant-presenter carries no record to advertise support.
+  const from = { name, at: Date.now(), ...(to ? { to } : {}) };
   const response = await fetch(`${url}/hail`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -53,13 +55,13 @@ test("blocking a peer stops a grant it already holds", async () => {
   const url = `http://127.0.0.1:${port}`;
 
   try {
-    const before = await hailWithGrant(url, { name: "mallory", identity: mallory, grant });
+    const before = await hailWithGrant(url, { name: "mallory", identity: mallory, grant, to: fingerprint(me.publicKey) });
     assert.equal(before, 200, "a grant lets in a peer nobody admitted — that is what it is for");
 
     // The operator decides otherwise.
     directory.block({ name: "mallory", publicKey: mallory.publicKey });
 
-    const after = await hailWithGrant(url, { name: "mallory", identity: mallory, grant });
+    const after = await hailWithGrant(url, { name: "mallory", identity: mallory, grant, to: fingerprint(me.publicKey) });
     assert.notEqual(after, 200, "the same grant must stop working the moment its subject is blocked");
   } finally {
     await daemon.close();
@@ -91,7 +93,7 @@ test("a grant carrying `directory` grants it, and one that does not does not", a
   const { port } = await daemon.listen({ port: 0 });
 
   const ask = async (grant) => {
-    const from = { name: "guest", at: Date.now() };
+    const from = { name: "guest", at: Date.now(), to: fingerprint(me.publicKey) };
     const response = await fetch(`http://127.0.0.1:${port}/hail`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -141,7 +143,7 @@ test("a grant confers nothing the issuer does not currently hold", async () => {
   const { port } = await daemon.listen({ port: 0 });
 
   try {
-    const from = { name: "guest", at: Date.now() };
+    const from = { name: "guest", at: Date.now(), to: fingerprint(me.publicKey) };
     const response = await fetch(`http://127.0.0.1:${port}/hail`, {
       method: "POST",
       headers: { "content-type": "application/json" },

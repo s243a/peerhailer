@@ -76,6 +76,7 @@ function readBody(request) {
  *   diagnostics?: ReturnType<typeof import("./diagnostics.js").createDiagnostics>,
  *   plugins?: import("./plugins.js").Plugin[],
  *   allowedOrigins?: string[],
+ *   requireTargetBinding?: boolean,
  *   onReload?: () => any | Promise<any>,
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   log?: (message: string) => void,
@@ -97,10 +98,23 @@ export function createDaemon({
    * browser while appearing to permit.
    */
   allowedOrigins = [],
+  /**
+   * Require every hail to name its target — the fully-closed state of the
+   * target-binding migration (docs/hail-target-binding.md). Off by default so a
+   * mixed fleet still interoperates: a hail from a caller not yet known to bind
+   * is accepted `to`-less, while a *present* `to` is always checked and a
+   * grant-bearing hail always requires one. Turn on once every peer that hails
+   * this machine speaks v1, and the residual `to`-less path closes entirely.
+   */
+  requireTargetBinding = false,
   onReload,
   applyChange,
   log = () => {},
 }) {
+  // Our own fingerprint, computed once: the value a bound hail's `to` must
+  // equal. Null only without an identity, a degenerate setup in which we cannot
+  // enforce binding at all.
+  const selfFingerprint = identity?.publicKey ? fingerprint(identity.publicKey) : null;
   // Rebindable by `reload`, so declaring a tunnel or a command does not cost a
   // restart. Declared here rather than beside their first use, because a `let`
   // below its first reference is a temporal dead zone error that a syntax check
@@ -322,6 +336,39 @@ export function createDaemon({
     // exists so a captured request is not useful indefinitely.
     const age = Math.abs(Date.now() - (Number(claim.at) || 0));
     if (!Number.isFinite(age) || age > FRESHNESS_MS) return debugRefusal(`stale hail from ${claim.name}`, claim.name);
+
+    // Target binding. `claim.to` is signed (it is inside `from`, which the
+    // signature above covered), so an attacker cannot strip or alter it without
+    // breaking the signature — the only `to`-less bytes they can replay are ones
+    // the caller genuinely signed without a `to`, i.e. an old caller.
+    //
+    // The rule, fail-closed in every branch:
+    //  - `to` present  → it must be us. A captured hail names its target and is
+    //    inert if replayed at any other peer. Enforced the moment both sides
+    //    speak v1, with no migration step.
+    //  - `to` absent + a grant → refuse. A grant-presenter may carry no record
+    //    for us to learn its support from, and a grant is the highest-value
+    //    replay target, so `to` is mandatory on any grant-bearing hail from day
+    //    one — nothing to migrate.
+    //  - `to` absent + caller known to bind (sticky, signed observation) →
+    //    refuse. This closes the downgrade: a replayed old-style hail from a
+    //    caller we have since seen sign `to` is not accepted.
+    //  - `to` absent + require-target-binding on → refuse. The flag-day state.
+    //  - otherwise tolerated: a genuinely old caller we have no support signal
+    //    for. The residual the migration shrinks to zero.
+    const to = claim.to;
+    const carriesGrant = Boolean(body?.grant);
+    if (typeof to === "string" && to.length > 0) {
+      if (selfFingerprint && to !== selfFingerprint) {
+        return debugRefusal(`hail from ${claim.name} was addressed to another peer`, claim.name);
+      }
+    } else if (carriesGrant) {
+      return debugRefusal(`grant-bearing hail from ${claim.name} named no target`, claim.name);
+    } else if (known?.bindingSeen) {
+      return debugRefusal(`hail from ${claim.name} named no target, but ${claim.name} binds`, claim.name);
+    } else if (requireTargetBinding) {
+      return debugRefusal(`hail from ${claim.name} named no target`, claim.name);
+    }
 
     // First contact proves possession of this key, which is the same evidence
     // `walk` binds on. Binding here closes a window: an admitted peer with no

@@ -15,7 +15,7 @@
  *
  * @module hail
  */
-import { signPayload } from "./identity.js";
+import { signPayload, fingerprint } from "./identity.js";
 import { makePeerRecord, orderForDialing, verifyRecord } from "./peerRecord.js";
 import { INTRODUCE } from "./profiles.js";
 import { pinnedFetch } from "./pinnedFetch.js";
@@ -28,11 +28,19 @@ import { clientCertFor } from "./cert.js";
  * an unsigned name is a claim anyone could make. The timestamp bounds how long
  * a captured request stays useful.
  *
+ * The `to` binds the hail to its target: it is `fingerprint(target.publicKey)`,
+ * the compact stable form the caller already holds from the peer's record (it
+ * is what a TLS caller pins to). Signed into `from`, it means a captured hail
+ * names the peer it was for — replayed anywhere else it fails verification, so
+ * the credential stops being bearer. Absent only when the caller holds no key
+ * for the target yet (a keyless peer), the weakest path already.
+ *
  * @param {{name: string, privateKey: string} | undefined} as
+ * @param {string | null} [to] fingerprint of the target's key
  */
-function hailBody(as) {
+function hailBody(as, to) {
   if (!as) return {};
-  const from = { name: as.name, at: Date.now() };
+  const from = { name: as.name, at: Date.now(), ...(to ? { to } : {}) };
   return { from, signature: signPayload(from, as.privateKey) };
 }
 
@@ -83,6 +91,12 @@ export async function callPeer(record, path, body = {}, { fetchImpl = fetch, tim
   if (!peer) return { ok: false, error: "not a usable peer record" };
   if (peer.addresses.length === 0) return { ok: false, error: `no known address for ${peer.name}` };
 
+  // Bind the hail to this peer: the fingerprint of the key we hold for it, read
+  // from the same record the address came from. Null for a keyless peer, which
+  // sends a `to`-less hail — the one path target-binding cannot cover, and the
+  // weakest one regardless.
+  const to = peer.publicKey ? fingerprint(peer.publicKey) : null;
+
   /** @type {string[]} */
   const failures = [];
   // Stored order protects routes; this order tries the one most likely to
@@ -96,7 +110,7 @@ export async function callPeer(record, path, body = {}, { fetchImpl = fetch, tim
       const init = {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...body, ...hailBody(as) }),
+        body: JSON.stringify({ ...body, ...hailBody(as, to) }),
         signal: controller.signal,
       };
       let response;
@@ -182,6 +196,11 @@ export async function walk(directory, options = {}) {
     // key was verified and discarded, so a peer admitted without one stayed
     // open to being impersonated at a stale address on every later hail.
     if (!peer.publicKey && proof.key) directory.bindKey(peer.name, proof.key);
+    // The version travelled in the peer's signed record, so this observation is
+    // authenticated and, kept by `max`, monotone: once we know a peer binds
+    // targets, our verifier requires `to` from it and a rolled-back record
+    // cannot lower that. See docs/hail-target-binding.md.
+    if (proof.record?.v) directory.noteBinding(peer.name, proof.record.v);
     reached.push({ name: peer.name, via: result.address });
     // Whose leads we follow is a judgement about the peer, not a property of
     // having reached it. Without this, any peer we could hail could put names,

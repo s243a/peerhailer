@@ -1,7 +1,32 @@
 # Binding a hail to its target
 
-**Status: designed, not built. A breaking change to the signed-hail contract —
-the design exists so the migration can be decided before any peer moves.**
+**Status: built.** The contract change shipped with the TLS work, as the design
+below recommended (both want "address, key, and now `to`, all from one signed
+record read once"). What landed:
+
+- **`to` in the signed hail.** `hailBody` signs `from = {name, at, to}` where
+  `to = fingerprint(target.publicKey)`, read from the same record the address
+  came from (`callPeer`). Absent only for a keyless target.
+- **The verifier** (`identify` in `server.js`) refuses a hail whose present `to`
+  is not our fingerprint — always, so a captured hail is inert off-target the
+  moment both sides speak v1, with no migration step.
+- **Mandatory on grant, day one.** A grant-bearing hail with no `to` is refused
+  outright: a grant-presenter carries no record to advertise support from, so
+  there is nothing to migrate.
+- **The signed, sticky support signal.** A peer advertises `v` in its signed
+  self-record (`TARGET_BINDING_VERSION`); a verifier records it monotone by
+  `max` (`directory.noteBinding`, kept through `keepOurs`, set on a verified
+  `walk` reply), and refuses a `to`-less hail from any caller it knows binds —
+  the downgrade guard.
+- **The flag day.** `createDaemon({requireTargetBinding: true})` refuses every
+  `to`-less hail — the fully-closed state, for a fleet that has finished moving.
+
+What was **not** built: the cheaper `callPeer` provenance-plus-shape interim
+(below). Target-binding is the strictly stronger guarantee — it makes the
+credential meaningless off-target rather than merely hard to misdeliver — so the
+interim is left as documented composable defence-in-depth, not a shipped path.
+
+The design below is kept as the record of why each choice is what it is.
 
 ## The leak
 

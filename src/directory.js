@@ -18,7 +18,13 @@
  *
  * @module directory
  */
-import { makePeerRecord, MAX_CONFLICTS, mergePeerRecord, publicRecord } from "./peerRecord.js";
+import {
+  makePeerRecord,
+  MAX_CONFLICTS,
+  mergePeerRecord,
+  publicRecord,
+  TARGET_BINDING_VERSION,
+} from "./peerRecord.js";
 import { normalizeKey, sameKey } from "./identity.js";
 import {
   allows,
@@ -70,6 +76,7 @@ export function createDirectory(state = {}) {
    *   conflicts?: {key: string, firstSeen: number, lastSeen: number, count: number, via?: string}[],
    *   profileUntil?: number,
    *   profileAfter?: string,
+   *   bindingSeen?: number,
    * }} StoredPeer
    */
   /** @type {Map<string, StoredPeer>} */
@@ -300,7 +307,33 @@ export function createDirectory(state = {}) {
       ...(previous?.conflicts?.length ? { conflicts: previous.conflicts } : {}),
       ...(previous?.profileUntil ? { profileUntil: previous.profileUntil } : {}),
       ...(previous?.profileAfter ? { profileAfter: previous.profileAfter } : {}),
+      // Once seen, never un-seen: the support observation is monotone, so a
+      // rebuild from any source keeps the highest version we ever verified.
+      ...(previous?.bindingSeen ? { bindingSeen: previous.bindingSeen } : {}),
     };
+  }
+
+  /**
+   * Record that this peer's *signed* record advertised a hail-format version —
+   * the "supports target-binding" observation the downgrade guard consults.
+   *
+   * Monotone by `max`, deliberately. Records carry no expiry and every one a
+   * peer ever signed stays valid, so a rollback — presenting an older,
+   * genuinely-signed, support-absent record — could otherwise clear the guard
+   * without forging anything. Keeping the highest version ever seen means once a
+   * caller is known to bind, a stale record cannot make us accept a `to`-less
+   * hail from it again. See docs/hail-target-binding.md.
+   *
+   * @param {string} name
+   * @param {number | undefined} version
+   */
+  function noteBinding(name, version) {
+    const record = admitted.get(name);
+    if (!record || !Number.isInteger(version) || !version || version <= 0) return record ?? null;
+    if ((record.bindingSeen ?? 0) >= version) return record;
+    const updated = { ...record, bindingSeen: version };
+    admitted.set(name, updated);
+    return updated;
   }
 
   /**
@@ -381,7 +414,11 @@ export function createDirectory(state = {}) {
    */
   function hailResponse() {
     return {
-      self: publicRecord({ ...self, lastSeen: now() }),
+      // Our own record is where we advertise the hail-format version we speak,
+      // so a caller learns from our *signed* self-record that we bind targets.
+      // Stamped here, not in `publicRecord`, so gossiping another peer carries
+      // *their* version, never ours.
+      self: publicRecord({ ...self, v: TARGET_BINDING_VERSION, lastSeen: now() }),
       // Peers granted nothing are still ours to know about, but telling others
       // where to find a machine we deliberately do not answer would hand out a
       // reachability we chose not to use.
@@ -406,6 +443,7 @@ export function createDirectory(state = {}) {
     learnFrom,
     markReachable,
     bindKey,
+    noteBinding,
     noteKeyConflict,
     rotateKey,
     hailResponse,

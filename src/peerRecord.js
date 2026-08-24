@@ -49,6 +49,21 @@ export const MAX_ADDRESSES_PER_TRANSPORT = 3;
 export const MAX_ADDRESSES = 12;
 
 /**
+ * The hail wire-format version this build speaks, advertised in the signed
+ * record a peer returns about itself.
+ *
+ * Version 1 is the first that binds a hail to its target — `from` carries `to`,
+ * the fingerprint of the peer the hail was meant for, and a verifier at v1
+ * refuses a hail addressed elsewhere. A caller learns "peer X binds targets"
+ * from X's *signed* record (this field), not from a per-hail claim a
+ * man-in-the-middle could strip: removing it breaks the record signature. The
+ * value is an integer, not a boolean, so the observation is monotone by
+ * `max(seen)` — an older, genuinely-signed record cannot roll the support back.
+ * See docs/hail-target-binding.md.
+ */
+export const TARGET_BINDING_VERSION = 1;
+
+/**
  * How many competing keys to remember for one peer.
  *
  * Each entry costs whoever produced it one signature, and this list is evidence
@@ -135,6 +150,7 @@ export const TRANSPORTS = ["lan", "tailscale", "tinc", "relay", "other"];
  *   addresses: PeerAddress[],
  *   lastSeen: number | null,
  *   note?: string,
+ *   v?: number,
  * }} PeerRecord
  */
 
@@ -160,6 +176,10 @@ export function makePeerRecord(input) {
     addresses: normalizeAddresses(input.addresses),
     lastSeen: Number.isFinite(input.lastSeen) ? input.lastSeen : null,
     ...(isPlainString(input.note) ? { note: input.note.trim() } : {}),
+    // The sender's hail-format version, if it stated one. Untrusted like every
+    // other field here, and used only to *raise* what we believe about that
+    // peer's support (monotone) — never to lower it.
+    ...(Number.isInteger(input.v) && input.v > 0 ? { v: input.v } : {}),
   };
 }
 
@@ -302,7 +322,7 @@ export function mergePeerRecord(mine, theirs) {
  * wire without passing here first.
  *
  * @param {any} record
- * @returns {{name: string, publicKey: string | null, addresses: {transport: string, value: string}[], lastSeen: number | null, note?: string} | null}
+ * @returns {{name: string, publicKey: string | null, addresses: {transport: string, value: string}[], lastSeen: number | null, note?: string, v?: number} | null}
  */
 export function publicRecord(record) {
   const safe = makePeerRecord(record);
@@ -315,6 +335,11 @@ export function publicRecord(record) {
     addresses: safe.addresses.map(({ transport, value }) => ({ transport, value })),
     lastSeen: safe.lastSeen,
     ...(safe.note ? { note: safe.note } : {}),
+    // The version travels with the record, signed along with it, so a peer
+    // learns our support from bytes a relay cannot alter without breaking the
+    // signature. Passed through for a peer we are gossiping (their `v`), stamped
+    // fresh for ourselves by the directory when it describes itself.
+    ...(typeof safe.v === "number" && safe.v > 0 ? { v: safe.v } : {}),
   };
 }
 
