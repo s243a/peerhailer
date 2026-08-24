@@ -51,6 +51,14 @@ The guard is in any case the *downgrade* backstop, not the primary defence: the
 always-checked present-`to` rule and the day-one grant rule need no support
 signal at all.
 
+`bindingSeen` attributes to the *record's key*, not the bare name. On the
+trust-on-first-use-by-grant path — a keyless admitted name whose key is bound
+from a grant-bearer's first correctly-bound hail — the same request that binds
+the key records the support, so both attribute to the key that just proved
+possession, consistent with the existing TOFU-by-grant decision. If that binding
+was wrong (a stolen grant got there first) and an operator repairs it with
+`forget` then re-`add`, `bindingSeen` is wiped with the record, as it should be.
+
 The design below is kept as the record of why each choice is what it is.
 
 ## The leak

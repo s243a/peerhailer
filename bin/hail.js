@@ -119,7 +119,21 @@ const directory = createDirectory({
 const persist = () =>
   updateState(
     statePath,
-    (onDisk) => ({ ...onDisk, ...stored, ...directory.snapshot() }),
+    (onDisk) => {
+      const snap = directory.snapshot();
+      // Carry the monotone target-binding signal forward across writers. This
+      // process's directory may have loaded before a running daemon learned a
+      // peer binds (passively, from a hail), and `snapshot()` wholesale-replaces
+      // `admitted`, which would drop it — making a field the whole design treats
+      // as never-lowered lowerable by an unrelated CLI command. Only this one
+      // field is merged by `max`; the rest stays "this command's peers win".
+      const priorBinding = new Map((onDisk.admitted ?? []).map((p) => [p.name, p.bindingSeen]));
+      const admitted = (snap.admitted ?? []).map((p) => {
+        const seen = Math.max(Number(p.bindingSeen) || 0, Number(priorBinding.get(p.name)) || 0);
+        return seen > 0 ? { ...p, bindingSeen: seen } : p;
+      });
+      return { ...onDisk, ...stored, ...snap, admitted };
+    },
     { log: (m) => process.stderr.write(`${m}\n`) },
   );
 
@@ -438,6 +452,14 @@ switch (command) {
       const until = diagnostics.open(Number.isFinite(forMs) ? forMs : DEFAULT_WINDOW_MS);
       log(`[diagnostics] window open until ${new Date(until).toISOString()}`);
     }
+    // A bare boolean flag that swallowed a following token would read as a
+    // string and, being `!== true`, silently disable the fully-closed state the
+    // operator meant to turn on — the wrong direction for a security posture
+    // flag. Fail loudly instead of enforcing less than was asked.
+    if (typeof flags["require-target-binding"] === "string") {
+      fail("--require-target-binding takes no value — write it bare to refuse every un-targeted hail");
+    }
+
     // Off unless named: a page you did not write should not be able to admit
     // peers, and the page this daemon serves is same-origin anyway.
     const allowedOrigins =

@@ -59,6 +59,14 @@ test("the CLI loads and its common commands run", async () => {
     assert.notEqual((await hail(state, ["add", "y", "--until", "2h"])).code, 0);
     assert.notEqual((await hail(state, ["profiles", "add", "trusted", "--allows", "hail"])).code, 0);
     assert.notEqual((await hail(state, ["add", "z", "--key", ""])).code, 0);
+
+    // A security-posture boolean flag that swallowed a value must fail loudly,
+    // not silently disable itself: `--require-target-binding yes` reads as the
+    // string "yes", which is `!== true`, so without the guard the operator would
+    // believe they closed the door and left it open.
+    const trap = await hail(state, ["daemon", "--require-target-binding", "yes"]);
+    assert.notEqual(trap.code, 0, "a value on the bare flag is refused, not quietly ignored");
+    assert.match(trap.out, /takes no value/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
