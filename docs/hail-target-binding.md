@@ -26,6 +26,18 @@ What was **not** built: the cheaper `callPeer` provenance-plus-shape interim
 credential meaningless off-target rather than merely hard to misdeliver — so the
 interim is left as documented composable defence-in-depth, not a shipped path.
 
+**One operational limit worth stating.** The downgrade guard is fed by `walk`,
+which the CLI runs and persists; the long-running daemon adopts disk state only
+through its change/reload path, not by re-reading behind itself. So after a
+`hail walk` first learns that caller X binds, a running daemon keeps tolerating a
+`to`-less hail from X until it next applies a change or reloads. The guard is the
+*downgrade* backstop, not the primary defence — the always-checked present-`to`
+rule and the day-one grant rule need no such freshness — but a deployment that
+leans on the sticky guard should walk on a schedule (or reload after one) rather
+than assume the daemon learns support on its own. Closing this properly (a timed
+re-adopt, or the daemon walking itself) is a follow-up, noted here so it is not
+mistaken for already-live.
+
 The design below is kept as the record of why each choice is what it is.
 
 ## The leak

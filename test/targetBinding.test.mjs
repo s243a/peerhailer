@@ -20,7 +20,7 @@ import { createDirectory } from "../src/directory.js";
 import { generateIdentity, signPayload, fingerprint } from "../src/identity.js";
 import { mintGrant } from "../src/grants.js";
 import { callPeer, hailPeer } from "../src/hail.js";
-import { TARGET_BINDING_VERSION } from "../src/peerRecord.js";
+import { makePeerRecord, mergePeerRecord, publicRecord, TARGET_BINDING_VERSION } from "../src/peerRecord.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 
 /** Stand up a daemon that admits `caller` under a hail-able profile. */
@@ -195,6 +195,42 @@ test("a keyless target gets a to-less hail — the one path binding cannot cover
   } finally {
     await daemon.close();
   }
+});
+
+test("a routine address update does not clear the downgrade guard", async () => {
+  // `hail add <known-peer> <new-address>` re-admits an existing peer. The sticky
+  // support observation must survive it, or the guard silently reopens until the
+  // next walk. (Kimi review, finding 2.)
+  const caller = generateIdentity();
+  const { directory, url, daemon } = await daemonThatKnows(caller.publicKey);
+  try {
+    directory.noteBinding("caller", TARGET_BINDING_VERSION);
+    assert.equal(directory.get("caller").bindingSeen, TARGET_BINDING_VERSION, "known to bind");
+
+    // Update the peer's route, exactly as an operator would after it moved.
+    directory.admit({ name: "caller", publicKey: caller.publicKey, addresses: [{ transport: "lan", value: "http://moved:9" }] });
+    assert.equal(directory.get("caller").bindingSeen, TARGET_BINDING_VERSION, "the guard survived the address update");
+
+    // And it still bites: a to-less hail from that caller is refused.
+    assert.notEqual(await post(url, hail(caller, "caller", null)), 200, "to-less still refused after re-admit");
+  } finally {
+    await daemon.close();
+  }
+});
+
+test("a gossip merge keeps the advertised version, so support keeps propagating", async () => {
+  // `mergePeerRecord` used to drop `v`, so the first `learnFrom` merge erased a
+  // peer's support signal and this machine stopped gossiping it. (Kimi finding 2.)
+  const mine = makePeerRecord({ name: "p", publicKey: generateIdentity().publicKey, v: 1 });
+  const theirs = { name: "p", addresses: [{ transport: "lan", value: "http://x:1" }] }; // no v
+  const merged = mergePeerRecord(mine, theirs);
+  assert.equal(merged.v, 1, "our known version is not erased by a version-less gossip record");
+
+  // And max wins when both carry one.
+  const higher = mergePeerRecord(makePeerRecord({ name: "p", v: 1 }), { name: "p", v: 2 });
+  assert.equal(higher.v, 2, "the higher advertised version wins the merge");
+  // publicRecord then carries it back onto the wire.
+  assert.equal(publicRecord(merged).v, 1, "and it survives back out through publicRecord");
 });
 
 test("the self record advertises the binding version, signed and sticky by max", async () => {

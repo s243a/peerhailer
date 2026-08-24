@@ -359,7 +359,11 @@ export function createDaemon({
     const to = claim.to;
     const carriesGrant = Boolean(body?.grant);
     if (typeof to === "string" && to.length > 0) {
-      if (selfFingerprint && to !== selfFingerprint) {
+      // Fail closed if we cannot check it: a present `to` we cannot compare
+      // (no identity of our own) is refused, not waved through. Such a daemon
+      // cannot sign a hail response either, so this only ever bites a degenerate
+      // setup — in the safe direction.
+      if (!selfFingerprint || to !== selfFingerprint) {
         return debugRefusal(`hail from ${claim.name} was addressed to another peer`, claim.name);
       }
     } else if (carriesGrant) {

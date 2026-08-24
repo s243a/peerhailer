@@ -160,6 +160,11 @@ export function createDirectory(state = {}) {
       ...merged,
       profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
       ...(existing?.conflicts?.length ? { conflicts: existing.conflicts } : {}),
+      // The support observation is monotone: re-attach it here, or a routine
+      // address update (`hail add <known-peer> <new-address>`) would silently
+      // clear the downgrade guard until the next verified walk. `merged` came
+      // from `mergePeerRecord`, which does not carry this stored-only field.
+      ...(existing?.bindingSeen ? { bindingSeen: existing.bindingSeen } : {}),
       ...elevation,
     };
     admitted.set(withProfile.name, withProfile);

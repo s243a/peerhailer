@@ -311,7 +311,24 @@ export function mergePeerRecord(mine, theirs) {
     addresses: normalizeAddresses([...merged.values()]),
     lastSeen: Math.max(mine.lastSeen ?? 0, theirs.lastSeen ?? 0) || null,
     ...(mine.note ? { note: mine.note } : theirs.note ? { note: theirs.note } : {}),
+    // The advertised version rides the merge by `max`, so a gossip merge does
+    // not erase it and stop this machine from propagating the peer's support to
+    // the rest of the fleet. Monotone, like every read of this signal.
+    ...(mergedVersion(mine.v, theirs.v) > 0 ? { v: mergedVersion(mine.v, theirs.v) } : {}),
   };
+}
+
+/**
+ * The higher of two advertised versions, or 0 if neither is a positive integer.
+ *
+ * @param {unknown} mineV
+ * @param {unknown} theirsV
+ * @returns {number}
+ */
+function mergedVersion(mineV, theirsV) {
+  const a = Number.isInteger(mineV) && /** @type {number} */ (mineV) > 0 ? /** @type {number} */ (mineV) : 0;
+  const b = Number.isInteger(theirsV) && /** @type {number} */ (theirsV) > 0 ? /** @type {number} */ (theirsV) : 0;
+  return Math.max(a, b);
 }
 
 /**
