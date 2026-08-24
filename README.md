@@ -115,12 +115,18 @@ the case that catches people out — a peer reachable over Tailscale and not ove
 the LAN, because a default-DROP firewall accepts the tunnel's own chain and
 nothing else.
 
-## Three rules it will not bend
+## Four rules it will not bend
 
 **Records carry no credentials.** A record travels to every peer that asks, so
 anything secret in it is replicated everywhere. A directory entry says a machine
 exists and where it answered — proving you may talk to it happens per
 connection, not by handing out a token that opens a shell.
+
+**A hail is bound to its target.** A signed hail names the peer it was meant for
+— `to = fingerprint(their key)` — and a receiver refuses one addressed
+elsewhere. So a hail captured at one peer is inert replayed at another, even one
+that also holds your key: the credential authenticates *you to that peer*, not to
+whoever intercepts it. See [docs/hail-target-binding.md](docs/hail-target-binding.md).
 
 **Trust does not travel with a peer list.** A peer naming another tells you it
 exists, not that you should talk to it. Names you hear become *candidates*;
@@ -137,6 +143,27 @@ A peer on a tailnet and a peer reachable only over a private mesh are two
 records with different transports. peerhailer resolves a name to a route and
 does not care which kind it is — LAN, Tailscale, tinc, a relay. Discovery and
 transport are separate concerns, so no particular overlay becomes a dependency.
+
+## Encrypted arrival
+
+Some capabilities — a shell, a tunnel — are served **only where arrival is
+encrypted**, and refused on a plaintext listener. How an arrival becomes
+encrypted is declared per interface when the daemon starts:
+
+- `--hail-on <iface>` — plaintext. The hello protocol rides here; sensitive
+  routes do not.
+- `--hail-on-encrypted <iface>` — you assert the link is already encrypted: a
+  tailnet's WireGuard, or `127.0.0.1` behind `tailscale serve`. Never a bare LAN
+  interface.
+- `--hail-on-tls <iface>` — peerhailer terminates its own TLS, pinned to the
+  peer's key, so a **direct LAN link** is encrypted with no tailnet in the path.
+
+The pin is mutual — the caller pins the server's key before its signed hail
+leaves, and the server requires the caller's own vouched client cert — so it
+needs no CA and no browser trust: self-signed between peers is the point, and a
+replayed hail over an attacker's socket is refused for want of that cert. A real
+(Let's Encrypt) cert is an option only for the browser case. Design and flags in
+[docs/tls.md](docs/tls.md).
 
 ## Use
 
@@ -288,7 +315,8 @@ listening TCP service can only hide so much.
 ## Status
 
 Early. The directory, the hello protocol, the daemon and the CLI work and are
-tested; the covert transport described in the proposal is not built.
+tested. Encrypted peer-to-peer arrival (pinned, mutual TLS) and target-bound
+hails are built; the covert transport described in the proposal is not.
 
 ## Provenance
 
