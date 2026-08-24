@@ -18,6 +18,7 @@
 import { signPayload } from "./identity.js";
 import { makePeerRecord, orderForDialing, verifyRecord } from "./peerRecord.js";
 import { INTRODUCE } from "./profiles.js";
+import { pinnedFetch } from "./pinnedFetch.js";
 
 /**
  * What a hail says about itself.
@@ -90,12 +91,25 @@ export async function callPeer(record, path, body = {}, { fetchImpl = fetch, tim
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetchImpl(`${address.value.replace(/\/$/, "")}${path}`, {
+      const url = `${address.value.replace(/\/$/, "")}${path}`;
+      const init = {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...body, ...hailBody(as) }),
         signal: controller.signal,
-      });
+      };
+      let response;
+      if (url.startsWith("https:")) {
+        // TLS: pin the server to the key we hold before the signed body leaves.
+        // A peer we cannot pin does not get our credential.
+        if (!peer.publicKey) {
+          failures.push(`${address.value}: no key held to pin this TLS peer`);
+          continue;
+        }
+        response = await pinnedFetch(url, init, peer.publicKey);
+      } else {
+        response = await fetchImpl(url, init);
+      }
       if (!response.ok) {
         failures.push(`${address.value}: HTTP ${response.status}`);
         continue;

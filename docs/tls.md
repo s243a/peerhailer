@@ -1,11 +1,15 @@
 # TLS, pinned to the peer's key
 
-**Status: designed; the Node stdlib spike is done and green.** The thing that
-makes tunnels work off the tailnet — and the one place this project uses
-cryptography it did not already have, so the design is deliberately conservative.
-The one unknown ("does Node's stdlib do what RFC 8410 says") was run before
-writing more; results and the corrections they forced are in
-[Spike results](#spike-results-done).
+**Status: a first version is built.** `src/cert.js` (the pure-Node cert + the
+pin), `src/pinnedFetch.js` (the client side), and `--hail-on-tls <iface>` on the
+daemon, which serves pinned TLS on a LAN interface — the handshake makes the
+arrival encrypted, so a shell or tunnel runs there off any tailnet, and the
+caller pins the server's key before its signed hail leaves. What is *not* yet
+built: the certified **subkey** (this version reuses the identity key as the cert
+key — see the module note in `src/cert.js`), and **mutual** pinning (the server
+requests the client cert but does not yet pin it; the hail signature still
+authenticates the caller). The spike that de-risked all of this is below; the
+design remains the target the subkey and mTLS steps complete.
 
 ## What it is for
 

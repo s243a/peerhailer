@@ -546,17 +546,22 @@ switch (command) {
     };
     const plainHosts = resolveHosts(flags["hail-on"]);
     const encryptedHosts = resolveHosts(flags["hail-on-encrypted"]);
-    const hosts = [...plainHosts, ...encryptedHosts];
+    // `--hail-on-tls` serves pinned TLS: the handshake makes the arrival
+    // encrypted, so the operator never asserts it — this is how a shell or
+    // tunnel runs on a LAN off any tailnet.
+    const tlsHosts = resolveHosts(flags["hail-on-tls"]);
+    const hosts = [...plainHosts, ...encryptedHosts, ...tlsHosts];
 
     if (plainHosts.length && Object.keys(declaredShells).length) {
       log("[daemon] WARNING: shells are declared, but --hail-on interfaces are plaintext —");
-      log("[daemon]          shell routes are NOT served there. Move an interface to");
-      log("[daemon]          --hail-on-encrypted only if its arrival is encrypted (a tailnet,");
-      log("[daemon]          pinned TLS). A plaintext shell is never offered.");
+      log("[daemon]          shell routes are NOT served there. Use --hail-on-tls to serve them");
+      log("[daemon]          over pinned TLS, or --hail-on-encrypted for a tailnet. A plaintext");
+      log("[daemon]          shell is never offered.");
     }
     const hailPort = Number.isFinite(port) ? port : 8787;
     if (plainHosts.length) await daemon.listenHail({ port: hailPort, hosts: plainHosts, encrypted: false });
     if (encryptedHosts.length) await daemon.listenHail({ port: hailPort, hosts: encryptedHosts, encrypted: true });
+    if (tlsHosts.length) await daemon.listenHail({ port: hailPort, hosts: tlsHosts, tls: true });
     if (!wantsUi && hosts.length === 0) {
       log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");
     }
@@ -929,6 +934,7 @@ switch (command) {
         "                                  reason a browser can reach this daemon at all)",
         "    ... --hail-on wlan0,tailscale0  answer hails there too; the page stays local",
         "    ... --hail-on-encrypted tailscale0  hails on an interface whose arrival is encrypted (serves shells)",
+        "    ... --hail-on-tls eth0        hails over pinned TLS on a LAN interface (serves shells, no assertion)",
         "    ... --chat                 accept short messages from peers holding `chat`",
         "    ... --allow-origin URL    let another page use the local API (off by default)",
         "    ... --debug [minutes]      open a diagnostics window that closes itself",

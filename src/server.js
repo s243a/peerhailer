@@ -21,8 +21,10 @@
  * @module server
  */
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 
 import { normalizeKey, sameKey, verifyPayload } from "./identity.js";
+import { selfSignedCert } from "./cert.js";
 import { signRecord } from "./peerRecord.js";
 import { collectRoutes, REFUSE } from "./plugins.js";
 import { verifyGrant } from "./grants.js";
@@ -815,13 +817,21 @@ export function createDaemon({
      * not exist. Default false, so the fail-closed direction is the one an
      * operator gets without saying anything.
      *
-     * @param {{port?: number, hosts: string[], encrypted?: boolean}} options
+     * @param {{port?: number, hosts: string[], encrypted?: boolean, tls?: boolean}} options
      */
-    listenHail: async ({ port = 8787, hosts, encrypted = false }) => {
+    listenHail: async ({ port = 8787, hosts, encrypted = false, tls = false }) => {
       /** @type {{host: string, port: number}[]} */
       const bound = [];
+      // A pinned-TLS listener *is* an encrypted arrival — the handshake proves it,
+      // so the operator no longer asserts `encrypted` for it. The cert is this
+      // machine's identity key, self-signed; a caller pins it against the key it
+      // holds. `requestCert` invites the client's cert too, for a later mutual
+      // pin; not required now, since the hail signature authenticates the caller.
+      const tlsOptions = tls ? { ...selfSignedCert(identity), requestCert: true, rejectUnauthorized: false } : null;
       for (const host of hosts) {
-        const server = createServer(handlerFor("hail", { encryptedArrival: encrypted }));
+        const server = tlsOptions
+          ? createHttpsServer(tlsOptions, handlerFor("hail", { encryptedArrival: true }))
+          : createServer(handlerFor("hail", { encryptedArrival: encrypted }));
         try {
           await new Promise((resolve, reject) => {
             server.once("error", reject);
@@ -830,7 +840,7 @@ export function createDaemon({
           const address = /** @type {import("node:net").AddressInfo} */ (server.address());
           hailServers.push(server);
           bound.push({ host, port: address.port });
-          log(`[daemon] hails on http://${host}:${address.port}`);
+          log(`[daemon] hails on ${tlsOptions ? "https" : "http"}://${host}:${address.port}${tlsOptions ? " (pinned TLS)" : ""}`);
         } catch (error) {
           log(`[daemon] not listening on ${host}: ${error instanceof Error ? error.message : error}`);
         }
