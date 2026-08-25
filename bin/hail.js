@@ -32,6 +32,7 @@ import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
+import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel } from "../src/tunnelClient.js";
 import { collectProfiles, collectRoutes, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
@@ -761,6 +762,68 @@ switch (command) {
     break;
   }
 
+  case "tunnel": {
+    // Drive a tunnel to a peer's declared endpoint (client side), distinct from
+    // `tunnels` which declares one on this machine. `pipe` is the point: it
+    // pumps this process's stdio through the tunnel, so a tool that spawns
+    // `hail tunnel <peer> <name> pipe` reaches the remote endpoint as if it were
+    // local — the relay for driving a `bridge --listen` on another machine from
+    // T3 here. open/send/poll/close are the low-level pieces, for scripting.
+    const [peerName, name, action, ...more] = rest;
+    if (!peerName || !name || !action) {
+      fail("usage: hail tunnel <peer> <name> <pipe|open|send|poll|close> [args]");
+    }
+    const record = directory.get(peerName);
+    if (!record) fail(`unknown peer ${peerName} — see hail peers`);
+    const as = { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey };
+    const call = (path, body) => callPeer(record, path, body, { as });
+    const need = (result) => {
+      if (!result.ok) fail(result.error);
+      return result.response;
+    };
+
+    if (action === "pipe") {
+      // stdout is the data channel, so every log goes to stderr. Runs until this
+      // process's stdin ends or the far endpoint closes.
+      const result = await pipeTunnel(
+        call,
+        name,
+        { input: process.stdin, output: process.stdout },
+        { log: (m) => process.stderr.write(`${m}\n`) },
+      );
+      if (!result.ok) fail(result.error);
+      process.exit(0);
+    }
+    if (action === "open") {
+      const res = need(await openTunnel(call, name));
+      log(`id: ${res.id}`);
+      log(`then: hail tunnel ${peerName} ${name} send ${res.id} "<text>"  |  poll ${res.id}  |  close ${res.id}`);
+      break;
+    }
+    const id = more[0];
+    if (action === "send") {
+      if (!id) fail(`usage: hail tunnel ${peerName} ${name} send <id> <text...>`);
+      need(await sendTunnel(call, name, id, more.slice(1).join(" ")));
+      log("sent");
+      break;
+    }
+    if (action === "poll") {
+      if (!id) fail(`usage: hail tunnel ${peerName} ${name} poll <id>`);
+      const res = need(await pollTunnel(call, name, id));
+      if (res.data) process.stdout.write(Buffer.from(res.data, "base64").toString());
+      if (res.closed) log(`\n[tunnel closed${res.error ? `: ${res.error}` : ""}]`);
+      break;
+    }
+    if (action === "close") {
+      if (!id) fail(`usage: hail tunnel ${peerName} ${name} close <id>`);
+      need(await closeTunnel(call, name, id));
+      log("closed");
+      break;
+    }
+    fail(`unknown tunnel action ${action} — pipe|open|send|poll|close`);
+    break;
+  }
+
   case "shells": {
     const [action, name] = rest;
     const declared = stored.shells ?? {};
@@ -1109,6 +1172,7 @@ switch (command) {
         "  hail gate set-password       gate a local web app behind a password, for a browser",
         "  hail gate serve --target U   serve that app over TLS at --port N (a bastion for e.g. T3)",
         "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
+        "  hail tunnel <peer> <name> pipe  pipe stdio through a peer's tunnel endpoint (e.g. a remote bridge)",
         "  hail plugins [add|remove M]  services this machine offers beyond the core",
         "  hail profiles                what each profile grants, and how it refuses",
         "    ... add <name> --allows a,b   define one",
