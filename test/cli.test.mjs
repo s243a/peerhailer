@@ -104,3 +104,32 @@ test("the page is off by default, and says so", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a daemon boots with a tunnel declared — the port-in-TDZ crash stays fixed", async () => {
+  // The tunnel plugin refuses a tunnel to the daemon's own port, so it reads
+  // `--port` while the plugin list is built. That declaration used to come
+  // *after* the list, so a configured tunnel crashed startup with
+  // "Cannot access 'port' before initialization". Only tunnels trip it.
+  const dir = mkdtempSync(join(tmpdir(), "peerhailer-tun-"));
+  const state = join(dir, "directory.json");
+  await hail(state, ["name", "host"]);
+  await hail(state, ["tunnels", "add", "acp", "127.0.0.1:9100"]);
+  const boot = () =>
+    new Promise((resolve) => {
+      const child = execFile(process.execPath, [CLI, "--state", state, "daemon", "--port", "0", "--hail-on", "127.0.0.1"], () => {});
+      let out = "";
+      child.stdout?.on("data", (c) => (out += c));
+      child.stderr?.on("data", (c) => (out += c));
+      setTimeout(() => {
+        child.kill();
+        resolve(out);
+      }, 1500);
+    });
+  try {
+    const out = await boot();
+    assert.doesNotMatch(out, /Cannot access 'port'|ReferenceError/, "the plugin list no longer reaches port in its TDZ");
+    assert.match(out, /\[tunnel\] acp/, "the tunnel loaded and the daemon came up");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

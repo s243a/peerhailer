@@ -446,6 +446,11 @@ switch (command) {
     // Declared endpoints become a tunnel plugin; declare none and the routes do
     // not exist, which is the difference between a service being refused and a
     // service not being there.
+    // Declared before the plugin list because the tunnel plugin needs it (to
+    // refuse a tunnel to the daemon's own port). It used to be declared after,
+    // which only crashed once a tunnel was configured — the plugin array reached
+    // `port` in its temporal dead zone.
+    const port = Number(flags.port ?? 8787);
     const tunnels = stored.tunnels ?? {};
     const declaredCommands = stored.commands ?? {};
     const declaredServices = stored.services ?? {};
@@ -553,7 +558,6 @@ switch (command) {
       };
     };
 
-    const port = Number(flags.port ?? 8787);
     const daemon = createDaemon({
       directory,
       identity,
