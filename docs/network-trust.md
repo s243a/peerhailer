@@ -195,6 +195,51 @@ no peer is re-admitted, no capability is re-granted. A listener's label goes fro
 plaintext to encrypted because something was configured, and the capability
 follows.
 
+## Encrypted by default, and why plaintext cannot cross a relay
+
+The listener's label decides whether a marked capability is served there — but
+the *default* is the safe one. A route is served only where arrival is encrypted
+**unless the plugin declares otherwise** (`requiresEncryptedArrival`, resolved in
+`plugins.js`): a capability that carries content and forgets to say so fails safe
+— refused on a plaintext listener rather than served in the clear. Plaintext is a
+deliberate opt-out (`false`), which only the discovery layer (`hail`/`directory`)
+takes, since a record carries no secrets and hailing must work before any
+encrypted channel exists.
+
+That opt-out is a property of a **direct** arrival, and it is the one thing that
+must **not** survive a relay. The two are not symmetric, and the reason is worth
+stating precisely.
+
+A direct link is one hop. If it is encrypted — Tailscale's WireGuard, or pinned
+TLS — the two endpoints are the only parties to the conversation, and an operator
+who declares `false` on a trusted direct segment is making a judgement about that
+one segment. A relay is not one hop. The **transit** node terminates the
+transport it received on and originates a new one onward; it is a *legitimate
+endpoint* of each hop, not a bystander the hop's encryption hides things from. So
+per-hop WireGuard, which seals a direct link end to end, seals *nothing past the
+relay*: at the transit node the payload is decrypted from the inbound hop and
+re-encrypted onto the outbound one, and in between it is plaintext the relay can
+read — and forge.
+
+What keeps a relay honest is encryption **the relay merely forwards**: an
+end-to-end layer (TLS pinned to the *exit's* key, presented by the *origin*) that
+the transit node carries as sealed bytes it cannot open — the "dumb forwarder."
+That is why a relayed capability's encryption is **mandatory and not
+opt-out-able**. `requiresEncryptedArrival: false` says "this one direct segment is
+trusted," which is a claim nobody can make on the origin's behalf about a path
+through someone else's box. So the rule is simply: **the plaintext opt-out does
+not cross a relay.** A capability served `false` directly is still end-to-end
+sealed the instant it is relayed, or it is not relayed at all.
+
+This composes with the exit/origin model above: the exit checks the *origin's*
+signature, not the last hop, and the origin seals the payload to the *exit's*
+key; the transit node reads neither, spending only its bandwidth to forward
+sealed bytes for a peer it granted `RELAY`. None of the relaying is built yet
+(see [acp-tunnel.md](acp-tunnel.md), "designed, not built") — this is written now
+so the invariant is fixed before the code that must honour it exists, and in
+particular so the plaintext opt-out added for direct arrivals is never quietly
+extended across a hop.
+
 ## Where a peer has been, and what to do about it
 
 Everything above is about the wire between two machines. A different worry sits

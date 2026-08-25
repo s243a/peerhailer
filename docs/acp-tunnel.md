@@ -183,6 +183,14 @@ identity the daemon vouches for, and bytes it cannot read. Without that, the
 bridge sees anonymous bytes arriving on a local socket and cannot tell a phone
 from anything else on the machine.
 
+The seal is **not optional for a relayed capability.** A direct arrival may be
+declared plaintext-safe (`requiresEncryptedArrival: false`) — a judgement about
+one trusted segment — but that opt-out does not survive a hop: a transit node
+terminates the transport and would otherwise read the payload in the clear. So a
+relayed capability is end-to-end sealed regardless of any direct-arrival opt-out,
+or it does not relay. See
+[network-trust.md](network-trust.md#encrypted-by-default-and-why-plaintext-cannot-cross-a-relay).
+
 **The identity that crosses is the key, never the name.** A name is a label the
 model deliberately allows two machines to share, and a rename must not transfer a
 policy decision to a different machine. The bridge keys its source axis on the
