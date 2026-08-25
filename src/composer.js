@@ -1,0 +1,239 @@
+/**
+ * The session composer: one-click launch of a local T3 instance whose model is a
+ * coding agent driven through mcp-acp-bridge, with a configurable supervision gate
+ * and an optional password bastion.
+ *
+ * v1 is local-first (self as the node): everything runs on this machine, so there
+ * are no tunnels and no bridge changes. The composer only ever spawns and tracks
+ * local child processes — a T3 server and (optionally) a gate — the same shape the
+ * service plugin uses for the processes a peer may start.
+ *
+ * The worker's tool-call gate is the bridge's MCP supervisor seat
+ * (`--supervisor-mcp`), which only exists when the bridge runs over stdio — which
+ * it does, because T3's ACP provider spawns it. The seat prints its loopback URL
+ * to the bridge's stderr, so the provider command redirects that stderr to a file
+ * this module reads back: a Claude Code MCP client points at that URL to review.
+ */
+import { spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir, homedir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { createServer as createHttpsServer } from "node:https";
+
+import { createGate } from "./gate.js";
+import { selfSignedCert } from "./cert.js";
+
+/** The agents mcp-acp-bridge can drive (mirrors its adapters; see docs/agents.md). */
+export const KNOWN_AGENTS = [
+  "codex-mcp",
+  "codex",
+  "claude",
+  "agy",
+  "agy-gated",
+  "agy-dual-gated",
+  "agy-sandboxed",
+];
+
+const GATE_PORT = 8443;
+
+/**
+ * @param {{
+ *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
+ *   identity?: any,
+ *   log?: (m: string) => void,
+ * }} [options]
+ */
+export function createComposer({ gateConfig = () => null, identity, log = () => {} } = {}) {
+  const bridgePath =
+    process.env.MCP_ACP_BRIDGE || join(homedir(), "Projects/mcp-acp-bridge/bin/bridge.js");
+  // Default T3 launcher: an explicit T3CODE_CMD wins; else the local t3code
+  // source bin if it is present (this repo runs it with `node src/bin.ts`); else
+  // a global `npx t3`.
+  const localT3 = join(homedir(), "Projects/t3code/apps/server/src/bin.ts");
+  const t3Cmd = (process.env.T3CODE_CMD || (existsSync(localT3) ? `node ${localT3}` : "npx t3"))
+    .split(/\s+/)
+    .filter(Boolean);
+  /** launchId -> {home, ws, seatLog, t3, origin, pairingUrl, gate} */
+  const launches = new Map();
+
+  function agents() {
+    return {
+      agents: KNOWN_AGENTS,
+      bridgePath,
+      t3Cmd: t3Cmd.join(" "),
+      gateConfigured: Boolean(gateConfig()),
+    };
+  }
+
+  /**
+   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string}} spec
+   */
+  async function launch({ agent, supervision = "none", gate = false, cwd } = {}) {
+    if (!KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
+    if (gate && !gateConfig())
+      throw badRequest("no gate password set — run: hail gate set-password", 502);
+
+    const launchId = randomUUID();
+    const home = mkdtempSync(join(tmpdir(), "composer-t3-"));
+    const ws = cwd && existsSync(cwd) ? cwd : join(home, "ws");
+    mkdirSync(join(home, "userdata"), { recursive: true });
+    if (ws.startsWith(home)) mkdirSync(ws, { recursive: true });
+    const seatLog = join(home, "seat.log");
+
+    // T3's ACP provider = the worker bridge. Under MCP supervision the bridge
+    // runs `--supervisor-mcp` and we tee its stderr (where the seat URL prints)
+    // into seatLog via `sh -c`; otherwise it is spawned directly.
+    const bridgeArgs = ["--agent", agent, "--cwd", ws];
+    let config;
+    if (supervision === "mcp") {
+      bridgeArgs.push("--supervisor-mcp");
+      const inner = ["node", bridgePath, ...bridgeArgs].map(shq).join(" ");
+      config = { command: "sh", args: ["-c", `exec ${inner} 2>> ${shq(seatLog)}`] };
+    } else {
+      config = { command: "node", args: [bridgePath, ...bridgeArgs] };
+    }
+    writeFileSync(
+      join(home, "userdata", "settings.json"),
+      JSON.stringify(
+        {
+          providerInstances: {
+            relay: { driver: "acp", enabled: true, displayName: "Composer worker", config },
+          },
+        },
+        null,
+        2,
+      ),
+    );
+
+    // Spawn the T3 server in its own process group (so stop kills the whole tree).
+    const [cmd, ...rest] = t3Cmd;
+    const t3 = spawn(cmd, [...rest, "serve", "--host", "127.0.0.1", "--no-browser"], {
+      cwd: ws,
+      env: { ...process.env, T3CODE_HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    let t3out = "";
+    const capture = (d) => {
+      t3out += d;
+    };
+    t3.stdout.setEncoding("utf8");
+    t3.stdout.on("data", capture);
+    t3.stderr.setEncoding("utf8");
+    t3.stderr.on("data", capture);
+    t3.on("exit", (code) => log(`[composer] t3 for ${launchId} exited (${code})`));
+
+    // Wait for it to report its origin (written to server-runtime.json).
+    const runtimePath = join(home, "userdata", "server-runtime.json");
+    let origin = null;
+    for (let i = 0; i < 60 && !origin; i++) {
+      await sleep(500);
+      if (existsSync(runtimePath)) {
+        try {
+          origin = JSON.parse(readFileSync(runtimePath, "utf8")).origin ?? null;
+        } catch {}
+      }
+      if (t3.exitCode !== null && !origin) {
+        kill(t3);
+        throw badRequest(`t3 exited before serving (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
+      }
+    }
+    if (!origin) {
+      kill(t3);
+      throw badRequest(`t3 did not report an origin (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
+    }
+    const pairingUrl = (t3out.match(/pairing\s*url:?\s*(\S+)/i) || t3out.match(/(https?:\/\/\S*pair\S*)/) || [])[1] || null;
+
+    const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: null };
+    launches.set(launchId, entry);
+
+    let gateUrl = null;
+    if (gate) {
+      const g = gateConfig();
+      const proxy = createGate({ target: origin, passwordHash: g.passwordHash, secret: g.secret, log });
+      const server = createHttpsServer(selfSignedCert(identity), proxy.onRequest);
+      server.on("upgrade", proxy.onUpgrade);
+      await new Promise((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(GATE_PORT, "127.0.0.1", () => resolve(undefined));
+      });
+      entry.gate = server;
+      gateUrl = `https://127.0.0.1:${GATE_PORT}`;
+    }
+
+    log(`[composer] launched ${launchId}: ${agent} → ${origin}${gateUrl ? ` (gated ${gateUrl})` : ""}`);
+    return { launchId, agent, supervision, t3Url: origin, pairingUrl, gateUrl, seatLog };
+  }
+
+  /** The supervisor seat URL, once T3 has activated the worker (bridge spawned). */
+  function seat(launchId) {
+    const entry = launches.get(launchId);
+    if (!entry) return { error: "no such launch" };
+    let seatUrl = null;
+    try {
+      const m = readFileSync(entry.seatLog, "utf8").match(/connect a supervisor MCP client at\s+(\S+)/);
+      if (m) seatUrl = m[1];
+    } catch {}
+    return seatUrl
+      ? { seatUrl }
+      : { seatUrl: null, hint: "open a thread in T3 with the 'Composer worker' provider to activate the supervisor seat" };
+  }
+
+  async function stop(launchId) {
+    const entry = launches.get(launchId);
+    if (!entry) return { stopped: false };
+    launches.delete(launchId);
+    kill(entry.t3);
+    entry.gate?.close();
+    try {
+      rmSync(entry.home, { recursive: true, force: true });
+    } catch {}
+    return { stopped: true };
+  }
+
+  function closeAll() {
+    for (const id of [...launches.keys()]) void stop(id);
+  }
+
+  function list() {
+    return {
+      launches: [...launches.entries()].map(([id, e]) => ({
+        launchId: id,
+        t3Url: e.origin,
+        gated: Boolean(e.gate),
+      })),
+    };
+  }
+
+  return { agents, launch, seat, stop, list, closeAll };
+}
+
+function kill(child) {
+  if (!child || child.exitCode !== null || child.signalCode) return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Single-quote a token for `sh -c`, escaping embedded quotes. */
+function shq(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+function tail(text, n = 600) {
+  return String(text).slice(-n);
+}
+
+function badRequest(message, status = 400) {
+  const error = new Error(message);
+  // @ts-expect-error tag for the route to map to an HTTP status
+  error.status = status;
+  return error;
+}

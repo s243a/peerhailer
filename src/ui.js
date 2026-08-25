@@ -51,6 +51,11 @@ export function renderPage(self) {
   .gate { display: inline-block; margin-left: .4rem; font-size: .72rem; padding: 0 .35rem; border: 1px solid var(--line); border-radius: .5rem; }
   .gate.no { opacity: .5; text-decoration: line-through; }
   .warn { color: #b00; color: light-dark(#b00, #ff9b9b); }
+  input[type=text], input:not([type]) { font: inherit; font-size: .82rem; background: transparent; color: inherit; border: 1px solid var(--line); border-radius: .4rem; padding: .15rem .35rem; }
+  #composer { border: 1px solid var(--line); border-radius: .55rem; padding: .75rem .85rem; }
+  .cx-row { display: flex; gap: .9rem; align-items: center; flex-wrap: wrap; margin-bottom: .55rem; }
+  .cx-row label { display: flex; gap: .35rem; align-items: center; }
+  #cx-status { margin-top: .5rem; line-height: 1.8; }
 </style>
 </head>
 <body>
@@ -59,6 +64,31 @@ export function renderPage(self) {
   <span class="mono muted" id="fingerprint-value">${escapeHtml(self.fingerprint)}</span>
   <span class="muted" id="clock"></span>
 </header>
+
+<h2>Compose a session</h2>
+<p class="muted" style="margin:.2rem 0 .6rem">
+  Launch a local T3 instance whose model is a bridged coding agent. Optionally
+  supervise its tool calls from your own Claude Code over MCP, and gate the T3 web
+  app behind a password.
+</p>
+<section id="composer">
+  <div class="cx-row">
+    <label>Agent <select id="cx-agent"></select></label>
+    <label>Supervision
+      <select id="cx-sup">
+        <option value="none">None</option>
+        <option value="mcp">MCP seat (my Claude Code)</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="cx-gate"> Password bastion</label>
+  </div>
+  <div class="cx-row">
+    <label>Workspace <input type="text" id="cx-cwd" size="34" placeholder="(a throwaway dir if empty)"></label>
+    <button id="cx-launch">Launch</button>
+    <button id="cx-stop" disabled>Stop</button>
+  </div>
+  <div id="cx-status" class="muted"></div>
+</section>
 
 <h2>Peers</h2>
 <div id="peers"></div>
@@ -321,6 +351,76 @@ $("tree").innerHTML = [
   node("shared", "what a caller receives"),
   node("ran", "what peers have run here"),
 ].join("");
+
+// --- session composer ---
+let cxRes = null, cxSeatTimer = null;
+async function cxLoadAgents() {
+  try {
+    const info = await api("/api/compose/agents");
+    $("cx-agent").innerHTML = info.agents.map((a) => "<option>" + esc(a) + "</option>").join("");
+    const gate = $("cx-gate");
+    gate.disabled = !info.gateConfigured;
+    gate.title = info.gateConfigured ? "" : "run: hail gate set-password";
+  } catch (cause) { $("cx-status").textContent = "could not load agents: " + (cause.message ?? cause); }
+}
+async function cxPost(path, body) {
+  const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error ?? (path + " -> HTTP " + response.status));
+  return data;
+}
+function cxRender(seat) {
+  if (!cxRes) { $("cx-status").textContent = ""; return; }
+  const rows = ['T3: <a href="' + esc(cxRes.t3Url) + '" target="_blank">' + esc(cxRes.t3Url) + "</a>"];
+  if (cxRes.gateUrl) rows.push('Gated: <a href="' + esc(cxRes.gateUrl) + '" target="_blank">' + esc(cxRes.gateUrl) + "</a>");
+  if (cxRes.pairingUrl) rows.push("Pairing: <code>" + esc(cxRes.pairingUrl) + "</code>");
+  if (seat && seat.seatUrl) rows.push("Supervisor seat (point Claude Code here): <code>" + esc(seat.seatUrl) + "</code>");
+  else if (cxRes.supervision === "mcp") rows.push('<span class="muted">' + esc((seat && seat.hint) || "waiting for the supervisor seat…") + "</span>");
+  $("cx-status").innerHTML = rows.join("<br>");
+}
+function cxPollSeat() {
+  if (cxSeatTimer) clearInterval(cxSeatTimer);
+  if (!cxRes || cxRes.supervision !== "mcp") return;
+  const lid = cxRes.launchId;
+  cxSeatTimer = setInterval(async () => {
+    if (!cxRes || cxRes.launchId !== lid) { clearInterval(cxSeatTimer); return; }
+    try {
+      const seat = await api("/api/compose/seat?launchId=" + encodeURIComponent(lid));
+      cxRender(seat);
+      if (seat.seatUrl) clearInterval(cxSeatTimer);
+    } catch (ignore) {}
+  }, 2000);
+}
+async function cxLaunchNow() {
+  $("cx-status").textContent = "launching… (starting a T3 server can take a few seconds)";
+  $("cx-launch").disabled = true;
+  try {
+    cxRes = await cxPost("/api/compose/launch", {
+      agent: $("cx-agent").value,
+      supervision: $("cx-sup").value,
+      gate: $("cx-gate").checked,
+      cwd: $("cx-cwd").value.trim() || undefined,
+    });
+    $("cx-stop").disabled = false;
+    cxRender(null);
+    cxPollSeat();
+  } catch (cause) {
+    $("cx-status").textContent = "launch failed: " + (cause.message ?? cause);
+    $("cx-launch").disabled = false;
+  }
+}
+async function cxStopNow() {
+  if (cxSeatTimer) clearInterval(cxSeatTimer);
+  const lid = cxRes && cxRes.launchId;
+  cxRes = null;
+  $("cx-launch").disabled = false; $("cx-stop").disabled = true;
+  $("cx-status").textContent = "stopping…";
+  try { if (lid) await cxPost("/api/compose/stop", { launchId: lid }); } catch (ignore) {}
+  $("cx-status").textContent = "stopped";
+}
+$("cx-launch").addEventListener("click", cxLaunchNow);
+$("cx-stop").addEventListener("click", cxStopNow);
+cxLoadAgents();
 
 refresh();
 setInterval(refresh, 5000);
