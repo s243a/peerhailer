@@ -404,11 +404,13 @@ tunnel endpoint for each, grant them, and serve over pinned mutual TLS:
 
 ```sh
 # on the agent's machine
-mcp-acp-bridge --agent claude --listen 9100 &        # ACP over a loopback TCP port
-mcp-acp-bridge --agent codex  --listen 9101 &
-hail tunnels add acp-claude 127.0.0.1:9100           # needs tunnel:acp-claude
-hail tunnels add acp-codex  127.0.0.1:9101
-hail profiles add agents --allows hail,tunnel:acp-claude,tunnel:acp-codex   # granted deliberately
+mcp-acp-bridge --agent claude    --listen 9100 &     # ACP over a loopback TCP port
+mcp-acp-bridge --agent codex     --listen 9101 &     # codex via `codex exec` (single-turn, -s read-only)
+mcp-acp-bridge --agent codex-mcp --listen 9103 &     # codex via `codex mcp-server`: native gate + multi-turn
+hail tunnels add acp-claude    127.0.0.1:9100        # needs tunnel:acp-claude
+hail tunnels add acp-codex     127.0.0.1:9101
+hail tunnels add acp-codex-mcp 127.0.0.1:9103
+hail profiles add agents --allows hail,tunnel:acp-claude,tunnel:acp-codex,tunnel:acp-codex-mcp   # granted deliberately
 hail daemon --hail-on-tls tailscale0 --port 7645     # mutual TLS over the tailnet
 ```
 
@@ -425,6 +427,15 @@ wire (mutual TLS), all before a byte reaches the bridge. Swap `acp-claude` for
 `acp-codex` to change agent with **no other change**: T3's config only ever names
 the relay, so local-vs-remote and which-agent are the relay's decision, not T3's.
 Proven end to end — an ACP `initialize` round-trips and the bridge answers.
+
+The `codex-mcp` endpoint is worth calling out: it drives codex through its own
+`codex mcp-server`, so codex asks *the bridge* to approve each shell command and
+patch, and those approvals ride back out as ordinary permission cards — a real
+gate on a remote agent's actions, not just an observed stream. The whole path
+(pinned mutual TLS → granted tunnel → ACP → the codex gate → an allow that runs
+the command → a second turn that recalls the first) is verified on a single
+machine by `npm run test:codex-fabric` in peerhailer, the loopback stand-in for
+the two-machine case.
 
 The bridge binds loopback and carries no auth of its own, deliberately: what may
 reach it is the peerhailer tunnel, and the fabric is what authenticates. Binding
