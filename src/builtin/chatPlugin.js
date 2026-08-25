@@ -87,6 +87,12 @@ export function createChatPlugin({
   return {
     name: "chat",
     description: "Short messages to and from admitted peers, kept in memory.",
+    // Encrypted arrival, refused on plaintext. This is the default now, but
+    // stated explicitly because chat is the reason for it: the fabric cannot know
+    // what a message carries, so it must not decide the content is safe in the
+    // clear — a chat could hold a secret, and a plaintext one can be read or
+    // forged on the wire. Encrypted, not "mutual": fine over a direct tailnet.
+    requiresEncryptedArrival: true,
     capabilities: ["chat"],
 
     routes: [

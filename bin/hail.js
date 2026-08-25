@@ -32,7 +32,7 @@ import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
-import { collectProfiles, loadPlugins } from "../src/plugins.js";
+import { collectProfiles, collectRoutes, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
 import { createGate, hashPassword, newSecret } from "../src/gate.js";
@@ -633,9 +633,17 @@ switch (command) {
     // add …`) that gates its routes is warned about too — otherwise the operator
     // is left exactly where the warning exists to prevent them being: wondering
     // why a declared capability is not answered.
-    const gatedPlugins = plugins
-      .filter((p) => p.requiresEncryptedArrival || (p.routes ?? []).some((r) => r.requiresEncryptedArrival))
-      .map((p) => p.name);
+    // Derived from the *resolved* routes, not the plugin objects: arrival is
+    // encrypted by default now, so a plugin can be gated without carrying a
+    // marker of its own (`collectRoutes` applies the default). A plugin is named
+    // here if any of its routes ends up requiring encryption.
+    const gatedPlugins = [
+      ...new Set(
+        [...collectRoutes(plugins, { log: () => {} }).values()]
+          .filter((r) => r.requiresEncryptedArrival)
+          .map((r) => r.plugin),
+      ),
+    ];
     if (plainHosts.length && gatedPlugins.length) {
       log(`[daemon] WARNING: ${gatedPlugins.join(", ")} require an encrypted arrival, but --hail-on interfaces are`);
       log("[daemon]          plaintext — those routes are NOT served there. Use --hail-on-tls to serve them over");

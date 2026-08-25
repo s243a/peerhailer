@@ -46,7 +46,7 @@
  *     identity: {publicKey: string, privateKey: string},
  *     log: (message: string) => void,
  *   }) => Promise<any> | any,
- *   requiresEncryptedArrival?: boolean | "mutual",
+ *   requiresEncryptedArrival?: boolean | "mutual", // omit = encrypted by default; set false to allow plaintext
  * }} PluginRoute
  */
 
@@ -63,7 +63,7 @@
  *   }>,
  *   init?: (input: {directory: any, identity: any, log: (message: string) => void}) => void,
  *   history?: () => Array<{capability: string, peerKey: string, at: number, outcome: string}>,
- *   requiresEncryptedArrival?: boolean | "mutual",
+ *   requiresEncryptedArrival?: boolean | "mutual", // omit = encrypted by default; set false to allow plaintext
  *   stop?: () => void,
  * }} Plugin
  */
@@ -85,21 +85,33 @@ export const refuse = (reason) => ({ [REFUSE]: true, reason });
 const METHODS = new Set(["GET", "POST", "PUT", "DELETE", "PATCH"]);
 
 /**
- * The stricter of a route-level and a plugin-level arrival requirement.
+ * Resolve a route's arrival requirement from its own and its plugin's markers.
  *
- * Ordered `false` (none) < `true` (encrypted) < `"mutual"`, so merging by the
- * higher rank means a route can only ever tighten, never loosen — the safe
- * direction for a security marker whose whole job is to keep a capability off a
- * weaker arrival.
+ * **Encrypted by default.** When *neither* the route nor the plugin declares
+ * anything, the answer is `true` (encrypted required) — a capability that
+ * carries content and forgets to say so fails *safe*, refused on a plaintext
+ * listener rather than silently served in the clear. Serving plaintext is
+ * therefore a deliberate opt-out: a plugin (or route) must set
+ * `requiresEncryptedArrival: false` on purpose, which is what the discovery
+ * layer (`hail`/`directory`) does, since it carries no secrets and must bootstrap
+ * over plaintext.
+ *
+ * Where both are declared, the *stricter* wins — ordered `false` < `true` <
+ * `"mutual"` — so a route can tighten one endpoint above its plugin's floor but
+ * never loosen below it. `undefined` on one side does not lower the other.
  *
  * @param {boolean | "mutual" | undefined} routeLevel
  * @param {boolean | "mutual" | undefined} pluginLevel
  * @returns {boolean | "mutual"}
  */
-function strictestArrival(routeLevel, pluginLevel) {
-  const rank = (/** @type {boolean | "mutual" | undefined} */ v) => (v === "mutual" ? 2 : v === true ? 1 : 0);
-  const winner = rank(routeLevel) >= rank(pluginLevel) ? routeLevel : pluginLevel;
-  return winner ?? false;
+function resolveArrival(routeLevel, pluginLevel) {
+  // -1 marks "not declared", distinct from an explicit `false` (0) which is the
+  // deliberate plaintext opt-out and must be honored, not defaulted over.
+  const rank = (/** @type {boolean | "mutual" | undefined} */ v) =>
+    v === "mutual" ? 2 : v === true ? 1 : v === false ? 0 : -1;
+  const declared = Math.max(rank(routeLevel), rank(pluginLevel));
+  if (declared < 0) return true; // nothing declared → encrypted by default
+  return declared === 2 ? "mutual" : declared === 1 ? true : false;
 }
 
 /**
@@ -219,16 +231,18 @@ export function collectRoutes(plugins, { log = () => {} } = {}) {
         log(`[plugin] ${plugin.name} wants ${key}, already served by ${existing.plugin} — refused`);
         continue;
       }
-      // The encrypted-arrival requirement is usually a property of the plugin;
-      // carry it onto each of its routes so a listener can refuse to serve a
-      // marked one where arrival is not encrypted. A route may also carry its own
+      // The encrypted-arrival requirement, resolved and carried onto each route
+      // so a listener can refuse to serve one where arrival is not encrypted.
+      // Encrypted by default (see resolveArrival): a plugin that declares nothing
+      // is treated as requiring encryption, so plaintext is a deliberate opt-out.
+      // A route may also carry its own
       // marker to *tighten* one sensitive endpoint; the stricter of the two wins,
       // so a plugin-level floor can never be silently loosened by a route, nor a
       // route's tightening silently dropped.
       routes.set(key, {
         ...route,
         plugin: plugin.name,
-        requiresEncryptedArrival: strictestArrival(route.requiresEncryptedArrival, plugin.requiresEncryptedArrival),
+        requiresEncryptedArrival: resolveArrival(route.requiresEncryptedArrival, plugin.requiresEncryptedArrival),
       });
     }
   }

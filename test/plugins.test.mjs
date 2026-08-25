@@ -103,8 +103,17 @@ test("a route's arrival requirement merges with the plugin's, stricter winning",
     "a route cannot loosen below a plugin that requires mutual",
   );
 
-  // Absent on both means unmarked.
-  assert.equal(routeOf(wellFormed).requiresEncryptedArrival, false);
+  // Absent on both → encrypted by default (safety by default): a plugin that
+  // carries content and forgets to declare fails safe, not silently in the clear.
+  assert.equal(routeOf(wellFormed).requiresEncryptedArrival, true, "unmarked defaults to encrypted");
+
+  // Plaintext is a deliberate opt-out — an explicit `false` is honored, not
+  // defaulted over. This is how the discovery layer serves in the clear.
+  assert.equal(
+    routeOf({ ...wellFormed, requiresEncryptedArrival: false }).requiresEncryptedArrival,
+    false,
+    "an explicit false opts a plugin into plaintext",
+  );
 });
 
 test("two plugins cannot claim one path", () => {

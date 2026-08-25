@@ -56,7 +56,10 @@ stranger learns.
 
 Capability `chat`. Small text messages to and from admitted peers, kept in
 memory. The lightest thing above hail: no filesystem, no process, just a note
-left for a peer or read back. See [chat.md](chat.md).
+left for a peer or read back. Served **only where arrival is encrypted** — the
+fabric cannot know what a message carries, so it will not decide the content is
+safe in the clear (a plaintext chat can be read or forged on the wire). See
+[chat.md](chat.md).
 
 ## tunnel — carry bytes to a declared endpoint
 
@@ -112,3 +115,13 @@ by name from configuration; it is never scanned for. The core authenticates and
 capability-checks every caller before the handler runs, so a plugin cannot open a
 door the fabric did not decide to open. The contract, with an `echo` example, is
 in the [README](../README.md#plugins).
+
+**Arrival is encrypted by default.** A plugin's routes are served only where the
+network arrival is encrypted, *unless the plugin declares otherwise* — omitting
+`requiresEncryptedArrival` means encrypted-required, so a plugin that carries
+content and forgets to say so fails safe (refused on a plaintext listener) rather
+than silently in the clear. Plaintext is a deliberate opt-out (`false`), which
+only the discovery layer (`hail`) takes, since it carries no secrets and must
+bootstrap before any encrypted channel exists. Set `true` to state the intent
+explicitly, or `"mutual"` for the strongest (a bound arrival — mutual TLS or
+loopback — which the shell requires). See `resolveArrival` in `src/plugins.js`.

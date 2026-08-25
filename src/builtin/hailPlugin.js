@@ -17,6 +17,11 @@ import { DIRECTORY, HAIL } from "../profiles.js";
 export default {
   name: "hail",
   description: "Answers hails: who I am, and which peers I have admitted.",
+  // The one deliberate plaintext opt-out. Every other capability is encrypted by
+  // default (plugins.js), but discovery must work in the clear — you hail a peer
+  // before any encrypted channel exists, and a record carries no secrets by
+  // design (peerRecord.js). So hail/directory explicitly declare plaintext-safe.
+  requiresEncryptedArrival: false,
   capabilities: [HAIL],
   routes: [
     {
