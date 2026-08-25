@@ -437,6 +437,22 @@ the command → a second turn that recalls the first) is verified on a single
 machine by `npm run test:codex-fabric` in peerhailer, the loopback stand-in for
 the two-machine case.
 
+There is also a **bridge-free** path for agents that speak ACP themselves.
+claude and codex each have an ACP adapter (`@zed-industries/claude-code-acp`,
+`@zed-industries/codex-acp`); mcp-acp-bridge's `acp-passthrough` serves one on a
+loopback port, and the tunnel carries it like any other endpoint — the agent's
+*own* permissions surface, with no MCP translation in the middle:
+
+```sh
+acp-passthrough --listen 9105 -- npx -y @zed-industries/codex-acp
+hail tunnels add acp-native 127.0.0.1:9105                  # needs tunnel:acp-native
+```
+
+Verified on loopback by `npm run test:acp-native` (the tunnel carries codex's
+native ACP end to end). Which to use is a per-agent call: the bridge gates the
+MCP channel and reaches even agents with no ACP at all (agy); the passthrough is
+simpler and higher-fidelity where a native adapter exists.
+
 The bridge binds loopback and carries no auth of its own, deliberately: what may
 reach it is the peerhailer tunnel, and the fabric is what authenticates. Binding
 it to a public interface would expose an unauthenticated agent — the operator's

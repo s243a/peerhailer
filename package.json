@@ -47,7 +47,8 @@
     "typecheck": "tsc --noEmit",
     "types": "tsc",
     "prepack": "tsc",
-    "test:codex-fabric": "node test/live-codex-fabric.mjs"
+    "test:codex-fabric": "node test/live-codex-fabric.mjs",
+    "test:acp-native": "node test/live-acp-native-fabric.mjs"
   },
   "types": "types/index.d.ts",
   "devDependencies": {
