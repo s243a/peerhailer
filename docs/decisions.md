@@ -806,12 +806,12 @@ falls back to the path that still answers, which is the one they can read.
 Requiring an encrypted arrival means the fallback carries hails and refuses
 tunnels, so denial cannot be converted into interception.
 
-So today tunnels run over Tailscale and nowhere else, because that is the only
-encrypted link this project has. TLS pinned to the peer's key makes a direct
-peer-to-peer wire qualify — which is the payoff, and the reason TLS is next
-rather than optional forever: it is not extra safety on top of what works, it is
-what makes the fabric work off the tailnet at all. Nothing is re-judged when it
-lands; a listener's label changes and the capability follows.
+So a tunnel runs over a tailnet or a pinned-TLS link. Over Tailscale the
+encryption is WireGuard's; `--hail-on-tls` makes peerhailer terminate its own
+pinned mutual TLS so a direct peer-to-peer wire qualifies too — not extra safety
+on top of what works, but what makes the fabric work off the tailnet at all. It
+is built (see [tls.md](tls.md)). Nothing was re-judged when it landed; a
+listener's posture is how it was bound, and the capability follows.
 
 ## A chat plugin, and the danger of an unauthenticated one
 

@@ -1,6 +1,6 @@
 # Declared commands
 
-**Status: designed, not built.** A sibling of the tunnel plugin: a tunnel exposes
+**Status: built.** A sibling of the tunnel plugin: a tunnel exposes
 a local *service* to a peer, this exposes a local *command*.
 
 ## The case that needs it

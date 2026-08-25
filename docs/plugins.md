@@ -71,6 +71,13 @@ that trust localhost. One capability per endpoint, and a tunnel belongs to the
 peer that opened it. Bytes only cross where arrival is encrypted; see
 [network-trust.md](network-trust.md) and [acp-tunnel.md](acp-tunnel.md).
 
+The caller side: **`hail tunnel <peer> <name> pipe`** pumps this process's stdio
+through the tunnel, so a program that spawns it reaches the remote endpoint as if
+it were local — point T3's ACP command at `hail tunnel <peer> acp pipe` and it
+drives a `bridge --listen` on another machine over the fabric. `open`/`send`/
+`poll`/`close` are the low-level pieces for scripting. Serving `bridge --listen`
+behind a tunnel is the worked example in [acp-tunnel.md](acp-tunnel.md).
+
 ## command — run one declared command
 
 Capability `command:<name>`. Runs a single command the operator wrote down, to

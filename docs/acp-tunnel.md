@@ -1,10 +1,24 @@
 # Tunnels, and ACP as the first one
 
-**Status: designed, not built.**
+**Status: the direct tunnel is built; relaying *through* a third peer is not.**
 
-Once the payload is sealed and lands at an endpoint the operator declared, the
-tunnel carries bytes and nothing about it is specific to ACP. ACP is the first
-endpoint because it is the one worth having; the mechanism is general.
+What works today: the tunnel plugin (a named, per-capability endpoint the
+operator declares), the caller-side client (`hail tunnel <peer> <name> pipe`),
+and driving a `bridge --listen` on another peer through it — the "phone driving a
+coding agent at home" case this doc opens with, proven end to end over pinned
+mutual TLS with an ACP `initialize` round-trip. See the worked example at the
+bottom.
+
+What remains designed: relaying *through* a third peer (the **transit** role
+below), the payload sealing that makes such a relay safe, subject-binding, and
+the inspection choices. So read the doc this way — where a section is about a
+caller reaching a declared endpoint *directly*, it is built and in use; where it
+is about a relay carrying bytes for someone else across a hop, it is design, and
+gated by the invariant in [network-trust.md](network-trust.md#encrypted-by-default-and-why-plaintext-cannot-cross-a-relay).
+
+Once the payload lands at an endpoint the operator declared, the tunnel carries
+bytes and nothing about it is specific to ACP. ACP is the first endpoint because
+it is the one worth having; the mechanism is general.
 
 ## Why this one first
 
@@ -382,6 +396,41 @@ relay cannot read, it cannot leak, and a machine carrying traffic it cannot read
 is safer for the one carrying it. Sealing is not invisibility — that a session
 exists, to whom, and how long it lasted all remain visible on the path.
 
+## A worked example: driving a remote agent (built)
+
+The case the doc opens with, working today. On the machine that holds the
+agents, run one bridge per agent as an ACP listener on a loopback port, declare a
+tunnel endpoint for each, grant them, and serve over pinned mutual TLS:
+
+```sh
+# on the agent's machine
+mcp-acp-bridge --agent claude --listen 9100 &        # ACP over a loopback TCP port
+mcp-acp-bridge --agent codex  --listen 9101 &
+hail tunnels add acp-claude 127.0.0.1:9100           # needs tunnel:acp-claude
+hail tunnels add acp-codex  127.0.0.1:9101
+hail profiles add agents --allows hail,tunnel:acp-claude,tunnel:acp-codex   # granted deliberately
+hail daemon --hail-on-tls tailscale0 --port 7645     # mutual TLS over the tailnet
+```
+
+From the machine running T3, point its ACP `command` at the tunnel:
+
+```sh
+hail tunnel <peer> acp-claude pipe
+```
+
+`pipe` pumps T3's ACP stdio through the tunnel to the remote bridge, so T3 drives
+the remote agent as if it were local — peerhailer authenticates the caller (its
+key plus `tunnel:acp-claude`), binds the hail to the target, and encrypts the
+wire (mutual TLS), all before a byte reaches the bridge. Swap `acp-claude` for
+`acp-codex` to change agent with **no other change**: T3's config only ever names
+the relay, so local-vs-remote and which-agent are the relay's decision, not T3's.
+Proven end to end — an ACP `initialize` round-trips and the bridge answers.
+
+The bridge binds loopback and carries no auth of its own, deliberately: what may
+reach it is the peerhailer tunnel, and the fabric is what authenticates. Binding
+it to a public interface would expose an unauthenticated agent — the operator's
+mistake to avoid, the same as binding the control API outward.
+
 ## A worked example: inspecting a remote browser
 
 Chrome's DevTools Protocol is a good fit, and a good illustration of the whole
@@ -410,9 +459,11 @@ already expresses that; this is a reminder to use it, not new machinery.
 **And it must arrive encrypted**, which is the encrypted-arrival rule
 ([network-trust.md](network-trust.md)) earning its keep on a case you can picture:
 a CDP stream in plaintext is a browser session anyone on the wire can hijack, live.
-Today that means **over Tailscale, and only Tailscale** — the one encrypted link
-this project has. TLS pinned to the peer's key would extend it to a direct
-peer-to-peer wire, which is the reason TLS is next rather than optional forever.
+That means **over a tailnet (WireGuard) or a pinned-TLS LAN link** — both of which
+peerhailer serves now (`--hail-on-encrypted tailscale0`, or `--hail-on-tls` for a
+direct peer-to-peer wire off any tailnet). And since a tunnel carries content the
+fabric cannot vouch for, it is encrypted by default anyway: the operator would
+have to *deliberately* declare it plaintext, which the tunnel plugin does not.
 
 One practical note: Chrome binds `9222` to loopback, which is correct — the tunnel
 is what reaches it, and the daemon reaches loopback. It needs a browser on the

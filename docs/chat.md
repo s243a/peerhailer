@@ -1,6 +1,9 @@
 # A chat plugin
 
-**Status: designed, not built.**
+**Status: the plugin is built; the sealed relay to a non-peer (below) is designed.**
+Short messages between admitted peers work today, over an encrypted arrival.
+Reaching someone who is *not* a peer — sealed so the relay cannot read it —
+depends on the relay, which is not built.
 
 ## Why this one is not already solved
 

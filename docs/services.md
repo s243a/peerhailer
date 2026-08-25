@@ -1,7 +1,7 @@
 # Declared services
 
-**Status: designed, not built.** The third plugin shape, after tunnels and
-commands, and the most dangerous — so the last to build and the one to review
+**Status: built.** The third plugin shape, after tunnels and
+commands, and the most dangerous — so the last built and the one to review
 hardest.
 
 ## The principle it rests on

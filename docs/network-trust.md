@@ -1,6 +1,15 @@
 # Capability as a property of the path
 
-**Status: designed, not built.**
+**Status: the encrypted-arrival model is built; the "where a peer has been"
+demotion (below) is designed.** A capability is served only where arrival is
+encrypted — enforced by serving a marked route only on the encrypted listener
+(the "separate the routes" section), plus the `requiresEncryptedArrival` marker
+and its encrypted-by-default resolution. The shipped flags are
+`--hail-on <iface>` (plaintext), `--hail-on-encrypted <iface>` (asserted), and
+`--hail-on-tls <iface>` (pinned mutual TLS) — this doc's earlier drafts write a
+`tailscale0:encrypted` suffix, which is the same idea in the form it was sketched
+before it shipped. What is *designed, not built* is the demotion machinery from
+"Where a peer has been" onward.
 
 ## The gap
 
@@ -133,11 +142,12 @@ It also composes with the operating system for free. Different ports mean
 from the tailnet, without peerhailer being involved in the decision at all — and
 a firewall rule that names one port is a rule whose scope a person can read.
 
-What the in-app check is still needed for is the case where one listener carries
-both — a TLS listener that qualifies for tunnels *and* serves hails. When TLS
-arrives, "encrypted" stops being a property of which socket you bound and starts
-being a property of the connection, and then something has to ask. Until then,
-sockets are enough.
+What the in-app check is needed for is the case where one listener carries both —
+a TLS listener that qualifies for tunnels *and* serves hails. With TLS built,
+"encrypted" is no longer only a property of which socket you bound but of the
+connection, so something has to ask: that is the `requiresEncryptedArrival` marker
+the handler checks (`server.js`/`plugins.js`). Both mechanisms are live — a route
+is served only on a listener whose posture satisfies its marker.
 
 The same applies to anything else wanting its own rule: an arbitrary-source chat
 belongs on its own port, so it can be filtered without touching the port peers
@@ -176,24 +186,23 @@ already names.
 So: no path validation. One observed fact at the exit, one signed fact about the
 origin, and a hint from the peer for diagnosis.
 
-## What this means today, and what TLS changes
+## What this means today, and what TLS changed
 
-**Today: tunnels over Tailscale, and nowhere else.** That is the only encrypted
-link this project has, so it is the only place the capability survives. The
-household LAN carries hails and not tunnels — which is a real restriction rather
-than a formality, and the honest state of a project whose protocol is signed and
-not encrypted.
+**A tunnel runs over a tailnet or a pinned-TLS link, and nowhere else.** Over
+Tailscale the encryption is WireGuard's (`--hail-on-encrypted tailscale0`); off
+any tailnet, `--hail-on-tls` makes peerhailer terminate its own pinned mutual TLS
+so a direct peer-to-peer wire qualifies too. The plaintext household LAN carries
+hails and not tunnels — a real restriction, and the honest state of a protocol
+that is signed and not encrypted.
 
-**With TLS pinned to the peer's key, the same wire qualifies.** The segment is
-still shared and the conversation is not, so a direct peer-to-peer link becomes a
-place tunnels may run without Tailscale underneath. That is the payoff, and the
-reason TLS is next rather than optional forever: it is not extra safety on top of
-what works, it is what makes the fabric work off the tailnet at all.
+TLS pinned to the peer's key was the piece that made the fabric work off the
+tailnet at all — not extra safety on top of what works, but what lets a tunnel
+run on a direct link with no Tailscale underneath. It is built (see
+[tls.md](tls.md)).
 
-Note what does *not* need revisiting when that lands. No trust judgement changes,
-no peer is re-admitted, no capability is re-granted. A listener's label goes from
-plaintext to encrypted because something was configured, and the capability
-follows.
+Note what did *not* need revisiting when it landed. No trust judgement changed,
+no peer was re-admitted, no capability re-granted. A listener's posture is
+plaintext or encrypted because of how it was bound, and the capability follows.
 
 ## Encrypted by default, and why plaintext cannot cross a relay
 
@@ -234,8 +243,9 @@ sealed the instant it is relayed, or it is not relayed at all.
 This composes with the exit/origin model above: the exit checks the *origin's*
 signature, not the last hop, and the origin seals the payload to the *exit's*
 key; the transit node reads neither, spending only its bandwidth to forward
-sealed bytes for a peer it granted `RELAY`. None of the relaying is built yet
-(see [acp-tunnel.md](acp-tunnel.md), "designed, not built") — this is written now
+sealed bytes for a peer it granted `RELAY`. Relaying *through a third peer* is not
+built (see [acp-tunnel.md](acp-tunnel.md); the direct tunnel there is) — this is
+written now
 so the invariant is fixed before the code that must honour it exists, and in
 particular so the plaintext opt-out added for direct arrivals is never quietly
 extended across a hop.

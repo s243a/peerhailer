@@ -1,7 +1,9 @@
 # Finding peers on a network
 
-**Status: designed, not built.** Manual entry works today and is what the first
-two-machine tests should use — see "Why manual comes first".
+**Status: manual admission and `walk` are built; automatic local discovery
+(below) is designed.** Adding a peer by address and learning more through a
+`walk` work today and are what the two-machine setup uses — see "Why manual comes
+first". The mDNS/multicast auto-discovery this doc explores is not built.
 
 ## Three ways to learn an address
 
