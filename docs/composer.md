@@ -56,6 +56,12 @@ plain MCP request/response, **no extra OAuth/ACP token is needed** — your exis
 Claude Code session is the supervisor. (The alternative, an ACP-push supervisor,
 would need a separate OAuth'd Claude ACP client; that is a later gate type.)
 
+**Pacing** (optional): the *Pacing* control shapes the supervisor's response
+latency to look human — *Human-like* applies a clipped gamma profile so verdicts
+land over seconds, not instantly (this passes `--supervisor-timing` to the worker
+bridge; see mcp-acp-bridge `docs/supervisor.md` for the full profile options). It
+only adds latency; it never changes a verdict.
+
 **Fail-closed:** with no client holding the seat, a review passes to the human
 (T3's own approval prompt), and if nobody answers, the bridge's gate denies at its
 timeout. Nothing fails open.

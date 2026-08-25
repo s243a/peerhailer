@@ -69,7 +69,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   /**
    * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string}} spec
    */
-  async function launch({ agent, supervision = "none", gate = false, cwd } = {}) {
+  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null } = {}) {
     if (!KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
     if (gate && !gateConfig())
       throw badRequest("no gate password set — run: hail gate set-password", 502);
@@ -88,6 +88,8 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     let config;
     if (supervision === "mcp") {
       bridgeArgs.push("--supervisor-mcp");
+      // Optional human-like response pacing on the supervisor's verdicts.
+      if (timing) bridgeArgs.push("--supervisor-timing", JSON.stringify(timing));
       const inner = ["node", bridgePath, ...bridgeArgs].map(shq).join(" ");
       config = { command: "sh", args: ["-c", `exec ${inner} 2>> ${shq(seatLog)}`] };
     } else {

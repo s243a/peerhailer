@@ -80,6 +80,12 @@ export function renderPage(self) {
         <option value="mcp">MCP seat (my Claude Code)</option>
       </select>
     </label>
+    <label>Pacing
+      <select id="cx-pace" title="human-like response latency on the supervisor's verdicts">
+        <option value="none">None</option>
+        <option value="human">Human-like</option>
+      </select>
+    </label>
     <label><input type="checkbox" id="cx-gate"> Password bastion</label>
   </div>
   <div class="cx-row">
@@ -400,6 +406,7 @@ async function cxLaunchNow() {
       supervision: $("cx-sup").value,
       gate: $("cx-gate").checked,
       cwd: $("cx-cwd").value.trim() || undefined,
+      timing: $("cx-pace").value === "human" ? { min: 2000, max: 30000, dist: "gamma", shape: 2 } : undefined,
     });
     $("cx-stop").disabled = false;
     cxRender(null);
