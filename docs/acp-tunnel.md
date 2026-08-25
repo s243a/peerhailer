@@ -497,6 +497,20 @@ is what reaches it, and the daemon reaches loopback. It needs a browser on the
 remote machine, so it inspects a browser that is running; peerhailer's own page
 serves from plain Node and needs no browser there.
 
+## Reaching into an existing agent, not just starting one
+
+A tunnel that carries codex's `app-server` protocol does more than start a fresh
+agent: because app-server persists every session, a client reaching in through
+the tunnel can `thread/list` the machine's existing codex sessions, `thread/read`
+their history, and `thread/resume` to pick one up and continue it. Proven on
+loopback by `npm run test:codex-appserver` — one connection stores a session, a
+*separate* connection over the tunnel lists it, reads it, resumes it, and recalls
+it. So "who may open a tunnel" plus a capability is also "who may see and steer
+the agents already running here" — the same deliberate grant, a larger blast
+radius, worth stating plainly. (A live *mid-turn* steer of another client's
+in-flight turn additionally needs codex's managed app-server daemon, which
+requires codex's standalone installer.)
+
 ## What this is not
 
 **Not a VPN**, though the reason is not that it speaks ACP — it is that
