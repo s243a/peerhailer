@@ -507,9 +507,12 @@ loopback by `npm run test:codex-appserver` — one connection stores a session, 
 *separate* connection over the tunnel lists it, reads it, resumes it, and recalls
 it. So "who may open a tunnel" plus a capability is also "who may see and steer
 the agents already running here" — the same deliberate grant, a larger blast
-radius, worth stating plainly. (A live *mid-turn* steer of another client's
-in-flight turn additionally needs codex's managed app-server daemon, which
-requires codex's standalone installer.)
+radius, worth stating plainly. A live *mid-turn* steer of another client's
+in-flight turn works too (`npm run test:codex-steer`): two tunnel connections
+share one `codex app-server` through mcp-acp-bridge's `appserver-hub`, and a
+steerer that never started the turn pulls the live thread/turn off the broadcast
+stream and redirects it — the far agent's output changes course, over the
+fabric.
 
 ## What this is not
 
