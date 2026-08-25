@@ -756,7 +756,10 @@ switch (command) {
     if (action === "exec") {
       const command = more.join(" ");
       if (!command) fail(`usage: hail shell ${peerName} ${name} exec <command...>`);
-      const res = await execShell(call, name, command);
+      // Default sends the command base64-wrapped, so quoting survives every
+      // layer; --raw runs it in the interactive shell unwrapped (bashisms, held
+      // state) at the cost of the sentinel's robustness.
+      const res = await execShell(call, name, command, { raw: flags.raw === true });
       if (!res.ok) fail(res.error);
       process.stdout.write(res.output.endsWith("\n") ? res.output : res.output + "\n");
       if (!res.complete) log("[did not finish within the poll window — the session was closed]");

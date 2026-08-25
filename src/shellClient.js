@@ -52,10 +52,10 @@ export const closeShell = (call, name, id) => call(`/shell/${name}/close`, { id 
  * @param {Call} call
  * @param {string} name
  * @param {string} command
- * @param {{ wait?: (ms: number) => Promise<void>, pollMs?: number, maxPolls?: number, token?: string }} [options]
+ * @param {{ wait?: (ms: number) => Promise<void>, pollMs?: number, maxPolls?: number, token?: string, raw?: boolean }} [options]
  * @returns {Promise<{ok: true, output: string, complete: boolean} | {ok: false, error: string}>}
  */
-export async function execShell(call, name, command, { wait = defaultWait, pollMs = 150, maxPolls = 200, token } = {}) {
+export async function execShell(call, name, command, { wait = defaultWait, pollMs = 150, maxPolls = 200, token, raw = false } = {}) {
   const opened = await openShell(call, name);
   if (!opened.ok) return { ok: false, error: opened.error ?? "could not open a shell" };
   const id = opened.response?.id;
@@ -64,7 +64,16 @@ export async function execShell(call, name, command, { wait = defaultWait, pollM
   // A sentinel the command's own output is very unlikely to contain, so finding
   // it means the command finished, not that it printed the word.
   const mark = token ?? `HAIL_DONE_${Math.random().toString(36).slice(2, 12)}`;
-  const sent = await sendShell(call, name, id, `${command}\necho ${mark}\n`);
+  // The command's bytes never touch a shell parser on the way to the sentinel:
+  // they are base64 (no spaces, quotes, or newlines of their own), decoded and
+  // run in a fresh `sh` on the far side, so an unbalanced quote, a trailing
+  // backslash, or an embedded newline in the command cannot bleed into the
+  // `echo` that marks completion. Needs `base64` and `sh` on the target — both
+  // coreutils, present anywhere this runs. `raw` sends the command unwrapped for
+  // the rare case a bashism or the interactive shell's own state is wanted.
+  const b64 = Buffer.from(command).toString("base64");
+  const line = raw ? `${command}\necho ${mark}\n` : `printf %s ${b64} | base64 -d | sh\necho ${mark}\n`;
+  const sent = await sendShell(call, name, id, line);
   if (!sent.ok) {
     await closeShell(call, name, id);
     return { ok: false, error: sent.error ?? "could not send the command" };

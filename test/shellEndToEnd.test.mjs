@@ -48,6 +48,28 @@ test("a peer runs a command in a real shell over the fabric and gets its output"
   }
 });
 
+test("execShell base64-wraps the command, surviving quoting the sentinel would break", async () => {
+  const { daemon, shell, call } = await bootShellDaemon();
+  try {
+    // Mixed single and double quotes come back exact.
+    const mixed = await execShell(call, "sh", `echo "a'b" and 'c"d'`);
+    assert.equal(mixed.ok, true, mixed.ok ? "" : mixed.error);
+    assert.match(mixed.output, /a'b and c"d/, "mixed quotes survive the round trip");
+
+    // A trailing backslash is line continuation — appended naively before the
+    // completion sentinel, it would swallow the sentinel's `echo` into the
+    // command. The base64 wrapping keeps the command off the parser until it runs
+    // in its own subshell, so the output is exact and the sentinel stays separate.
+    const trailing = await execShell(call, "sh", "echo keepme\\");
+    assert.equal(trailing.ok, true, trailing.ok ? "" : trailing.error);
+    assert.match(trailing.output, /keepme/, "the command's output came back");
+    assert.doesNotMatch(trailing.output, /echo/, "the sentinel did not bleed into the command");
+  } finally {
+    shell.stop();
+    await daemon.close();
+  }
+});
+
 test("a session held by id keeps shell state across separate calls", async () => {
   const { daemon, shell, call } = await bootShellDaemon();
   try {

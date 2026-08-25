@@ -26,8 +26,14 @@ function fakeRemote() {
       const text = Buffer.from(body.data, "base64").toString();
       for (const line of text.split("\n")) {
         if (!line) continue;
+        // `exec` wraps the command as `printf %s <b64> | base64 -d | sh` so
+        // quoting cannot bleed into the sentinel; unwrap it here to model the far
+        // side actually running the decoded command.
+        const wrapped = line.match(/^printf %s (\S+) \| base64 -d \| sh$/);
         const echo = line.match(/^echo (.+)$/);
-        buffer += echo ? `${echo[1]}\n` : `ran: ${line}\n`;
+        if (wrapped) buffer += `ran: ${Buffer.from(wrapped[1], "base64").toString()}\n`;
+        else if (echo) buffer += `${echo[1]}\n`;
+        else buffer += `ran: ${line}\n`;
       }
       return { ok: true, response: { sent: true } };
     }
