@@ -77,8 +77,14 @@ export function createRouter({
     if (dest === self) {
       return { delivered: true, response: await deliver(payload, { origin, via: path }), via: path, spent: 0 };
     }
-    const ttl = Number(envelope.ttl);
-    let budget = Number(envelope.budget);
+    // Clamp on RECEIPT to this node's own maxima. The envelope's ttl and budget
+    // arrive from a peer — admitted, but not trusted — so an oversized ttl or budget
+    // must never let a remote sender make this node search deeper or wider than its
+    // own policy allows. NaN or negative values fall through the checks below and
+    // stop the message. Because each hop re-clamps, the bound is enforced everywhere,
+    // not just at the origin's send().
+    const ttl = Math.min(Number(envelope.ttl), ttlMax);
+    let budget = Math.min(Number(envelope.budget), budgetMax);
     if (!Number.isFinite(ttl) || ttl <= 0) return { delivered: false, reason: "ttl", spent: 0 };
     if (!Number.isFinite(budget) || budget <= 0) return { delivered: false, reason: "budget", spent: 0 };
 

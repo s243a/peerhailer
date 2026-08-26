@@ -132,3 +132,22 @@ test("sending to self delivers locally without a hop", async () => {
   assert.deepEqual(r.via, ["a"]);
   assert.equal(forwards(), 0, "no network hop for a local delivery");
 });
+
+test("clamps ttl and budget on RECEIPT to local maxima — an oversized envelope can't over-search", async () => {
+  // A line b-c-d-e-f; a peer hands b an envelope claiming ttl/budget of 99999.
+  const { nodes, forwards } = net(
+    { a: ["b"], b: ["a", "c"], c: ["b", "d"], d: ["c", "e"], e: ["d", "f"], f: ["e"] },
+    { ttlMax: 3, budgetMax: 5 },
+  );
+  const r = await nodes.get("b").relay({ dest: "f", ttl: 99999, budget: 99999, visited: ["a"], payload: "x" }, "a");
+  assert.equal(r.delivered, false, "ttl clamped to the local max cannot reach a node past it");
+  assert.ok(forwards() <= 5, `total forwards bounded by the local budget max, not the claim (${forwards()})`);
+
+  // Sanity: a reachable node within the clamped ttl still delivers.
+  const { nodes: n2 } = net(
+    { a: ["b"], b: ["a", "c"], c: ["b", "d"], d: ["c"] },
+    { ttlMax: 3, budgetMax: 5 },
+  );
+  const ok = await n2.get("b").relay({ dest: "d", ttl: 99999, budget: 99999, visited: ["a"], payload: "x" }, "a");
+  assert.equal(ok.delivered, true, "within the clamped bound it still works");
+});
