@@ -20,6 +20,7 @@
 import { createServer } from "node:http";
 
 import { listFiles, statFile, getFile, putFile } from "./filesClient.js";
+import { MAX_FILE } from "./builtin/filesPlugin.js";
 
 const xmlEscape = (/** @type {unknown} */ s) =>
   String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] ?? c);
@@ -45,13 +46,24 @@ function responseXml(/** @type {string} */ href, /** @type {{ isDir: boolean, si
  * @param {{ call: (path: string, body: any) => Promise<any>, share: string, log?: (m: string) => void }} deps
  */
 export function createFilesMount({ call, share, log = () => {} }) {
+  // Bounded: a mount is reachable by any local process, so a PUT body is capped at
+  // MAX_FILE and resolves to null past it (the handler answers 413) — the daemon
+  // must not double-buffer gigabytes before the peer's own cap fires far away.
   const readBody = (/** @type {import("node:http").IncomingMessage} */ req) =>
     new Promise((resolve) => {
       /** @type {Buffer[]} */
       const chunks = [];
-      req.on("data", (/** @type {Buffer} */ c) => chunks.push(c));
-      req.on("end", () => resolve(Buffer.concat(chunks)));
-      req.on("error", () => resolve(Buffer.alloc(0)));
+      let total = 0;
+      let over = false;
+      req.on("data", (/** @type {Buffer} */ c) => {
+        if (over) return;
+        total += c.length;
+        if (total > MAX_FILE) { over = true; req.destroy(); resolve(null); return; }
+        chunks.push(c);
+      });
+      req.on("end", () => { if (!over) resolve(Buffer.concat(chunks)); });
+      req.on("close", () => { if (!over) resolve(Buffer.concat(chunks)); });
+      req.on("error", () => { if (!over) resolve(null); });
     });
 
   /** @param {import("node:http").IncomingMessage} req @param {import("node:http").ServerResponse} res */
@@ -62,6 +74,16 @@ export function createFilesMount({ call, share, log = () => {} }) {
     const done = (/** @type {number} */ code, /** @type {any} */ headers = {}, /** @type {any} */ body = "") => {
       res.writeHead(code, headers ?? {});
       res.end(body);
+    };
+    // Map a client error to a WebDAV status by its shape, not a substring of the
+    // message — so a transport failure (ECONNREFUSED contains "refused") is a 502,
+    // not a misleading 403.
+    const statusFor = (/** @type {string} */ err) => {
+      const e = String(err ?? "");
+      if (/read-only|is a symlink|not inside the share/i.test(e)) return 403;
+      if (/larger than/i.test(e)) return 413;
+      if (/not a file|cannot access|no data|upstream 404/i.test(e)) return 404;
+      return 502; // peer down / transport / unknown upstream
     };
     try {
       if (method === "OPTIONS") {
@@ -91,15 +113,16 @@ export function createFilesMount({ call, share, log = () => {} }) {
       }
       if (method === "GET" || method === "HEAD") {
         const got = await getFile(call, share, path);
-        if (!got.ok) return done(/read-only|refused/i.test(got.error) ? 403 : 404, {}, got.error ?? "");
+        if (!got.ok) return done(statusFor(got.error), {}, got.error ?? "");
         const buf = got.buffer ?? Buffer.alloc(0);
         const headers = { "content-type": "application/octet-stream", "content-length": String(buf.length) };
         return method === "HEAD" ? done(200, headers, "") : done(200, headers, buf);
       }
       if (method === "PUT") {
         const body = await readBody(req);
+        if (body === null) return done(413, { "content-length": "0" }, "");
         const put = await putFile(call, share, path, body);
-        if (!put.ok) return done(/read-only|refused/i.test(put.error) ? 403 : 502, {}, put.error ?? "");
+        if (!put.ok) return done(statusFor(put.error), {}, put.error ?? "");
         return done(201, { "content-length": "0" }, "");
       }
       // Verbs the underlying share does not offer. Honest, not faked.

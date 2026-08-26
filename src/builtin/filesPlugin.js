@@ -27,13 +27,19 @@
  *
  * @module builtin/filesPlugin
  */
-import { readFile, writeFile, readdir, stat, mkdir, realpath } from "node:fs/promises";
+import { readFile, writeFile, readdir, stat, mkdir, realpath, open, lstat } from "node:fs/promises";
+import { constants } from "node:fs";
 import { resolve, join, sep, dirname } from "node:path";
 
 import { REFUSE } from "../plugins.js";
 
-/** A file this channel will carry, capped: base64 in JSON is not a stream. */
-export const MAX_FILE = 8 * 1024 * 1024;
+/**
+ * A file this channel will carry, capped. base64 in JSON is not a stream, and the
+ * whole request rides the fabric's ~1 MB message envelope — so the ceiling is that
+ * envelope minus base64's ~4/3 inflation, not an arbitrary large number. This is a
+ * channel for small files (configs, keys, notes), by design.
+ */
+export const MAX_FILE = 700_000;
 /** The most entries a single `list` returns — an inbox, not a crawler. */
 export const MAX_ENTRIES = 2000;
 
@@ -114,7 +120,26 @@ function localBackend({ root, writable = false }) {
       if (!writable) throw { refuse: "this share is read-only" };
       const file = await within(path, { forWrite: true });
       await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, buf);
+      // Refuse to write *through* a symlink at the final component: a pre-existing
+      // symlink in the share must not redirect the write outside the root. The
+      // parent chain is already realpath-checked inside `within`; O_NOFOLLOW makes
+      // the final-component check atomic on POSIX, and the lstat pre-check gives a
+      // clear error and covers platforms without the flag.
+      const existing = await lstat(file).catch(() => null);
+      if (existing && existing.isSymbolicLink()) throw { refuse: "that path is a symlink" };
+      const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0);
+      let handle;
+      try {
+        handle = await open(file, flags, 0o644);
+      } catch (/** @type {any} */ error) {
+        if (error?.code === "ELOOP") throw { refuse: "that path is a symlink" };
+        throw { error: `cannot write: ${error?.code ?? error?.message ?? error}` };
+      }
+      try {
+        await handle.writeFile(buf);
+      } finally {
+        await handle.close();
+      }
       return buf.length;
     },
   };
@@ -137,15 +162,38 @@ function httpBackend({ base, writable = false }) {
     supports: new Set(["get", ...(writable ? ["put"] : [])]),
     writable,
     async get(/** @type {string} */ path) {
-      const r = await fetch(urlFor(path));
+      // No redirect-following: a compromised upstream must not be able to bounce the
+      // daemon to an internal or metadata endpoint (SSRF).
+      const r = await fetch(urlFor(path), { redirect: "manual" });
+      if (r.status >= 300 && r.status < 400) throw { error: "upstream redirected — refused" };
       if (!r.ok) throw { error: `upstream ${r.status}` };
-      const buf = Buffer.from(await r.arrayBuffer());
-      if (buf.length > MAX_FILE) throw { error: `file is larger than the ${MAX_FILE}-byte limit` };
-      return buf;
+      const declared = Number(r.headers.get("content-length"));
+      if (Number.isFinite(declared) && declared > MAX_FILE) throw { error: `file is larger than the ${MAX_FILE}-byte limit` };
+      const reader = r.body?.getReader?.();
+      if (!reader) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf.length > MAX_FILE) throw { error: `file is larger than the ${MAX_FILE}-byte limit` };
+        return buf;
+      }
+      // Bounded read: abort past the cap even when content-length lies or is absent.
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > MAX_FILE) {
+          await reader.cancel().catch(() => {});
+          throw { error: `file is larger than the ${MAX_FILE}-byte limit` };
+        }
+        chunks.push(Buffer.from(value));
+      }
+      return Buffer.concat(chunks);
     },
     async put(/** @type {string} */ path, /** @type {Buffer} */ buf) {
       if (!writable) throw { refuse: "this share is read-only" };
-      const r = await fetch(urlFor(path), { method: "PUT", body: /** @type {any} */ (buf) });
+      const r = await fetch(urlFor(path), { method: "PUT", body: /** @type {any} */ (buf), redirect: "manual" });
+      if (r.status >= 300 && r.status < 400) throw { error: "upstream redirected — refused" };
       if (!r.ok) throw { error: `upstream ${r.status}` };
       return buf.length;
     },

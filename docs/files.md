@@ -11,8 +11,9 @@ A **share** is a named place this machine will serve files from. A peer names a
 share and a path; it never learns the disk layout, the command, or which backend
 sits behind the name. It is the "hand that one file to that peer" case — a config,
 a key, a pairing URL, a small archive — not a directory sync (that is Tailscale or
-rsync, and better at it). Bytes cross as base64 in a request/response, capped at
-`MAX_FILE` (8 MiB): this is a channel for small-to-moderate files, not a stream.
+rsync, and better at it). Bytes cross as base64 in a request/response, capped at `MAX_FILE` (~700 KB,
+to fit the fabric's ~1 MB message envelope after base64): a channel for small
+files, not a stream.
 
 Routes follow the tunnel and chat shape — `list`, `stat`, `get`, `put` under
 `/files/<name>/` — so it needs no change to what a plugin is. Its own capability,
