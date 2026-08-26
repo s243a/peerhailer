@@ -902,6 +902,18 @@ export function createDaemon({
         return send(response, 200, { stopped: true });
       }
 
+      // Originate a multi-hop routed message (Stage 1). The routing plugin (present
+      // only with --route) holds the engine and this node's neighbours; we just
+      // hand it a destination key and a payload and report what came back.
+      if (scope === "control" && url.pathname === "/api/route/send" && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = JSON.parse((await readBody(request)) || "{}");
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
+        return send(response, 200, result);
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.
