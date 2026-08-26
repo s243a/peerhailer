@@ -53,7 +53,9 @@
     "test:codex-steer": "node test/live-codex-steer-fabric.mjs",
     "test:composer": "node test/live-composer.mjs",
     "test:composer-fabric": "node test/live-composer-fabric.mjs",
-    "test:tunnel-forward": "node test/live-tunnel-forward.mjs"
+    "test:tunnel-forward": "node test/live-tunnel-forward.mjs",
+    "test:remote-control": "node test/live-remote-control.mjs",
+    "test:remote-control-real": "node test/live-remote-control-real.mjs"
   },
   "types": "types/index.d.ts",
   "devDependencies": {
