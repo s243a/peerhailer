@@ -31,6 +31,43 @@ compromise, not key generation** — so most of the machinery an open overlay ne
 this design gets to skip. We are not building a DHT. We are building delivery over a
 graph we already authenticate.
 
+## Principles: build on what already exists
+
+A few lenses the whole roadmap is read through. The reframe above was the first
+application of the first one.
+
+1. **Leverage what already exists — twice over.** *Inside* peerhailer: multi-hop
+   routing is mostly *composing* machinery that is already here — the admission
+   graph, `RELAY`, block-by-key, the per-capability rate limits, and the sealed
+   relay already sketched in `docs/chat.md` and `docs/acp-tunnel.md`. It needs few
+   genuinely new primitives. *Outside* peerhailer: encrypted-mesh routing is a
+   solved problem (Yggdrasil, CJDNS) and so is anonymity (Tor, I2P). **Prefer
+   delegating to a proven system or reimplementing a well-understood algorithm over
+   inventing a novel router.** Novel routing is a swamp of subtle, expensive failure
+   (loops, grayholes, eclipse, traffic analysis); very little here should be new.
+
+2. **Zero-dependency in-process** — a router runs next to the identity key, so the
+   supply-chain argument from `docs/file-backends.md` applies in full. The delegated
+   families (route *over* an external mesh) are the deliberate, visible escape hatch,
+   not an in-process dependency.
+
+3. **The trust graph is an asset, not a limit.** Design *with* F2F — it is what buys
+   the Sybil resistance — rather than treating "only admitted peers" as a constraint
+   to engineer around.
+
+4. **Minimal-first; earn complexity.** Each stage must stand alone and be provable
+   before the next is built. A stalled greedy router that cannot fall back is worse
+   than a slow source route that always arrives.
+
+5. **The objectives are the operator's.** Performance and anonymity are *knobs* —
+   usually set by the same person who runs the node — not properties baked into the
+   whole network. The design's job is to make the trade legible and adjustable, not
+   to choose for everyone.
+
+6. **Honesty about trade-offs** — the file-backends lesson: say plainly where an
+   approach is weak, and never let a demo imply a guarantee it does not give
+   (an efficient route is not a hidden one).
+
 ## The split that makes "each node picks its own approach" safe
 
 Local autonomy over routing is right — but only for *policy*, never for *protocol*.
@@ -198,24 +235,54 @@ precisely *because* it is your own measurement, and it assumes only that the nod
 answers a ping. Statistics may be kept per next-hop, and (once Stage 3's buckets
 exist) aggregated per cluster.
 
-## Prior art to mine before building
+## Prior art, and the space it maps out
 
-peerhailer's ethos is "most of this already exists," and for encrypted overlay
-routing it emphatically does. Read these first — you may find the problem is 80%
+peerhailer's ethos is "most of this already exists," and for overlay routing it
+emphatically does. Read these before building — you may find the problem is 80%
 solved and the remaining 20% is the F2F constraint and the sealed relay we already
-have:
+have. More useful than a list is a map, because these systems sit at different
+points of the same trade-off space and each **config family** is really a choice of
+where on it to stand:
 
-- **Yggdrasil** — self-organising encrypted IPv6 mesh; greedy routing on a
-  spanning-tree metric + a DHT for lookups. Startlingly close to this whole design.
-- **CJDNS** — encrypted mesh with label-switched **source routes** + a DHT. The
-  source-routing model Stage 1 borrows.
-- **Freenet (darknet mode)** — F2F small-world routing with the probabilistic-HTL
-  anonymity idea. The closest match to the original sketch.
-- **DSR / AODV** — reactive route discovery + source routing for small dynamic
-  graphs; the Stage 1 reference.
-- **Kademlia** — XOR routing and k-buckets; Stage 3.
-- **Q-routing / AntNet, and Kleinberg small-world routing** — the adaptive and
-  greedy families, and why long-range links make greedy work.
+| System | Trust model | Anonymity | Performance / reach | What to borrow |
+| --- | --- | --- | --- | --- |
+| **Yggdrasil** | open-ish (any peer) | low — efficient, not hidden | high, self-organising | greedy-on-tree metric; zero-config; a delegated family |
+| **CJDNS** | peer-invite | low | high | label-switched **source routes** (Stage 1); a delegated family |
+| **DSR / AODV** | ad-hoc / local | none | good on small dynamic graphs | on-demand flood-discovery + source routing — **Stage 1** |
+| **Kademlia / libp2p / IPFS** | open (Sybil-exposed) | none | high, scales to millions | XOR **k-buckets** — **Stage 3**, only at scale |
+| **Scuttlebutt (SSB)** | **F2F / social graph** | low | offline-first, eventual | gossip + replication over the *trust graph* — Stage 4 metadata |
+| **ZeroNet** | open | **low by default**, optional via Tor | **high** — direct + BitTorrent swarming | anonymity-as-*optional-overlay*; reuse existing infra (see below) |
+| **Freenet (darknet)** | **F2F** | **high** — position hidden | **low** — store-and-forward | probabilistic HTL; small-world over friends — **Stage 5** |
+| **I2P / Tor / GNUnet** | open / directory / F2F | **high** — layered crypto | moderate to low | **onion / garlic** layering — the real anonymity mechanism; Tor as a *delegated* anonymity layer |
+
+**The frontier, read off the table.** Systems cluster into two camps, and the split
+is exactly the one you spotted between **ZeroNet and Freenet**. Direct connections
+and swarming — ZeroNet, Yggdrasil, IPFS — are **fast, and expose who is talking to
+whom** (IPs and paths are visible). Store-and-forward with layered crypto — Freenet,
+I2P, Tor, GNUnet — **hide who is talking to whom, and pay for it in latency**. There
+is no free lunch on this axis: a route that is efficient to compute is, almost by
+construction, legible to observe; hiding it means adding hops, layers, and
+uncertainty that cost performance. ZeroNet is the honest data point — it chose speed
+and made anonymity an *optional Tor overlay* rather than an intrinsic property (and,
+worth noting, it is only lightly maintained now; the lesson outlives the project).
+
+**Where this puts peerhailer.** The F2F reframe already buys the thing the fast camp
+lacks — **Sybil-resistant reachability** — cheaply, without a DHT. Performance then
+comes from short, direct paths through the trust graph. Anonymity is a **bolt-on you
+pay for only when you want it**: either intrinsic (Freenet-style probabilistic HTL +
+our own onion payload, Stage 5) or delegated (route the sealed traffic over Tor,
+Stage-6 style). This is why anonymity is a knob and not a mode, and why two presets
+are both legitimate: a **performance-first** family (ZeroNet/Yggdrasil-flavoured —
+direct, optional external anonymity) beside an **anonymity-first** one
+(Freenet-flavoured — F2F, probabilistic, onion). ZeroNet's other lesson — *reuse
+what is already built* (it stood on BitTorrent) — is Principle 1: peerhailer should
+stand on its own trust graph and sealed relay, and may stand on Tor for anonymity or
+Yggdrasil for reach, rather than reinvent either.
+
+Two named references for the mechanics: **Q-routing / AntNet** for the adaptive,
+feedback-weighted next-hop of Stage 2, and **Kleinberg's small-world result** for
+*why* greedy routing needs long-range links distributed by distance — the reason
+Stage 2 carries the local-minima caveat.
 
 ## What this roadmap will not do
 
