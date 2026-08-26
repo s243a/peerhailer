@@ -15,7 +15,7 @@
  *   hail id                        print this machine's public key
  *   hail daemon [--port N]         answer hails from other machines
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
@@ -29,6 +29,8 @@ import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
+import { createFilesPlugin } from "../src/builtin/filesPlugin.js";
+import { listFiles, getFile, putFile } from "../src/filesClient.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { createOffersPlugin } from "../src/builtin/offersPlugin.js";
 
@@ -469,6 +471,7 @@ switch (command) {
     const declaredCommands = stored.commands ?? {};
     const declaredServices = stored.services ?? {};
     const declaredShells = stored.shells ?? {};
+    const declaredShares = stored.shares ?? {};
     // An inbox is opt-in: someone running a headless relay should not inherit
     // one, same principle as the page.
     const wantsChat = flags.chat === true || stored.chat === true;
@@ -479,6 +482,7 @@ switch (command) {
         ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
+      ...(Object.keys(declaredShares).length ? [createFilesPlugin({ shares: declaredShares })] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
       ...(hasLaunchableOffer(declaredServices, tunnels) || hasControllerOffer(declaredCommands, tunnels)
         ? [createOffersPlugin({ services: declaredServices, tunnels, commands: declaredCommands })]
@@ -511,6 +515,11 @@ switch (command) {
     }
     for (const name of Object.keys(declaredShells)) {
       log(`[shell] ${name} (needs shell:${name}) — remote shell access; encrypted arrival only`);
+    }
+    for (const [name, decl] of Object.entries(declaredShares)) {
+      const kind = typeof decl === "string" ? "local" : decl.backend ?? "local";
+      const rw = typeof decl === "object" && decl.writable ? "read-write" : "read-only";
+      log(`[share] ${name} (needs files:${name}) — ${kind}, ${rw}; encrypted arrival only`);
     }
     if (wantsChat) log(`[chat] on (needs chat)`);
     // Profiles a plugin suggests have to be known before anyone is asked
@@ -553,11 +562,13 @@ switch (command) {
       const nextCommands = fresh.commands ?? {};
       const nextServices = fresh.services ?? {};
       const nextShells = fresh.shells ?? {};
+      const nextShares = fresh.shares ?? {};
       const nextChat = flags.chat === true || fresh.chat === true;
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
         ...(nextChat ? [createChatPlugin()] : []),
+        ...(Object.keys(nextShares).length ? [createFilesPlugin({ shares: nextShares })] : []),
         ...(Object.keys(nextTunnels).length
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
@@ -1020,6 +1031,107 @@ switch (command) {
     break;
   }
 
+  case "shares": {
+    const [action, name] = rest;
+    const shares = stored.shares ?? {};
+
+    if (action === "add") {
+      // A share is read-only unless --writable. Local is the default backend:
+      //   hail shares add docs /srv/docs
+      //   hail shares add drop /srv/drop --writable
+      //   hail shares add repo --backend http --base https://host/files/
+      if (!name) fail("usage: hail shares add <name> <root> | --backend http --base <url> [--writable]");
+      if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a share name is letters, digits and dashes");
+      const backend = typeof flags.backend === "string" ? flags.backend : "local";
+      const writable = flags.writable === true;
+      let decl;
+      if (backend === "local") {
+        const root = rest[2];
+        if (!root) fail("usage: hail shares add <name> <root> [--writable]");
+        decl = writable ? { backend: "local", root, writable: true } : { backend: "local", root };
+      } else if (backend === "http") {
+        const base = typeof flags.base === "string" ? flags.base : null;
+        if (!base) fail("usage: hail shares add <name> --backend http --base <url> [--writable]");
+        decl = { backend: "http", base, ...(writable ? { writable: true } : {}) };
+      } else {
+        fail(`unknown --backend '${backend}' (have: local, http)`);
+      }
+      stored.shares = { ...shares, [name]: decl };
+      persist();
+      log(`share ${name} -> ${backend} ${decl.root ?? decl.base}${writable ? " (writable)" : " (read-only)"}`);
+      log(`peers need files:${name}; no profile grants it yet`);
+      break;
+    }
+
+    if (action === "remove") {
+      if (!name) fail("usage: hail shares remove <name>");
+      const { [name]: _gone, ...rest2 } = shares;
+      stored.shares = rest2;
+      persist();
+      log(`share ${name} removed`);
+      break;
+    }
+
+    const names = Object.keys(shares);
+    if (names.length === 0) {
+      log("no shares declared. hail shares add <name> <root> [--writable]");
+      break;
+    }
+    for (const entry of names) {
+      const d = shares[entry];
+      const where = typeof d === "string" ? d : d.root ?? d.base;
+      const kind = typeof d === "string" ? "local" : d.backend ?? "local";
+      const ro = typeof d === "object" && d.writable ? "writable" : "read-only";
+      log(`  ${entry.padEnd(12)} ${kind} ${where}  (${ro})   needs files:${entry}`);
+    }
+    break;
+  }
+
+  case "files": {
+    // Drive a peer's share (client side), distinct from `shares` which declares
+    // one on this machine. list / get / put a path at a time.
+    const [peerName, share, action, path, local] = rest;
+    if (!peerName || !share || !action) {
+      fail("usage: hail files <peer> <share> <list|get|put> [path] [localfile]");
+    }
+    const record = directory.get(peerName);
+    if (!record) fail(`unknown peer ${peerName} — see hail peers`);
+    const as = { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey };
+    const call = (routePath, body) => callPeer(record, routePath, body, { as });
+
+    if (action === "list") {
+      const res = await listFiles(call, share, path ?? "");
+      if (!res.ok) fail(res.error);
+      const r = res.response ?? {};
+      if (r.error) fail(r.error);
+      for (const e of r.entries ?? []) log(`  ${e.type === "dir" ? "d" : "-"} ${String(e.size ?? "").padStart(9)}  ${e.name}`);
+      if (r.truncated) log(`  … (list truncated)`);
+      break;
+    }
+    if (action === "get") {
+      if (!path) fail(`usage: hail files ${peerName} ${share} get <path> [localfile]`);
+      const res = await getFile(call, share, path);
+      if (!res.ok) fail(res.error);
+      if (local) {
+        writeFileSync(local, res.buffer);
+        log(`wrote ${res.size} bytes to ${local}`);
+      } else {
+        process.stdout.write(res.buffer);
+      }
+      break;
+    }
+    if (action === "put") {
+      if (!path || !local) fail(`usage: hail files ${peerName} ${share} put <remotepath> <localfile>`);
+      const buf = readFileSync(local);
+      const res = await putFile(call, share, path, buf);
+      if (!res.ok) fail(res.error);
+      log(`put ${res.written} bytes to ${share}:${path}`);
+      break;
+    }
+    fail(`unknown files action '${action}' (list|get|put)`);
+    break;
+  }
+
   case "tunnels": {
     const [action, name, address] = rest;
     const tunnels = stored.tunnels ?? {};
@@ -1265,6 +1377,8 @@ switch (command) {
         "  hail commands [add|remove]   commands a peer may run, by name",
         "  hail services [add|remove]   long-running processes a peer may start",
         "  hail shells [add|remove]     an interactive shell a peer may open (remote shell access)",
+        "  hail shares [add|remove]     a directory (or http store) a peer may list/get/put, by name",
+        "  hail files <peer> <share> <list|get|put> [path] [localfile]   drive a peer's share",
         "  hail gate set-password       gate a local web app behind a password, for a browser",
         "  hail gate serve --target U   serve that app over TLS at --port N (a bastion for e.g. T3)",
         "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
