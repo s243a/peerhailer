@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, symlinkSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -79,6 +79,19 @@ test("a symlink pointing out of the root cannot be read through", async () => {
   try {
     const through = await hit(routes, "/files/docs/get", { path: "escape/secret.txt" });
     assert.equal(through[REFUSE], true, "reading through an escaping symlink is refused");
+  } finally { cleanup(); }
+});
+
+test("a PUT cannot write THROUGH a pre-existing symlink out of the root (finding 1)", async () => {
+  const { root, outside, cleanup } = fixture();
+  const victim = join(outside, "victim.txt");
+  writeFileSync(victim, "ORIGINAL");
+  symlinkSync(victim, join(root, "loot")); // an escaping symlink as the final component
+  const routes = collectRoutes([createFilesPlugin({ shares: { drop: { backend: "local", root, writable: true } } })], { log: () => {} });
+  try {
+    const res = await hit(routes, "/files/drop/put", { path: "loot", data: Buffer.from("PWNED").toString("base64") });
+    assert.equal(res[REFUSE], true, "writing through the symlink is refused");
+    assert.equal(readFileSync(victim, "utf8"), "ORIGINAL", "the outside target is untouched");
   } finally { cleanup(); }
 });
 
