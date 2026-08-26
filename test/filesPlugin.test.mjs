@@ -144,3 +144,44 @@ test("end to end: two daemons transfer a file through a writable share", async (
   assert.equal(got.ok, true, `get ok (${got.error ?? ""})`);
   assert.equal(got.buffer.toString(), "hello over the fabric");
 });
+
+test("the page's /api/files/browse proxies list/put/get to a peer's share", async (t) => {
+  const { root, cleanup } = fixture();
+  t.after(cleanup);
+
+  // Bob serves a writable share; Alice runs a control door that proxies to him.
+  const B = generateIdentity();
+  const dirB = createDirectory({ self: { name: "bob", publicKey: B.publicKey } });
+  dirB.useProfiles({ f: { name: "f", allows: ["hail", "files:drop"] } });
+  const daemonB = createDaemon({ directory: dirB, identity: B, plugins: [hailPlugin, createFilesPlugin({ shares: { drop: { backend: "local", root, writable: true } } })] });
+  const hailB = await daemonB.listenHail({ port: 0, hosts: ["127.0.0.1"], tls: true });
+
+  const A = generateIdentity();
+  const dirA = createDirectory({ self: { name: "alice", publicKey: A.publicKey } });
+  dirA.admit({ name: "bob", publicKey: B.publicKey, addresses: [{ value: `https://127.0.0.1:${hailB[0].port}` }] });
+  dirB.admit({ name: "alice", publicKey: A.publicKey }, { profile: "f" });
+  const daemonA = createDaemon({ directory: dirA, identity: A, plugins: [hailPlugin] });
+  const ctrlA = await daemonA.listen({ port: 0 });
+  t.after(() => { daemonA.close(); daemonB.close(); });
+
+  const browse = (body) =>
+    fetch(`http://127.0.0.1:${ctrlA.port}/api/files/browse`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    }).then(async (r) => ({ status: r.status, json: await r.json() }));
+
+  // Upload through the page, then it shows in a list, then download it back.
+  const put = await browse({ peer: "bob", share: "drop", op: "put", path: "via-page.txt", data: Buffer.from("through the page").toString("base64") });
+  assert.equal(put.status, 200, JSON.stringify(put.json));
+  assert.equal(put.json.written, 16);
+
+  const list = await browse({ peer: "bob", share: "drop", op: "list", path: "" });
+  assert.ok(list.json.entries.some((e) => e.name === "via-page.txt"), "the upload appears in the listing");
+
+  const get = await browse({ peer: "bob", share: "drop", op: "get", path: "via-page.txt" });
+  assert.equal(Buffer.from(get.json.data, "base64").toString(), "through the page");
+
+  // A bad share name is refused before it can become a route path.
+  assert.equal((await browse({ peer: "bob", share: "../evil", op: "list" })).status, 400);
+  // A traversal path is refused by bob's plugin and surfaces as a peer refusal.
+  assert.equal((await browse({ peer: "bob", share: "drop", op: "get", path: "../../etc/passwd" })).status, 502);
+});

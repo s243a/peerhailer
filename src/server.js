@@ -846,6 +846,24 @@ export function createDaemon({
         return send(response, 200, { cleared: Boolean(record) });
       }
 
+      // Files explorer: browse and transfer with a peer's share through the page.
+      // The peer's own plugin enforces the share's root, bounds and read-only-ness;
+      // this side only forwards over the signed callPeer path, so nothing new is
+      // trusted here. `share` and `op` are validated because they become URL path
+      // segments — a peer name and a share name, never a free path.
+      if (scope === "control" && url.pathname === "/api/files/browse" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const op = ["list", "get", "put", "stat"].includes(body?.op) ? body.op : "list";
+        const share = String(body?.share ?? "");
+        if (!body?.peer || !/^[a-z0-9][a-z0-9-]*$/i.test(share)) {
+          return send(response, 400, { error: "a peer and a valid share name are required" });
+        }
+        const payload = op === "put" ? { path: String(body?.path ?? ""), data: String(body?.data ?? "") } : { path: String(body?.path ?? "") };
+        const r = await callNode(String(body.peer), `/files/${share}/${op}`, payload);
+        if (!r?.ok) return send(response, 502, { error: /** @type {any} */ (r)?.error ?? "the peer refused" });
+        return send(response, 200, /** @type {any} */ (r).response ?? {});
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.
