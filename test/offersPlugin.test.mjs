@@ -56,3 +56,23 @@ test("no services / no tunnels → no offers", () => {
     "a startable-but-unreachable service is not an offer",
   );
 });
+
+test("advertises a T3 controller offer when a `pair` command and a `t3` tunnel exist", () => {
+  const plugin = createOffersPlugin({
+    commands: { pair: "node t3 pair --ttl 15m", other: "echo hi" },
+    tunnels: { t3: "127.0.0.1:3773" },
+  });
+  const { offers } = plugin.routes[0].handler({ log: () => {} });
+  const controller = offers.find((o) => o.role === "controller");
+  assert.ok(controller, "a controller offer is advertised");
+  assert.deepEqual(controller, { role: "controller", label: "Remote T3", command: "pair", tunnel: "t3" });
+  assert.equal("commandLine" in controller || "line" in controller, false, "the command line is never advertised");
+});
+
+test("no controller offer without both the `pair` command and the `t3` tunnel", () => {
+  const onlyCmd = createOffersPlugin({ commands: { pair: "node t3 pair" }, tunnels: {} });
+  assert.equal(onlyCmd.routes[0].handler({ log: () => {} }).offers.some((o) => o.role === "controller"), false, "pair command alone is not enough");
+
+  const onlyTunnel = createOffersPlugin({ commands: {}, tunnels: { t3: "127.0.0.1:3773" } });
+  assert.equal(onlyTunnel.routes[0].handler({ log: () => {} }).offers.some((o) => o.role === "controller"), false, "t3 tunnel alone is not enough");
+});

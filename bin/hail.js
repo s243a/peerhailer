@@ -39,6 +39,11 @@ function hasLaunchableOffer(services, tunnels) {
       decl && typeof decl === "object" && (decl.agent || decl.role) && (tunnels ?? {})[decl.tunnel ?? name] !== undefined,
   );
 }
+
+/** A T3-to-T3 controller offer: a `pair` command and a `t3` tunnel, by convention. */
+function hasControllerOffer(commands, tunnels) {
+  return Boolean((commands ?? {}).pair && (tunnels ?? {}).t3);
+}
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
 import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel, forwardTunnel } from "../src/tunnelClient.js";
@@ -475,7 +480,9 @@ switch (command) {
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
-      ...(hasLaunchableOffer(declaredServices, tunnels) ? [createOffersPlugin({ services: declaredServices, tunnels })] : []),
+      ...(hasLaunchableOffer(declaredServices, tunnels) || hasControllerOffer(declaredCommands, tunnels)
+        ? [createOffersPlugin({ services: declaredServices, tunnels, commands: declaredCommands })]
+        : []),
       ...(Object.keys(declaredShells).length ? [createShellPlugin({ shells: declaredShells })] : []),
       ...(Object.keys(declaredCommands).length
         ? [
@@ -555,7 +562,9 @@ switch (command) {
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
         ...(Object.keys(nextServices).length ? [createServicePlugin({ services: nextServices })] : []),
-        ...(hasLaunchableOffer(nextServices, nextTunnels) ? [createOffersPlugin({ services: nextServices, tunnels: nextTunnels })] : []),
+        ...(hasLaunchableOffer(nextServices, nextTunnels) || hasControllerOffer(nextCommands, nextTunnels)
+          ? [createOffersPlugin({ services: nextServices, tunnels: nextTunnels, commands: nextCommands })]
+          : []),
         ...(Object.keys(nextShells).length ? [createShellPlugin({ shells: nextShells })] : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
         // The externally-loaded ones too. Dropping them silently on reload
