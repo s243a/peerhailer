@@ -73,5 +73,20 @@ hail files <peer> drop put notes/today.md ./today.md   # upload (needs a writabl
 
 - The sealed relay to a non-peer (see `docs/chat.md`) applies here too and is not
   built: a share is served to admitted peers only.
-- No page yet — this is CLI + plugin; a **Files** section on the daemon `--ui`
-  page is the natural next step, reusing the chat section's shape.
+- A **Files** section on the daemon `--ui` page browses a peer's share (secure
+  mode): pick a peer and a share, navigate directories, download a file, upload one
+  to the current directory. It proxies to the peer over the same signed `callPeer`
+  path — the peer's plugin still enforces every bound, so the page trusts nothing
+  new. A more permissive **mount** mode (exposing a share to external tools) is the
+  next step; see below.
+
+## Mounting for external tools (planned)
+
+The page's explorer is the *most secure* surface: nothing leaves the browser, and
+each read or write is an explicit click. A more permissive mode would let the
+**operating system mount** a share so any external tool uses it as ordinary files.
+The zero-dependency path is a small **loopback WebDAV** bridge over the plugin
+(WebDAV is HTTP, so it needs no library and every OS mounts it natively); a real
+FUSE mount would need a binding, against the zero-dep rule. A mount is a genuine
+escalation — it hands the share to *every* local process, not one reviewed click —
+so it stays opt-in, loopback-only, and read-only unless the share is writable.

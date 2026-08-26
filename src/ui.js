@@ -62,6 +62,13 @@ export function renderPage(self) {
   .ch-mine { align-self: flex-end; background: #2f6f4f; color: #fff; }
   .ch-theirs { align-self: flex-start; background: var(--line); }
   .ch-meta { font-size: .72rem; opacity: .6; margin-top: .12rem; }
+  #files { border: 1px solid var(--line); border-radius: .55rem; padding: .75rem .85rem; }
+  .fx-list { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: .4rem; padding: .3rem; }
+  .fx-row { display: flex; gap: .6rem; align-items: center; padding: .2rem .35rem; border-radius: .3rem; }
+  .fx-row:hover { background: var(--line); }
+  .fx-name { flex: 1; overflow-wrap: anywhere; }
+  .fx-name.dir { cursor: pointer; font-weight: 600; }
+  .fx-size { opacity: .6; font-size: .8rem; }
 </style>
 </head>
 <body>
@@ -127,6 +134,22 @@ export function renderPage(self) {
     <button id="ch-send">Send</button>
   </div>
   <div id="ch-status" class="muted"></div>
+</section>
+
+<h2>Files</h2>
+<section id="files">
+  <div class="cx-row">
+    <label>Peer <select id="fx-peer"></select></label>
+    <label>Share <input type="text" id="fx-share" size="14" placeholder="e.g. docs"></label>
+    <button id="fx-open">Open</button>
+  </div>
+  <div id="fx-path" class="muted"></div>
+  <div id="fx-list" class="fx-list"></div>
+  <div class="cx-row" style="margin-top:.5rem">
+    <input type="file" id="fx-file">
+    <button id="fx-upload" disabled>Upload here</button>
+  </div>
+  <div id="fx-status" class="muted"></div>
 </section>
 
 <h2>Peers</h2>
@@ -559,6 +582,79 @@ $("cx-rc-connect").addEventListener("click", cxRcConnect);
 $("cx-rc-stop").addEventListener("click", cxRcStop);
 $("cx-node").addEventListener("change", cxRefreshAgents);
 $("cx-agent").addEventListener("change", cxUpdateSupervision);
+// --- files explorer: browse and transfer with a peer's share ---
+let fxPath = "";
+async function fxLoadPeers() {
+  try {
+    const p = await api("/api/peers");
+    const names = (p.admitted || []).map((x) => x.name);
+    $("fx-peer").innerHTML = names.length ? names.map((n) => "<option>" + esc(n) + "</option>").join("") : '<option value="">(no peers)</option>';
+  } catch (ignore) {}
+}
+function fxBrowse(op, extra) {
+  return cxPost("/api/files/browse", Object.assign({ peer: $("fx-peer").value, share: $("fx-share").value.trim(), op: op, path: fxPath }, extra || {}));
+}
+function fxJoin(a, b) { return a ? (a.replace(/\/+$/, "") + "/" + b) : b; }
+function fxParent(p) { const i = p.replace(/\/+$/, "").lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); }
+async function fxOpen(path) {
+  const share = $("fx-share").value.trim();
+  if (!$("fx-peer").value || !share) { $("fx-status").textContent = "pick a peer and a share"; return; }
+  if (path !== undefined) fxPath = path;
+  $("fx-status").textContent = "loading…";
+  try {
+    const r = await fxBrowse("list");
+    if (r.error) { $("fx-status").textContent = r.error; return; }
+    fxRender(r.entries || [], r.truncated);
+    $("fx-path").textContent = share + ":/" + fxPath;
+    $("fx-status").textContent = "";
+    $("fx-upload").disabled = false;
+  } catch (e) { $("fx-status").textContent = "open failed: " + (e.message ?? e); }
+}
+function fxRender(entries, truncated) {
+  const rows = [];
+  if (fxPath) rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxParent(fxPath)) + '">../</span></div>');
+  for (const e of entries) {
+    if (e.type === "dir") rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxJoin(fxPath, e.name)) + '">' + esc(e.name) + "/</span></div>");
+    else rows.push('<div class="fx-row"><span class="fx-name">' + esc(e.name) + '</span><span class="fx-size">' + esc(String(e.size == null ? "" : e.size)) + '</span><button data-get="' + esc(fxJoin(fxPath, e.name)) + '">download</button></div>');
+  }
+  if (truncated) rows.push('<div class="muted" style="padding:.3rem">… (list truncated)</div>');
+  const box = $("fx-list");
+  box.innerHTML = rows.join("") || '<div class="muted" style="padding:.3rem">(empty)</div>';
+  box.querySelectorAll("[data-nav]").forEach((el) => el.addEventListener("click", () => fxOpen(el.dataset.nav)));
+  box.querySelectorAll("[data-get]").forEach((el) => el.addEventListener("click", () => fxDownload(el.dataset.get)));
+}
+async function fxDownload(path) {
+  $("fx-status").textContent = "downloading " + path + "…";
+  try {
+    const r = await fxBrowse("get", { path: path });
+    if (r.error || !r.data) { $("fx-status").textContent = r.error || "no data"; return; }
+    const bytes = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes]));
+    a.download = path.split("/").pop();
+    a.click();
+    URL.revokeObjectURL(a.href);
+    $("fx-status").textContent = "downloaded " + a.download + " (" + (r.size == null ? bytes.length : r.size) + " bytes)";
+  } catch (e) { $("fx-status").textContent = "download failed: " + (e.message ?? e); }
+}
+async function fxUpload() {
+  const f = $("fx-file").files[0];
+  if (!f) { $("fx-status").textContent = "choose a file first"; return; }
+  $("fx-upload").disabled = true;
+  $("fx-status").textContent = "uploading " + f.name + "…";
+  try {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    const r = await fxBrowse("put", { path: fxJoin(fxPath, f.name), data: btoa(bin) });
+    if (r.error) $("fx-status").textContent = "upload refused: " + r.error;
+    else { $("fx-status").textContent = "uploaded " + f.name + " (" + (r.written == null ? "?" : r.written) + " bytes)"; await fxOpen(); }
+  } catch (e) { $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
+  finally { $("fx-upload").disabled = false; }
+}
+$("fx-open").addEventListener("click", () => fxOpen(""));
+$("fx-upload").addEventListener("click", fxUpload);
+fxLoadPeers();
 // --- chat: short messages to/from admitted peers (memory only) ---
 let chPeer = null, chTimer = null, chEnabled = false;
 async function chLoad() {
