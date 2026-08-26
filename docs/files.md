@@ -48,6 +48,10 @@ rule: **SMB and SFTP would each need a third-party client library**, so they are
 deliberately *not* included — add one only if that trade is accepted. FTP is
 implementable in raw sockets and could be added without a dependency.
 
+The full reasoning — the case for and against each rejected protocol, and an
+**optional opt-in build** mitigation for operators who need one — is in
+[`docs/file-backends.md`](file-backends.md).
+
 ## Declaring a share
 
 ```sh
