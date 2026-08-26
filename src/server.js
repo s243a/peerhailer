@@ -41,6 +41,7 @@ import {
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 import { createComposer } from "./composer.js";
+import { callPeer } from "./hail.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -112,6 +113,8 @@ export function createDaemon({
   applyChange,
   /** Session composer: whether a gate password is set, for the optional bastion. */
   gateConfig = () => null,
+  /** Builds `{command,args}` for `hail tunnel <peer> <name> pipe` — enables remote workers. */
+  tunnelPipeCommand = null,
   log = () => {},
 }) {
   // Our own fingerprint, computed once: the value a bound hail's `to` must
@@ -125,9 +128,39 @@ export function createDaemon({
   let plugins = initialPlugins;
   let profiles = initialProfiles;
 
-  // Local-first session composer: spawns/tracks T3 (+ gate) children. Loopback
-  // control routes below drive it; children are torn down on `close`.
-  const composer = createComposer({ gateConfig, identity, log });
+  // The fabric seam for the composer: enumerate peers' offers and start/stop a
+  // worker service on one, all via the same signed `callPeer` the CLI uses.
+  // Present only when the host can build a tunnel-pipe command (bin/hail.js does).
+  const asSelf = () => ({ name: directory.self?.name, publicKey: identity?.publicKey, privateKey: identity?.privateKey });
+  const callNode = (name, path, body) => {
+    const record = directory.get?.(name);
+    return record ? callPeer(record, path, body, { as: asSelf() }) : Promise.resolve({ ok: false, error: "unknown peer" });
+  };
+  const raceTimeout = (promise, ms) =>
+    Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: "timeout" }), ms))]);
+  const fabric = tunnelPipeCommand
+    ? {
+        tunnelPipeCommand,
+        startRemote: (peer, service) => callNode(peer, `/service/${service}/start`, {}),
+        stopRemote: (peer, service, id) => callNode(peer, `/service/${service}/stop`, { id }),
+        listNodes: async () => {
+          const admitted = directory.listAdmitted?.() ?? [];
+          const nodes = await Promise.all(
+            admitted.map(async (peer) => {
+              const r = await raceTimeout(callNode(peer.name, "/offers", {}), 4000);
+              return r?.ok
+                ? { peer: peer.name, reachable: true, offers: r.response?.offers ?? [] }
+                : { peer: peer.name, reachable: false, error: r?.error ?? "unreachable" };
+            }),
+          );
+          return { self: directory.self?.name ?? null, nodes };
+        },
+      }
+    : null;
+
+  // Local-first-plus-fabric session composer: spawns/tracks T3 (+ gate) children,
+  // and can start a worker on a peer. Loopback control routes below drive it.
+  const composer = createComposer({ gateConfig, identity, log, fabric });
 
   /**
    * Every runtime mutation goes through here: applied to what is on disk now,
@@ -804,6 +837,9 @@ export function createDaemon({
       // to a browser origin via --allow-origin.
       if (scope === "control" && url.pathname === "/api/compose/agents" && request.method === "GET") {
         return send(response, 200, composer.agents());
+      }
+      if (scope === "control" && url.pathname === "/api/compose/nodes" && request.method === "GET") {
+        return send(response, 200, await composer.nodes());
       }
       if (scope === "control" && url.pathname === "/api/compose/launch" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");

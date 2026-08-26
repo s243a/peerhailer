@@ -5,8 +5,8 @@ one click launches a local **T3 Code** instance whose model is a coding agent
 driven through [mcp-acp-bridge], optionally supervised from your own Claude Code
 over MCP, and optionally fronted by a password bastion.
 
-It is the "compose a session" idea reduced to what works today on one machine.
-Reaching agents on *other* nodes over tunnels is the next step (see the end).
+It composes a session across the fabric: the worker can run locally or on
+another node over a tunnel (see "Remote workers" below).
 
 ## What it composes
 
@@ -87,11 +87,39 @@ noted elsewhere.
 - **Pairing still applies.** Even behind the bastion, the T3 app requires its
   pairing token — the composer returns it.
 
-## Not yet built (the fabric version)
+## Remote workers (the fabric)
 
-Running the worker on **another node** needs: a discovery route so nodes advertise
-what they offer, pre-declared `service`+`tunnel` pairs, and — for remote MCP
-supervision — a `--supervisor-mcp-port` addition to the bridge so the seat lands on
-a fixed, tunnelable port. The local-first composer here is the foundation for that.
+The worker can run on **another node**. The composer's *Node* picker lists self
+plus any admitted peer that advertises a launchable offer; picking a peer fills the
+*Agent* picker from its offers, and Launch starts the worker there and points the
+(local) T3 at it over a tunnel.
+
+An **offer** is a service the operator declared with agent metadata, whose paired
+tunnel exists. On the node that will run the worker:
+
+```sh
+hail services add agy-worker "node ~/mcp-acp-bridge/bin/bridge.js --agent agy --listen 9102"   --agent agy --role worker --label "Gemini worker" --tunnel agy-worker
+hail tunnels add agy-worker 127.0.0.1:9102
+hail profiles add composer --allows hail,offers,service:agy-worker,tunnel:agy-worker
+hail add <composer-machine> --key <its-key> --profile composer   # admit the composer's daemon
+hail daemon --hail-on-tls tailscale0
+```
+
+The composer's daemon then sees the node in `GET /api/compose/nodes` (it calls the
+node's capability-gated `/offers` route via `callPeer`), and a launch:
+
+1. starts the worker service on the node (`callPeer /service/<svc>/start` → a port
+   the node's pre-declared tunnel already reaches);
+2. spawns a local T3 whose `acp` provider is `hail tunnel <node> <tunnel> pipe`, so
+   T3 drives the remote worker as if it were local.
+
+T3's config only ever names the relay, so local-vs-remote and which-agent are the
+composer's choices, not T3's.
+
+**Remaining gap — remote MCP supervision.** The supervisor seat only exists in the
+bridge's stdio mode on a loopback URL, so a *remote* worker can't yet be supervised
+by your Claude Code over MCP (the Node picker disables supervision for peers). That
+needs a `--supervisor-mcp-port` on the bridge so the seat lands on a fixed,
+tunnelable port, plus a supervisor tunnel — the next step.
 
 [mcp-acp-bridge]: ../../mcp-acp-bridge

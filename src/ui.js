@@ -73,6 +73,7 @@ export function renderPage(self) {
 </p>
 <section id="composer">
   <div class="cx-row">
+    <label>Node <select id="cx-node"></select></label>
     <label>Agent <select id="cx-agent"></select></label>
     <label>Supervision
       <select id="cx-sup">
@@ -359,15 +360,43 @@ $("tree").innerHTML = [
 ].join("");
 
 // --- session composer ---
-let cxRes = null, cxSeatTimer = null;
-async function cxLoadAgents() {
+let cxRes = null, cxSeatTimer = null, cxNodes = null, cxLocalAgents = [];
+async function cxLoadAll() {
   try {
     const info = await api("/api/compose/agents");
-    $("cx-agent").innerHTML = info.agents.map((a) => "<option>" + esc(a) + "</option>").join("");
+    cxLocalAgents = info.agents;
     const gate = $("cx-gate");
     gate.disabled = !info.gateConfigured;
     gate.title = info.gateConfigured ? "" : "run: hail gate set-password";
-  } catch (cause) { $("cx-status").textContent = "could not load agents: " + (cause.message ?? cause); }
+    let opts = '<option value="local">This machine (local)</option>';
+    if (info.remote) {
+      try {
+        cxNodes = await api("/api/compose/nodes");
+        for (const n of (cxNodes.nodes || [])) {
+          const workers = (n.offers || []).filter((o) => o.role === "worker");
+          if (workers.length) opts += '<option value="' + esc(n.peer) + '">' + esc(n.peer) + " (" + workers.length + " offered)</option>";
+        }
+      } catch (ignore) {}
+    }
+    $("cx-node").innerHTML = opts;
+    cxRefreshAgents();
+  } catch (cause) { $("cx-status").textContent = "could not load: " + (cause.message ?? cause); }
+}
+function cxRefreshAgents() {
+  const remote = $("cx-node").value !== "local";
+  if (!remote) {
+    $("cx-agent").innerHTML = cxLocalAgents.map((a) => "<option>" + esc(a) + "</option>").join("");
+  } else {
+    const n = (cxNodes && cxNodes.nodes || []).find((x) => x.peer === $("cx-node").value);
+    const workers = ((n && n.offers) || []).filter((o) => o.role === "worker");
+    $("cx-agent").innerHTML = workers.length
+      ? workers.map((o) => '<option value="' + esc(o.service) + '" data-tunnel="' + esc(o.tunnel) + '">' + esc(o.label) + (o.agent ? " — " + esc(o.agent) : "") + "</option>").join("")
+      : '<option value="">(no worker offers)</option>';
+  }
+  // Remote MCP supervision is not wired yet — off for remote nodes.
+  $("cx-sup").disabled = remote;
+  $("cx-pace").disabled = remote;
+  if (remote) $("cx-sup").value = "none";
 }
 async function cxPost(path, body) {
   const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
@@ -401,13 +430,22 @@ async function cxLaunchNow() {
   $("cx-status").textContent = "launching… (starting a T3 server can take a few seconds)";
   $("cx-launch").disabled = true;
   try {
-    cxRes = await cxPost("/api/compose/launch", {
-      agent: $("cx-agent").value,
-      supervision: $("cx-sup").value,
-      gate: $("cx-gate").checked,
-      cwd: $("cx-cwd").value.trim() || undefined,
-      timing: $("cx-pace").value === "human" ? { min: 2000, max: 30000, dist: "gamma", shape: 2 } : undefined,
-    });
+    const node = $("cx-node").value;
+    let body;
+    if (node === "local") {
+      body = {
+        agent: $("cx-agent").value,
+        supervision: $("cx-sup").value,
+        gate: $("cx-gate").checked,
+        cwd: $("cx-cwd").value.trim() || undefined,
+        timing: $("cx-pace").value === "human" ? { min: 2000, max: 30000, dist: "gamma", shape: 2 } : undefined,
+      };
+    } else {
+      const opt = $("cx-agent").selectedOptions[0];
+      if (!opt || !opt.value) throw new Error("that node offers no worker");
+      body = { node, service: opt.value, tunnel: opt.dataset.tunnel, gate: $("cx-gate").checked };
+    }
+    cxRes = await cxPost("/api/compose/launch", body);
     $("cx-stop").disabled = false;
     cxRender(null);
     cxPollSeat();
@@ -427,7 +465,8 @@ async function cxStopNow() {
 }
 $("cx-launch").addEventListener("click", cxLaunchNow);
 $("cx-stop").addEventListener("click", cxStopNow);
-cxLoadAgents();
+$("cx-node").addEventListener("change", cxRefreshAgents);
+cxLoadAll();
 
 refresh();
 setInterval(refresh, 5000);
