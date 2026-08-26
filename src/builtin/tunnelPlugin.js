@@ -86,7 +86,18 @@ export function createTunnelPlugin({
   // API, which trusts loopback precisely because nothing remote should reach it.
   // Refused at declaration, so a self-pointing endpoint never becomes a route.
   const reserved = new Set(ownPorts.map(Number));
-  for (const [name, address] of Object.entries(endpoints)) {
+  // An endpoint is "host:port", or { address, exitToken } when the operator wants
+  // the exit token-gated: the tunnel writes `PHT/1 <token>` as the first line to
+  // the local service, so a connection that did not come through the tunnel (and
+  // so lacks the line) can be refused by the service. Defence in depth on the
+  // exit, on top of the capability that gates the entrance.
+  const eps = Object.fromEntries(
+    Object.entries(endpoints).map(([name, value]) => [
+      name,
+      typeof value === "string" ? { address: value, exitToken: null } : { address: value.address, exitToken: value.exitToken ?? null },
+    ]),
+  );
+  for (const [name, { address }] of Object.entries(eps)) {
     const port = Number(String(address).split(":").pop());
     if (reserved.has(port)) {
       throw new Error(
@@ -159,7 +170,7 @@ export function createTunnelPlugin({
     requiresEncryptedArrival: true,
     capabilities: Object.keys(endpoints).map(capabilityFor),
 
-    routes: Object.entries(endpoints).flatMap(([name, address]) => {
+    routes: Object.entries(eps).flatMap(([name, { address, exitToken }]) => {
       const capability = capabilityFor(name);
       return [
         {
@@ -185,6 +196,9 @@ export function createTunnelPlugin({
             const [host, port] = String(address).split(":");
             const id = `${name}-${now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
             const socket = connectImpl({ host, port: Number(port) });
+            // The exit token, if any, is the first line on the wire — written now,
+            // before any `send` can, so the service sees it before the payload.
+            if (exitToken) socket.write(`PHT/1 ${exitToken}\r\n`);
             /** @type {{socket: import("node:net").Socket, chunks: Buffer[], buffered: number,
              *   closed: boolean, error: string | null, peerKey: string, endpoint: string,
              *   touched: number}} */
