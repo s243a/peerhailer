@@ -82,6 +82,7 @@ function readBody(request) {
  *   requireTargetBinding?: boolean,
  *   onReload?: () => any | Promise<any>,
  *   applyChange?: (mutate: (directory: any) => any) => any,
+ *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
  *   log?: (message: string) => void,
  * }} options
  */
@@ -853,7 +854,8 @@ export function createDaemon({
         try {
           return send(response, 200, await composer.launch(body));
         } catch (error) {
-          return send(response, error?.status ?? 500, { error: String(error?.message ?? error) });
+          const e = /** @type {any} */ (error);
+          return send(response, e?.status ?? 500, { error: String(e?.message ?? error) });
         }
       }
       if (scope === "control" && url.pathname === "/api/compose/seat" && request.method === "GET") {

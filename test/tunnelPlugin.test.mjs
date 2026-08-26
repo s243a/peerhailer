@@ -283,3 +283,76 @@ test("a tunnel may not point at the daemon's own port", () => {
     createTunnelPlugin({ endpoints: { fine: "127.0.0.1:9000" }, ownPorts: [7645] }),
   );
 })
+
+/** A local service that records every byte it is handed, in order. */
+function recordingService() {
+  /** @type {Set<import("node:net").Socket>} */
+  const live = new Set();
+  const chunks = [];
+  const server = createServer((socket) => {
+    live.add(socket);
+    socket.on("close", () => live.delete(socket));
+    socket.on("error", () => {});
+    socket.on("data", (chunk) => {
+      chunks.push(Buffer.from(chunk));
+      socket.write(chunk.toString().toUpperCase());
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = /** @type {import("node:net").AddressInfo} */ (server.address());
+      resolve({
+        port,
+        received: () => Buffer.concat(chunks).toString(),
+        close: () =>
+          new Promise((done) => {
+            for (const socket of live) socket.destroy();
+            server.close(() => done(undefined));
+          }),
+      });
+    });
+  });
+}
+
+test("an exit-token endpoint writes `PHT/1 <token>` as the first line, before the payload", async () => {
+  const service = await recordingService();
+  const plugin = createTunnelPlugin({
+    endpoints: { seat: { address: `127.0.0.1:${service.port}`, exitToken: "s3cr3t" } },
+  });
+  const routes = collectRoutes([plugin], { log: () => {} });
+  const caller = { name: "sol", publicKey: "KEY-SOL" };
+
+  try {
+    const { id } = await call(routes, "/tunnel/seat/open", { caller });
+    await settle();
+    // The prefix is written on connect (before any send), so even the first
+    // payload byte arrives after it.
+    await call(routes, "/tunnel/seat/send", { caller, body: { id, data: Buffer.from("hello").toString("base64") } });
+    await settle();
+
+    const seen = service.received();
+    assert.equal(seen, "PHT/1 s3cr3t\r\nhello", "the token line leads, then the caller's bytes");
+
+    await call(routes, "/tunnel/seat/close", { caller, body: { id } });
+  } finally {
+    await service.close();
+  }
+});
+
+test("a plain (untokened) endpoint writes no prefix — bytes go straight through", async () => {
+  const service = await recordingService();
+  const plugin = createTunnelPlugin({ endpoints: { echo: `127.0.0.1:${service.port}` } });
+  const routes = collectRoutes([plugin], { log: () => {} });
+  const caller = { name: "sol", publicKey: "KEY-SOL" };
+
+  try {
+    const { id } = await call(routes, "/tunnel/echo/open", { caller });
+    await settle();
+    await call(routes, "/tunnel/echo/send", { caller, body: { id, data: Buffer.from("hi").toString("base64") } });
+    await settle();
+    assert.equal(service.received(), "hi", "no PHT line for an untokened endpoint");
+    await call(routes, "/tunnel/echo/close", { caller, body: { id } });
+  } finally {
+    await service.close();
+  }
+});
