@@ -10,6 +10,11 @@
  * actually exists — startable *and* reachable. The command line is never
  * advertised, only the label, agent, role and tunnel name a caller composes with.
  *
+ * A second kind is a **controller** offer for T3-to-T3 remote control: when this
+ * machine declares a `pair` command and a `t3` tunnel, it advertises that a caller
+ * can mint a grant and drive this node's T3 — carrying those names, never the
+ * command line.
+ *
  * Gated by its own `offers` capability, in no built-in profile — an operator
  * grants it deliberately, the same as `service:*` and `tunnel:*`.
  *
@@ -19,10 +24,10 @@
 export const OFFERS = "offers";
 
 /**
- * @param {{ services?: Record<string, any>, tunnels?: Record<string, string> }} options
+ * @param {{ services?: Record<string, any>, tunnels?: Record<string, string>, commands?: Record<string, any> }} options
  */
-export function createOffersPlugin({ services = {}, tunnels = {} } = {}) {
-  const offers = Object.entries(services).flatMap(([name, decl]) => {
+export function createOffersPlugin({ services = {}, tunnels = {}, commands = {} } = {}) {
+  const workerOffers = Object.entries(services).flatMap(([name, decl]) => {
     if (!decl || typeof decl !== "object") return []; // a bare command string carries no metadata
     const { label, agent, role, tunnel, supervisorTunnel } = decl;
     if (!agent && !role) return []; // not a launchable offer, just a plain service
@@ -45,6 +50,17 @@ export function createOffersPlugin({ services = {}, tunnels = {} } = {}) {
     }
     return [offer];
   });
+
+  // A T3-to-T3 *controller* offer: this machine can mint a T3 pairing grant and
+  // tunnel its T3 to a caller, so a peer can drive this node's T3 from its own.
+  // By convention that is a command named `pair` and a tunnel named `t3`; the
+  // offer carries both names so a caller composes with them rather than guessing.
+  // The command line itself is never advertised — only that `pair` exists.
+  const controllerOffers =
+    commands.pair && tunnels.t3
+      ? [{ role: "controller", label: "Remote T3", command: "pair", tunnel: "t3" }]
+      : [];
+  const offers = [...workerOffers, ...controllerOffers];
 
   return {
     name: "offers",

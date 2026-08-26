@@ -494,18 +494,28 @@ async function cxStopNow() {
 // --- remote control: drive a remote T3 from a local T3 client ---
 let cxRc = null;
 function cxRcRefreshNodes() {
-  const peers = ((cxNodes && cxNodes.nodes) || []).filter((n) => n.reachable);
-  $("cx-rc-node").innerHTML = peers.length
-    ? peers.map((n) => "<option>" + esc(n.peer) + "</option>").join("")
-    : '<option value="">(no reachable peers)</option>';
+  // Only peers advertising a T3 controller offer (a 'pair' command + a 't3'
+  // tunnel) can be driven; the offer carries the names so we don't guess them.
+  const options = [];
+  for (const n of ((cxNodes && cxNodes.nodes) || []).filter((x) => x.reachable)) {
+    const ctrl = (n.offers || []).find((o) => o.role === "controller");
+    if (ctrl) options.push('<option value="' + esc(n.peer) + '" data-command="' + esc(ctrl.command) + '" data-tunnel="' + esc(ctrl.tunnel) + '">' + esc(n.peer) + "</option>");
+  }
+  $("cx-rc-node").innerHTML = options.length ? options.join("") : '<option value="">(no control-capable peers)</option>';
 }
 async function cxRcConnect() {
   $("cx-rc-status").textContent = "minting a grant on the remote and forwarding its T3…";
   $("cx-rc-connect").disabled = true;
   try {
-    const node = $("cx-rc-node").value;
-    if (!node) throw new Error("no reachable peer to drive");
-    cxRc = await cxPost("/api/compose/control", { node, localT3: $("cx-rc-local").value });
+    const opt = $("cx-rc-node").selectedOptions[0];
+    const node = opt && opt.value;
+    if (!node) throw new Error("no control-capable peer to drive");
+    cxRc = await cxPost("/api/compose/control", {
+      node,
+      localT3: $("cx-rc-local").value,
+      pairCommand: opt.dataset.command,
+      tunnel: opt.dataset.tunnel,
+    });
     $("cx-rc-stop").disabled = false;
     const rows = ['Open in your browser: <a href="' + esc(cxRc.deepLink) + '" target="_blank">register ' + esc(node) + " as a saved connection</a>"];
     if (cxRc.localPairingUrl) rows.push("Local T3 pairing: <code>" + esc(cxRc.localPairingUrl) + "</code>");

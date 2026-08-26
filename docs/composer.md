@@ -165,8 +165,11 @@ hail add <composer-machine> --key <its-key> --profile controller
 
 ### From the composer
 
-The `#composer` page's **Drive a remote T3** control picks a reachable peer and a
-local T3 (use the one already running, or launch a throwaway). `Connect`
+The `#composer` page's **Drive a remote T3** control lists only peers that
+advertise a **controller offer** (a `pair` command and a `t3` tunnel, discovered
+via `/offers`), and picks a local T3 (use the one already running, or launch a
+throwaway). The offer carries the command and tunnel names, so the composer uses
+them rather than assuming `pair`/`t3`. `Connect`
 (`POST /api/compose/control {node, localT3}`):
 
 1. runs the node's `command:pair` and reads the pairing URL + one-time token from
