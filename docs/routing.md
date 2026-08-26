@@ -279,6 +279,20 @@ what is already built* (it stood on BitTorrent) — is Principle 1: peerhailer s
 stand on its own trust graph and sealed relay, and may stand on Tor for anonymity or
 Yggdrasil for reach, rather than reinvent either.
 
+**The composite-network lesson.** ZeroNet's deepest lesson is that a network need
+not be homogeneous: **not every node talks over Tor**, and the ones that do still
+interoperate with the ones that don't. Strikingly, ZeroNet-over-Tor is still *faster
+than Freenet* — a well-built overlay with anonymity added as an **optional per-node
+or per-path overlay** beats a design that makes the *whole* network pay anonymity's
+latency intrinsically. That is a direct argument for this design's shape: build one
+fast substrate (F2F direct, short paths), let each node choose its own policy
+(Principle 5) — some direct, some onion, some routing over Tor — and let those
+choices **mix in a single network**. A `performance-first` node and an
+`anonymity-first` node are not two networks; they are two policies over one protocol
+(the fixed envelope), which is exactly why the protocol/policy split and the config
+families are the load-bearing decisions. Anonymity becomes a cost the nodes that want
+it pay, not a tax on everyone.
+
 Two named references for the mechanics: **Q-routing / AntNet** for the adaptive,
 feedback-weighted next-hop of Stage 2, and **Kleinberg's small-world result** for
 *why* greedy routing needs long-range links distributed by distance — the reason
