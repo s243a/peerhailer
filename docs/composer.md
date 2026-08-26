@@ -196,4 +196,10 @@ or the browser blocks the cross-origin calls. A packaged/production remote uses
 wildcard CORS and just works. Auth itself never checks Host, so the tunnel's
 foreign host is fine either way.
 
+**Verified live** (headless loopback): `npm run test:remote-control-real` spins up a
+real T3, mints a real `t3 pair` grant, forwards its origin through a real tunnel, and
+drives the full `token → bearer → wsTicket → /ws` chain both directly and through the
+tunnel at a foreign Host. It needs a t3code checkout (set `T3CODE_BIN` or keep it at
+`~/Projects/t3code`) and self-skips otherwise, so it is not wired into CI.
+
 [mcp-acp-bridge]: ../../mcp-acp-bridge
