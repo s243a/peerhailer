@@ -56,6 +56,12 @@ export function renderPage(self) {
   .cx-row { display: flex; gap: .9rem; align-items: center; flex-wrap: wrap; margin-bottom: .55rem; }
   .cx-row label { display: flex; gap: .35rem; align-items: center; }
   #cx-status { margin-top: .5rem; line-height: 1.8; }
+  #chat { border: 1px solid var(--line); border-radius: .55rem; padding: .75rem .85rem; }
+  .ch-thread { height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: .4rem; padding: .5rem; display: flex; flex-direction: column; gap: .3rem; }
+  .ch-msg { max-width: 78%; padding: .3rem .55rem; border-radius: .5rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .ch-mine { align-self: flex-end; background: #2f6f4f; color: #fff; }
+  .ch-theirs { align-self: flex-start; background: var(--line); }
+  .ch-meta { font-size: .72rem; opacity: .6; margin-top: .12rem; }
 </style>
 </head>
 <body>
@@ -107,6 +113,20 @@ export function renderPage(self) {
     <button id="cx-rc-stop" disabled>Stop</button>
   </div>
   <div id="cx-rc-status" class="muted"></div>
+</section>
+
+<h2>Chat</h2>
+<section id="chat">
+  <div class="cx-row">
+    <label>Peer <select id="ch-peer"></select></label>
+    <button id="ch-clear" title="forget this conversation (memory only)">Clear</button>
+  </div>
+  <div id="ch-thread" class="ch-thread"></div>
+  <div class="cx-row" style="margin-top:.5rem">
+    <input type="text" id="ch-text" size="44" maxlength="4096" placeholder="a short message…">
+    <button id="ch-send">Send</button>
+  </div>
+  <div id="ch-status" class="muted"></div>
 </section>
 
 <h2>Peers</h2>
@@ -539,6 +559,58 @@ $("cx-rc-connect").addEventListener("click", cxRcConnect);
 $("cx-rc-stop").addEventListener("click", cxRcStop);
 $("cx-node").addEventListener("change", cxRefreshAgents);
 $("cx-agent").addEventListener("change", cxUpdateSupervision);
+// --- chat: short messages to/from admitted peers (memory only) ---
+let chPeer = null, chTimer = null, chEnabled = false;
+async function chLoad() {
+  try {
+    const st = await api("/api/chat/state");
+    chEnabled = st.enabled;
+    if (!chEnabled) { $("ch-status").textContent = "chat is off — start the daemon with --chat"; $("ch-peer").innerHTML = '<option value="">(chat off)</option>'; return; }
+    const named = new Set();
+    const opts = [];
+    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
+    for (const p of (st.peers || [])) if (!named.has(p)) opts.push('<option value="' + esc(p) + '">' + esc(p) + "</option>");
+    $("ch-peer").innerHTML = opts.length ? opts.join("") : '<option value="">(no admitted peers)</option>';
+    if (chPeer && [...$("ch-peer").options].some((o) => o.value === chPeer)) $("ch-peer").value = chPeer;
+    await chOpen();
+  } catch (e) { $("ch-status").textContent = "could not load chat: " + (e.message ?? e); }
+}
+function chRender(messages) {
+  const box = $("ch-thread");
+  // Text is attacker-chosen — esc() is mandatory here (see chatPlugin.js).
+  box.innerHTML = (messages || []).map((m) =>
+    '<div class="ch-msg ' + (m.mine ? "ch-mine" : "ch-theirs") + '">' + esc(m.text) +
+    '<div class="ch-meta">' + esc(m.mine ? "me" : (m.from || "them")) + " · " + esc(new Date(m.at).toLocaleTimeString()) + "</div></div>"
+  ).join("");
+  box.scrollTop = box.scrollHeight;
+}
+async function chOpen() {
+  const peer = $("ch-peer").value;
+  chPeer = peer || null;
+  if (!peer) { chRender([]); return; }
+  try { const t = await api("/api/chat/thread?peer=" + encodeURIComponent(peer)); chRender(t.messages); $("ch-status").textContent = ""; }
+  catch (e) { $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
+}
+async function chSend() {
+  const peer = $("ch-peer").value, text = $("ch-text").value;
+  if (!peer || !text.trim()) return;
+  $("ch-send").disabled = true;
+  try { await cxPost("/api/chat/send", { peer: peer, text: text }); $("ch-text").value = ""; await chOpen(); }
+  catch (e) { $("ch-status").textContent = "send failed: " + (e.message ?? e); }
+  finally { $("ch-send").disabled = false; }
+}
+async function chClear() {
+  const peer = $("ch-peer").value;
+  if (!peer) return;
+  try { await cxPost("/api/chat/clear", { peer: peer }); await chLoad(); } catch (ignore) {}
+}
+$("ch-peer").addEventListener("change", chOpen);
+$("ch-send").addEventListener("click", chSend);
+$("ch-text").addEventListener("keydown", (e) => { if (e.key === "Enter") chSend(); });
+$("ch-clear").addEventListener("click", chClear);
+chLoad();
+if (chTimer) clearInterval(chTimer);
+chTimer = setInterval(() => { if (chEnabled && chPeer) chOpen(); }, 4000);
 cxLoadAll();
 
 refresh();
