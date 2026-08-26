@@ -56,6 +56,71 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     .filter(Boolean);
   /** launchId -> {home, ws, seatLog, t3, origin, pairingUrl, gate} */
   const launches = new Map();
+  /** controlId -> {forward, t3?, home?} for a T3-to-T3 remote-control session. */
+  const controls = new Map();
+
+  /**
+   * Spawn `t3 serve` in an isolated home and wait for it to report its origin
+   * (via userdata/server-runtime.json). Shared by launch() and controlRemote().
+   * Kills the child and runs onFail on any failure, then throws a tagged error.
+   * @param {{home: string, ws: string, onFail?: () => void, label?: string}} spec
+   * @returns {Promise<{t3: import("node:child_process").ChildProcess, origin: string, pairingUrl: string|null, devUrl: string|null}>}
+   */
+  async function spawnT3({ home, ws, onFail = () => {}, label = "t3" }) {
+    const [cmd, ...rest] = t3Cmd;
+    const t3 = spawn(cmd, [...rest, "serve", "--host", "127.0.0.1", "--no-browser"], {
+      cwd: ws,
+      env: { ...process.env, T3CODE_HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    let t3out = "";
+    let spawnError = null;
+    const capture = (d) => {
+      t3out += d;
+    };
+    t3.stdout.setEncoding("utf8");
+    t3.stdout.on("data", capture);
+    t3.stderr.setEncoding("utf8");
+    t3.stderr.on("data", capture);
+    // Never let a spawn error (e.g. a missing T3CODE_CMD binary) become an
+    // uncaught exception — that would take down the whole daemon.
+    t3.on("error", (error) => {
+      spawnError = error;
+    });
+    t3.on("exit", (code) => log(`[composer] t3 for ${label} exited (${code})`));
+
+    const runtimePath = join(home, "userdata", "server-runtime.json");
+    let origin = null;
+    let devUrl = null;
+    for (let i = 0; i < 60 && !origin; i++) {
+      await sleep(500);
+      if (spawnError) {
+        kill(t3);
+        onFail();
+        throw badRequest(`t3 failed to spawn (T3CODE_CMD="${t3Cmd.join(" ")}"): ${spawnError.message}`, 502);
+      }
+      if (existsSync(runtimePath)) {
+        try {
+          const j = JSON.parse(readFileSync(runtimePath, "utf8"));
+          origin = j.origin ?? null;
+          devUrl = j.devUrl ?? null;
+        } catch {}
+      }
+      if (t3.exitCode !== null && !origin) {
+        kill(t3);
+        onFail();
+        throw badRequest(`t3 exited before serving (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
+      }
+    }
+    if (!origin) {
+      kill(t3);
+      onFail();
+      throw badRequest(`t3 did not report an origin (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
+    }
+    const pairingUrl = (t3out.match(/pairing\s*url:?\s*(\S+)/i) || t3out.match(/(https?:\/\/\S*pair\S*)/) || [])[1] || null;
+    return { t3, origin, pairingUrl, devUrl };
+  }
 
   function agents() {
     return {
@@ -166,57 +231,8 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       ),
     );
 
-    // Spawn the T3 server in its own process group (so stop kills the whole tree).
-    const [cmd, ...rest] = t3Cmd;
-    const t3 = spawn(cmd, [...rest, "serve", "--host", "127.0.0.1", "--no-browser"], {
-      cwd: ws,
-      env: { ...process.env, T3CODE_HOME: home },
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
-    });
-    let t3out = "";
-    let spawnError = null;
-    const capture = (d) => {
-      t3out += d;
-    };
-    t3.stdout.setEncoding("utf8");
-    t3.stdout.on("data", capture);
-    t3.stderr.setEncoding("utf8");
-    t3.stderr.on("data", capture);
-    // Never let a spawn error (e.g. a missing T3CODE_CMD binary) become an
-    // uncaught exception — that would take down the whole daemon.
-    t3.on("error", (error) => {
-      spawnError = error;
-    });
-    t3.on("exit", (code) => log(`[composer] t3 for ${launchId} exited (${code})`));
-
-    // Wait for it to report its origin (written to server-runtime.json).
-    const runtimePath = join(home, "userdata", "server-runtime.json");
-    let origin = null;
-    for (let i = 0; i < 60 && !origin; i++) {
-      await sleep(500);
-      if (spawnError) {
-        kill(t3);
-        removeHome();
-        throw badRequest(`t3 failed to spawn (T3CODE_CMD="${t3Cmd.join(" ")}"): ${spawnError.message}`, 502);
-      }
-      if (existsSync(runtimePath)) {
-        try {
-          origin = JSON.parse(readFileSync(runtimePath, "utf8")).origin ?? null;
-        } catch {}
-      }
-      if (t3.exitCode !== null && !origin) {
-        kill(t3);
-        removeHome();
-        throw badRequest(`t3 exited before serving (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
-      }
-    }
-    if (!origin) {
-      kill(t3);
-      removeHome();
-      throw badRequest(`t3 did not report an origin (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
-    }
-    const pairingUrl = (t3out.match(/pairing\s*url:?\s*(\S+)/i) || t3out.match(/(https?:\/\/\S*pair\S*)/) || [])[1] || null;
+    // Spawn the T3 server (its own process group) and wait for it to serve.
+    const { t3, origin, pairingUrl } = await spawnT3({ home, ws, onFail: removeHome, label: launchId });
 
     const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: null, remote };
     launches.set(launchId, entry);
@@ -288,8 +304,125 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     return { stopped: true };
   }
 
+  /**
+   * Drive a REMOTE T3 from a LOCAL T3 client, using T3's own client->server
+   * pairing rather than tunnelling an agent protocol: mint a short-lived scoped
+   * grant on the remote (its declared `command:pair`), carry the remote T3's
+   * origin (HTTP+WS on one port) over a tunnel to a local port, and return a deep
+   * link the local T3 web app opens to register the remote as a saved connection.
+   * No agent runs locally, and the only credential that crosses is a derived grant
+   * that expires on its own — the tunnel stays a byte carrier.
+   * @param {{node: string, pairCommand?: string, tunnel?: string, localT3?: "existing"|"new"}} spec
+   */
+  async function controlRemote({ node, pairCommand = "pair", tunnel = "t3", localT3 = "existing" } = {}) {
+    if (!fabric?.runCommand || !fabric?.forward)
+      throw badRequest("remote control needs the fabric (peers + tunnelPipeCommand)", 501);
+    if (!node || node === "local") throw badRequest("remote control targets a peer node, not local");
+    if (controls.size >= MAX_LAUNCHES)
+      throw badRequest(`too many active control sessions (max ${MAX_LAUNCHES}); stop one first`, 429);
+
+    // 1) Mint the grant on the remote and read the pairing URL / token from its
+    //    captured stdout. Nothing we send chooses what runs — command:pair is a
+    //    fixed declared line on the remote.
+    const r = await fabric.runCommand(node, pairCommand);
+    if (!r?.ok) throw badRequest(`could not mint a grant on ${node}: ${r?.error ?? "unreachable"}`, 502);
+    const output = String(r.response?.output ?? "");
+    const remotePairingUrl =
+      (output.match(/pairing\s*url:?\s*(\S+)/i) || output.match(/(https?:\/\/\S*\/pair\S*)/) || [])[1] || null;
+    const token =
+      (remotePairingUrl && (remotePairingUrl.match(/[#?&]token=([^&#\s]+)/) || [])[1]) ||
+      (output.match(/token:?\s*(\S+)/i) || [])[1] ||
+      null;
+    const expiresAt = (output.match(/expires:?\s*(\S+)/i) || [])[1] || null;
+    if (!token)
+      throw badRequest(`the remote's command:${pairCommand} returned no pairing token; got:\n${tail(output)}`, 502);
+
+    // 2) Forward the remote T3's origin to a fresh local port.
+    const forward = await fabric.forward(node, tunnel);
+    const remoteOrigin = `http://127.0.0.1:${forward.port}`;
+
+    // 3) Resolve the local T3 that will host the client UI: reuse one already
+    //    running, or launch a throwaway instance.
+    let localBase = null;
+    let localPairingUrl = null;
+    let t3 = null;
+    let home = null;
+    try {
+      if (localT3 === "new") {
+        home = mkdtempSync(join(tmpdir(), "t3-control-"));
+        mkdirSync(join(home, "userdata"), { recursive: true });
+        const ws = join(home, "ws");
+        mkdirSync(ws, { recursive: true });
+        const capturedHome = home;
+        const spawned = await spawnT3({
+          home,
+          ws,
+          label: "remote-control",
+          onFail: () => {
+            try {
+              rmSync(capturedHome, { recursive: true, force: true });
+            } catch {}
+          },
+        });
+        t3 = spawned.t3;
+        localBase = spawned.devUrl || spawned.origin;
+        localPairingUrl = spawned.pairingUrl;
+      } else {
+        const existing = existingLocalT3();
+        if (!existing)
+          throw badRequest("no running local T3 found (server-runtime.json) — choose 'launch new' or start T3 first", 404);
+        localBase = existing.origin;
+      }
+    } catch (error) {
+      try {
+        forward.close();
+      } catch {}
+      throw error;
+    }
+
+    // 4) The deep link: the local T3's own /pair route, pointed by `?host=` at the
+    //    tunnelled remote origin, carrying the minted token in the hash. Opening it
+    //    registers the remote as a saved BearerConnectionTarget in that browser.
+    const base = String(localBase).replace(/\/+$/, "");
+    const deepLink = `${base}/pair?host=${encodeURIComponent(remoteOrigin)}#token=${token}`;
+
+    const controlId = randomUUID();
+    controls.set(controlId, { forward, t3, home });
+    log(`[composer] remote control ${controlId}: ${node} -> local ${base} via ${remoteOrigin}`);
+    return { controlId, node, localT3Url: base, localPairingUrl, remoteOrigin, deepLink, remotePairingUrl, expiresAt };
+  }
+
+  /** The developer's already-running T3, if any (its origin, preferring devUrl). */
+  function existingLocalT3() {
+    const home = process.env.T3CODE_HOME || join(homedir(), ".t3");
+    try {
+      const j = JSON.parse(readFileSync(join(home, "userdata", "server-runtime.json"), "utf8"));
+      const origin = j.devUrl || j.origin;
+      return origin ? { origin } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function stopControl(controlId) {
+    const entry = controls.get(controlId);
+    if (!entry) return { stopped: false };
+    controls.delete(controlId);
+    try {
+      entry.forward?.close?.();
+    } catch {}
+    if (entry.t3) kill(entry.t3);
+    if (entry.home) {
+      try {
+        rmSync(entry.home, { recursive: true, force: true });
+      } catch {}
+    }
+    return { stopped: true };
+  }
+
   function closeAll() {
     for (const id of [...launches.keys()]) void stop(id);
+    for (const id of [...controls.keys()]) void stopControl(id);
   }
 
   function list() {
@@ -302,7 +435,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     };
   }
 
-  return { agents, nodes, launch, seat, stop, list, closeAll };
+  return { agents, nodes, launch, controlRemote, stopControl, seat, stop, list, closeAll };
 }
 
 function kill(child) {

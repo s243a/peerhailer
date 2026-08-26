@@ -136,4 +136,64 @@ at. The seat's credential is the tunnel capability, not the URL — see
 mcp-acp-bridge `docs/supervisor.md`. A fixed seat port means one supervised worker
 process on that node.
 
+## Driving a *remote* T3 (T3-to-T3 remote control)
+
+Everything above tunnels the **agent** protocol: the worker runs on the node, a
+local T3 drives it. A different shape drives the node's **T3 itself** — you get the
+remote environment's own projects, threads, and provider logins, controlled from a
+local T3 client. This uses T3's native client→server pairing, not a bridge: the
+remote **mints a short-lived grant**, it crosses a tunnel, and a local T3 web app
+registers the remote as a saved connection.
+
+### On the remote node
+
+Declare two things and grant them to the composer's daemon:
+
+```sh
+# A fixed command that mints a 15-minute, standard-scope, one-time grant against
+# the already-running T3 (it discovers it via server-runtime.json). Nothing the
+# caller sends chooses what runs — command:pair is far below `shell` on the ladder.
+hail commands add pair "node ~/Projects/t3code/apps/server/src/bin.ts pair --ttl 15m --label 'remote control'"
+
+# A tunnel to the T3 origin port — it serves HTTP and the /ws WebSocket together,
+# so one tunnel carries the whole origin.
+hail tunnels add t3 127.0.0.1:3773
+
+hail profiles add controller --allows hail,offers,command:pair,tunnel:t3
+hail add <composer-machine> --key <its-key> --profile controller
+```
+
+### From the composer
+
+The `#composer` page's **Drive a remote T3** control picks a reachable peer and a
+local T3 (use the one already running, or launch a throwaway). `Connect`
+(`POST /api/compose/control {node, localT3}`):
+
+1. runs the node's `command:pair` and reads the pairing URL + one-time token from
+   its stdout;
+2. forwards the node's `tunnel:t3` to a local port — `http://127.0.0.1:<port>` now
+   *is* the remote T3, HTTP and WebSocket alike;
+3. resolves the local T3 (reads `server-runtime.json` for a running one, or spawns
+   one); and
+4. returns a **deep link**: `<localT3>/pair?host=<enc http://127.0.0.1:<port>>#token=<token>`.
+
+Open that link in your browser. T3's pairing route reads `?host=` as the backend
+and the `#token` as the credential, runs the token→bearer→wsTicket→WS exchange, and
+saves the remote as a `BearerConnectionTarget` — a persistent entry you can switch
+into alongside the local environment. `Stop` closes the forward (and any T3 the
+wizard launched). The grant expires on its own, so nothing lasting crosses.
+
+**Why a derived grant, not the long-lived token:** the tunnel stays a byte carrier
+and what crosses is worthless minutes later; the exit never attaches its own
+credential (no confused deputy). See `docs/acp-tunnel.md`, "A second endpoint: T3
+to T3, without moving the token."
+
+**Caveat — a dev-mode remote.** Saved connections live in the *browser* (IndexedDB),
+so the deep link must be opened in the browser that will drive the remote; the
+wizard cannot seed it server-side. And a remote T3 running in **dev mode** (`devUrl`
+set) constrains its CORS `allowedOrigins`: the local app's origin must be allowed,
+or the browser blocks the cross-origin calls. A packaged/production remote uses
+wildcard CORS and just works. Auth itself never checks Host, so the tunnel's
+foreign host is fine either way.
+
 [mcp-acp-bridge]: ../../mcp-acp-bridge

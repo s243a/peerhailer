@@ -144,6 +144,18 @@ export function createDaemon({
         tunnelPipeCommand,
         startRemote: (peer, service) => callNode(peer, `/service/${service}/start`, {}),
         stopRemote: (peer, service, id) => callNode(peer, `/service/${service}/stop`, { id }),
+        // Run a declared command on a peer and hand back its captured stdout —
+        // used to mint a T3 pairing grant on the remote (command:pair).
+        runCommand: (peer, name) => callNode(peer, `/command/${name}/run`, {}),
+        // Forward a peer's tunnel to a fresh local TCP port. forwardSeat is this
+        // for the supervisor seat; forward is the general case (the remote T3's
+        // origin, which serves HTTP+WS together, for T3-to-T3 remote control).
+        forward: (peer, tunnel) => {
+          const record = directory.get?.(peer);
+          if (!record) return Promise.reject(new Error("unknown peer"));
+          const call = (path, body) => callPeer(record, path, body, { as: asSelf() });
+          return forwardTunnel(call, tunnel, { port: 0, log });
+        },
         forwardSeat: (peer, seatTunnel) => {
           const record = directory.get?.(peer);
           if (!record) return Promise.reject(new Error("unknown peer"));
@@ -862,6 +874,20 @@ export function createDaemon({
       if (scope === "control" && url.pathname === "/api/compose/stop" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         return send(response, 200, await composer.stop(body?.launchId));
+      }
+      // T3-to-T3 remote control: mint a grant on a peer, tunnel its T3 origin
+      // here, and hand back a deep link the local T3 client opens to drive it.
+      if (scope === "control" && url.pathname === "/api/compose/control" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        try {
+          return send(response, 200, await composer.controlRemote(body));
+        } catch (error) {
+          return send(response, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      }
+      if (scope === "control" && url.pathname === "/api/compose/control/stop" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        return send(response, 200, await composer.stopControl(body?.controlId));
       }
 
       return nothingHere(response);

@@ -95,6 +95,18 @@ export function renderPage(self) {
     <button id="cx-stop" disabled>Stop</button>
   </div>
   <div id="cx-status" class="muted"></div>
+  <div class="cx-row" style="margin-top:.6rem;border-top:1px solid var(--line);padding-top:.6rem">
+    <label>Drive a remote T3 <select id="cx-rc-node"></select></label>
+    <label>Local T3
+      <select id="cx-rc-local">
+        <option value="existing">Use the one already running</option>
+        <option value="new">Launch a new one</option>
+      </select>
+    </label>
+    <button id="cx-rc-connect">Connect</button>
+    <button id="cx-rc-stop" disabled>Stop</button>
+  </div>
+  <div id="cx-rc-status" class="muted"></div>
 </section>
 
 <h2>Peers</h2>
@@ -379,6 +391,7 @@ async function cxLoadAll() {
       } catch (ignore) {}
     }
     $("cx-node").innerHTML = opts;
+    cxRcRefreshNodes();
     cxRefreshAgents();
   } catch (cause) { $("cx-status").textContent = "could not load: " + (cause.message ?? cause); }
 }
@@ -478,8 +491,42 @@ async function cxStopNow() {
   try { if (lid) await cxPost("/api/compose/stop", { launchId: lid }); } catch (ignore) {}
   $("cx-status").textContent = "stopped";
 }
+// --- remote control: drive a remote T3 from a local T3 client ---
+let cxRc = null;
+function cxRcRefreshNodes() {
+  const peers = ((cxNodes && cxNodes.nodes) || []).filter((n) => n.reachable);
+  $("cx-rc-node").innerHTML = peers.length
+    ? peers.map((n) => "<option>" + esc(n.peer) + "</option>").join("")
+    : '<option value="">(no reachable peers)</option>';
+}
+async function cxRcConnect() {
+  $("cx-rc-status").textContent = "minting a grant on the remote and forwarding its T3…";
+  $("cx-rc-connect").disabled = true;
+  try {
+    const node = $("cx-rc-node").value;
+    if (!node) throw new Error("no reachable peer to drive");
+    cxRc = await cxPost("/api/compose/control", { node, localT3: $("cx-rc-local").value });
+    $("cx-rc-stop").disabled = false;
+    const rows = ['Open in your browser: <a href="' + esc(cxRc.deepLink) + '" target="_blank">register ' + esc(node) + " as a saved connection</a>"];
+    if (cxRc.localPairingUrl) rows.push("Local T3 pairing: <code>" + esc(cxRc.localPairingUrl) + "</code>");
+    rows.push('<span class="muted">via ' + esc(cxRc.remoteOrigin) + (cxRc.expiresAt ? " · grant expires " + esc(cxRc.expiresAt) : "") + "</span>");
+    $("cx-rc-status").innerHTML = rows.join("<br>");
+  } catch (cause) {
+    $("cx-rc-status").textContent = "connect failed: " + (cause.message ?? cause);
+    $("cx-rc-connect").disabled = false;
+  }
+}
+async function cxRcStop() {
+  const cid = cxRc && cxRc.controlId;
+  cxRc = null;
+  $("cx-rc-connect").disabled = false; $("cx-rc-stop").disabled = true;
+  $("cx-rc-status").textContent = "stopped";
+  try { if (cid) await cxPost("/api/compose/control/stop", { controlId: cid }); } catch (ignore) {}
+}
 $("cx-launch").addEventListener("click", cxLaunchNow);
 $("cx-stop").addEventListener("click", cxStopNow);
+$("cx-rc-connect").addEventListener("click", cxRcConnect);
+$("cx-rc-stop").addEventListener("click", cxRcStop);
 $("cx-node").addEventListener("change", cxRefreshAgents);
 $("cx-agent").addEventListener("change", cxUpdateSupervision);
 cxLoadAll();
