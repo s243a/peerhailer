@@ -149,6 +149,11 @@ export function renderPage(self) {
     <input type="file" id="fx-file">
     <button id="fx-upload" disabled>Upload here</button>
   </div>
+  <div class="cx-row" style="margin-top:.5rem">
+    <button id="fx-mount" title="expose this share over loopback WebDAV so external tools can use it">Mount for external tools</button>
+    <span class="muted" style="font-size:.8rem">permissive — a mount is reachable by any local process</span>
+  </div>
+  <div id="fx-mounts" class="muted"></div>
   <div id="fx-status" class="muted"></div>
 </section>
 
@@ -652,9 +657,36 @@ async function fxUpload() {
   } catch (e) { $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
   finally { $("fx-upload").disabled = false; }
 }
+async function fxMount() {
+  const peer = $("fx-peer").value, share = $("fx-share").value.trim();
+  if (!peer || !share) { $("fx-status").textContent = "pick a peer and a share to mount"; return; }
+  $("fx-mount").disabled = true;
+  try {
+    const m = await cxPost("/api/files/mount", { peer: peer, share: share });
+    $("fx-status").textContent = "mounted at " + m.url;
+    fxLoadMounts();
+  } catch (e) { $("fx-status").textContent = "mount failed: " + (e.message ?? e); }
+  finally { $("fx-mount").disabled = false; }
+}
+async function fxLoadMounts() {
+  try {
+    const r = await api("/api/files/mounts");
+    if (!r.mounts || !r.mounts.length) { $("fx-mounts").innerHTML = ""; return; }
+    $("fx-mounts").innerHTML = "Active mounts:<br>" + r.mounts.map((m) =>
+      esc(m.peer) + ":" + esc(m.share) + ' → <code>' + esc(m.url) + "</code> " +
+      '<button data-stop="' + esc(m.mountId) + '">unmount</button>' +
+      '<div class="muted" style="font-size:.78rem">macOS: Finder → Go → Connect to Server · Windows: Map network drive · Linux: rclone/davfs2 — use ' + esc(m.url) + "</div>"
+    ).join("<br>");
+    $("fx-mounts").querySelectorAll("[data-stop]").forEach((el) => el.addEventListener("click", async () => {
+      try { await cxPost("/api/files/mount/stop", { mountId: el.dataset.stop }); fxLoadMounts(); } catch (ignore) {}
+    }));
+  } catch (ignore) {}
+}
 $("fx-open").addEventListener("click", () => fxOpen(""));
 $("fx-upload").addEventListener("click", fxUpload);
+$("fx-mount").addEventListener("click", fxMount);
 fxLoadPeers();
+fxLoadMounts();
 // --- chat: short messages to/from admitted peers (memory only) ---
 let chPeer = null, chTimer = null, chEnabled = false;
 async function chLoad() {

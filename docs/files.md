@@ -80,13 +80,25 @@ hail files <peer> drop put notes/today.md ./today.md   # upload (needs a writabl
   new. A more permissive **mount** mode (exposing a share to external tools) is the
   next step; see below.
 
-## Mounting for external tools (planned)
+## Mounting for external tools (built)
 
 The page's explorer is the *most secure* surface: nothing leaves the browser, and
-each read or write is an explicit click. A more permissive mode would let the
-**operating system mount** a share so any external tool uses it as ordinary files.
-The zero-dependency path is a small **loopback WebDAV** bridge over the plugin
-(WebDAV is HTTP, so it needs no library and every OS mounts it natively); a real
-FUSE mount would need a binding, against the zero-dep rule. A mount is a genuine
-escalation — it hands the share to *every* local process, not one reviewed click —
-so it stays opt-in, loopback-only, and read-only unless the share is writable.
+each read or write is an explicit click. The *permissive* mode lets the **operating
+system mount** a share so any external tool uses it as ordinary files. From the
+Files section, **Mount for external tools** starts a small **loopback WebDAV**
+bridge over the share and hands back a `http://127.0.0.1:<port>/` URL with per-OS
+instructions (macOS Finder → Connect to Server; Windows → Map network drive; Linux
+→ davfs2/rclone). Unmount from the same list.
+
+WebDAV is chosen because it is HTTP — **no dependency**, and every OS mounts it
+natively; a real FUSE mount would need a binding, against the zero-dep rule. Each
+verb (`OPTIONS`, `PROPFIND`, `GET`, `PUT`) is translated to the plugin's own routes
+over the signed `callPeer` path, so the peer still enforces every bound. Only the
+verbs the plugin supports are offered — `DELETE`, `MKCOL` and `LOCK` answer `501`
+rather than pretending, so a mount is browse + read + write-file, not a full POSIX
+filesystem (and Windows/macOS write may want `LOCK`, which is not implemented).
+
+**A mount is a genuine escalation.** It is reachable by *every* local process, not
+one reviewed click — so it binds loopback only, is operator-started on the control
+door, and writes still depend on the remote share being writable (a `PUT` to a
+read-only share is refused upstream and surfaces as `403`).
