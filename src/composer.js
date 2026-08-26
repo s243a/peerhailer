@@ -35,7 +35,7 @@ export const KNOWN_AGENTS = [
   "agy-sandboxed",
 ];
 
-const GATE_PORT = 8443;
+const MAX_LAUNCHES = 4;
 
 /**
  * @param {{
@@ -73,9 +73,16 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     if (!KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
     if (gate && !gateConfig())
       throw badRequest("no gate password set — run: hail gate set-password", 502);
+    if (launches.size >= MAX_LAUNCHES)
+      throw badRequest(`too many active launches (max ${MAX_LAUNCHES}); stop one first`, 429);
 
     const launchId = randomUUID();
     const home = mkdtempSync(join(tmpdir(), "composer-t3-"));
+    const removeHome = () => {
+      try {
+        rmSync(home, { recursive: true, force: true });
+      } catch {}
+    };
     const ws = cwd && existsSync(cwd) ? cwd : join(home, "ws");
     mkdirSync(join(home, "userdata"), { recursive: true });
     if (ws.startsWith(home)) mkdirSync(ws, { recursive: true });
@@ -117,6 +124,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       detached: true,
     });
     let t3out = "";
+    let spawnError = null;
     const capture = (d) => {
       t3out += d;
     };
@@ -124,6 +132,11 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     t3.stdout.on("data", capture);
     t3.stderr.setEncoding("utf8");
     t3.stderr.on("data", capture);
+    // Never let a spawn error (e.g. a missing T3CODE_CMD binary) become an
+    // uncaught exception — that would take down the whole daemon.
+    t3.on("error", (error) => {
+      spawnError = error;
+    });
     t3.on("exit", (code) => log(`[composer] t3 for ${launchId} exited (${code})`));
 
     // Wait for it to report its origin (written to server-runtime.json).
@@ -131,6 +144,11 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     let origin = null;
     for (let i = 0; i < 60 && !origin; i++) {
       await sleep(500);
+      if (spawnError) {
+        kill(t3);
+        removeHome();
+        throw badRequest(`t3 failed to spawn (T3CODE_CMD="${t3Cmd.join(" ")}"): ${spawnError.message}`, 502);
+      }
       if (existsSync(runtimePath)) {
         try {
           origin = JSON.parse(readFileSync(runtimePath, "utf8")).origin ?? null;
@@ -138,11 +156,13 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       }
       if (t3.exitCode !== null && !origin) {
         kill(t3);
+        removeHome();
         throw badRequest(`t3 exited before serving (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
       }
     }
     if (!origin) {
       kill(t3);
+      removeHome();
       throw badRequest(`t3 did not report an origin (T3CODE_CMD="${t3Cmd.join(" ")}"):\n${tail(t3out)}`, 502);
     }
     const pairingUrl = (t3out.match(/pairing\s*url:?\s*(\S+)/i) || t3out.match(/(https?:\/\/\S*pair\S*)/) || [])[1] || null;
@@ -152,16 +172,26 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
 
     let gateUrl = null;
     if (gate) {
-      const g = gateConfig();
-      const proxy = createGate({ target: origin, passwordHash: g.passwordHash, secret: g.secret, log });
-      const server = createHttpsServer(selfSignedCert(identity), proxy.onRequest);
-      server.on("upgrade", proxy.onUpgrade);
-      await new Promise((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(GATE_PORT, "127.0.0.1", () => resolve(undefined));
-      });
-      entry.gate = server;
-      gateUrl = `https://127.0.0.1:${GATE_PORT}`;
+      try {
+        const g = gateConfig();
+        const proxy = createGate({ target: origin, passwordHash: g.passwordHash, secret: g.secret, log });
+        const server = createHttpsServer(selfSignedCert(identity), proxy.onRequest);
+        server.on("upgrade", proxy.onUpgrade);
+        // Port 0 (OS-chosen): a second gated launch cannot collide on a fixed
+        // 8443 and strand this T3.
+        const port = await new Promise((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+        });
+        entry.gate = server;
+        gateUrl = `https://127.0.0.1:${port}`;
+      } catch (error) {
+        // Strand nothing: tear the T3 down and forget the launch before failing.
+        launches.delete(launchId);
+        kill(t3);
+        removeHome();
+        throw badRequest(`gate failed to start: ${error.message}`, 502);
+      }
     }
 
     log(`[composer] launched ${launchId}: ${agent} → ${origin}${gateUrl ? ` (gated ${gateUrl})` : ""}`);
@@ -174,7 +204,9 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     if (!entry) return { error: "no such launch" };
     let seatUrl = null;
     try {
-      const m = readFileSync(entry.seatLog, "utf8").match(/connect a supervisor MCP client at\s+(\S+)/);
+      // Loopback only: the seat is on 127.0.0.1, so refuse a forged seat line a
+      // malicious agent might print to the bridge's stderr.
+      const m = readFileSync(entry.seatLog, "utf8").match(/connect a supervisor MCP client at\s+(https?:\/\/127\.0\.0\.1:\d+\/\S+)/);
       if (m) seatUrl = m[1];
     } catch {}
     return seatUrl
@@ -213,13 +245,22 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
 
 function kill(child) {
   if (!child || child.exitCode !== null || child.signalCode) return;
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
+  const pid = child.pid;
+  const term = (signal) => {
     try {
-      child.kill("SIGTERM");
-    } catch {}
-  }
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {}
+    }
+  };
+  term("SIGTERM");
+  // Escalate for a child that ignores SIGTERM, so `stop` does not report success
+  // over a process that is still alive.
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) term("SIGKILL");
+  }, 3000).unref?.();
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

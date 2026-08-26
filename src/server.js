@@ -799,7 +799,9 @@ export function createDaemon({
 
       // The session composer: one-click launch of a local T3 instance whose model
       // is a bridged coding agent, with an optional MCP supervision seat and an
-      // optional password bastion. Loopback control only — it spawns processes.
+      // optional password bastion. Loopback control only — it spawns processes,
+      // so it is far more powerful than the rest of the page: never expose these
+      // to a browser origin via --allow-origin.
       if (scope === "control" && url.pathname === "/api/compose/agents" && request.method === "GET") {
         return send(response, 200, composer.agents());
       }
