@@ -67,7 +67,7 @@ export function capabilityFor(name) {
 
 /**
  * @param {{
- *   endpoints?: Record<string, string>,
+ *   endpoints?: Record<string, string | { address: string, exitToken?: string | null }>,
  *   now?: () => number,
  *   connectImpl?: typeof connect,
  *   sweepMs?: number,
@@ -91,6 +91,7 @@ export function createTunnelPlugin({
   // the local service, so a connection that did not come through the tunnel (and
   // so lacks the line) can be refused by the service. Defence in depth on the
   // exit, on top of the capability that gates the entrance.
+  /** @type {Record<string, { address: string, exitToken: string | null }>} */
   const eps = Object.fromEntries(
     Object.entries(endpoints).map(([name, value]) => [
       name,
