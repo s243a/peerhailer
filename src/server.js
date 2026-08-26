@@ -38,11 +38,13 @@ import {
   listProfiles,
   rejectionFor,
 } from "./profiles.js";
+import { randomUUID } from "node:crypto";
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 import { createComposer } from "./composer.js";
 import { callPeer } from "./hail.js";
 import { forwardTunnel } from "./tunnelClient.js";
+import { mountShare } from "./filesMount.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -182,6 +184,8 @@ export function createDaemon({
   // Local-first-plus-fabric session composer: spawns/tracks T3 (+ gate) children,
   // and can start a worker on a peer. Loopback control routes below drive it.
   const composer = createComposer({ gateConfig, identity, log, fabric });
+  /** mountId -> { peer, share, url, close } — active WebDAV mounts of peer shares. */
+  const mounts = new Map();
 
   /**
    * Every runtime mutation goes through here: applied to what is on disk now,
@@ -864,6 +868,40 @@ export function createDaemon({
         return send(response, 200, /** @type {any} */ (r).response ?? {});
       }
 
+      // The permissive mode: mount a peer's share as a loopback WebDAV endpoint an
+      // external tool or the OS can use. A mount is reachable by every local
+      // process, so it is loopback-only and operator-started here on the control
+      // door; the peer still gates every read and write.
+      if (scope === "control" && url.pathname === "/api/files/mounts" && request.method === "GET") {
+        return send(response, 200, { mounts: [...mounts.entries()].map(([id, m]) => ({ mountId: id, peer: m.peer, share: m.share, url: m.url })) });
+      }
+      if (scope === "control" && url.pathname === "/api/files/mount" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const share = String(body?.share ?? "");
+        const peer = String(body?.peer ?? "");
+        if (!peer || !/^[a-z0-9][a-z0-9-]*$/i.test(share)) return send(response, 400, { error: "a peer and a valid share name are required" });
+        if (!directory.get?.(peer)) return send(response, 404, { error: "unknown peer" });
+        if (mounts.size >= 8) return send(response, 429, { error: "too many mounts; stop one first" });
+        try {
+          const call = (/** @type {string} */ path, /** @type {any} */ callBody) => callNode(peer, path, callBody);
+          const mount = await mountShare({ call, share, log });
+          const mountId = randomUUID();
+          mounts.set(mountId, { peer, share, url: mount.url, close: mount.close });
+          log(`[mount] ${peer}:${share} mounted at ${mount.url}`);
+          return send(response, 200, { mountId, peer, share, url: mount.url });
+        } catch (error) {
+          return send(response, 500, { error: String(/** @type {any} */ (error)?.message ?? error) });
+        }
+      }
+      if (scope === "control" && url.pathname === "/api/files/mount/stop" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const entry = mounts.get(String(body?.mountId ?? ""));
+        if (!entry) return send(response, 200, { stopped: false });
+        mounts.delete(String(body.mountId));
+        try { await entry.close(); } catch {}
+        return send(response, 200, { stopped: true });
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.
@@ -1124,6 +1162,8 @@ export function createDaemon({
 
     close: async () => {
       composer.closeAll();
+      for (const [, m] of mounts) { try { await m.close(); } catch {} }
+      mounts.clear();
       await Promise.all(hailServers.map(stop));
       hailServers.length = 0;
       await stop(control);
