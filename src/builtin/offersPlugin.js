@@ -30,6 +30,7 @@ export function createOffersPlugin({ services = {}, tunnels = {} } = {}) {
     // Startable but unreachable is not an offer: without the paired tunnel the
     // caller could start it and never speak to it. Advertise only complete pairs.
     if (!tunnels[tunnelName]) return [];
+    /** @type {{service: string, label: string, agent: string|null, role: string, tunnel: string, supervisorTunnel?: string}} */
     const offer = {
       service: name,
       label: typeof label === "string" && label ? label : name,
@@ -57,8 +58,9 @@ export function createOffersPlugin({ services = {}, tunnels = {} } = {}) {
         method: "POST",
         path: "/offers",
         capability: OFFERS,
-        handler: ({ log }) => {
-          log?.(`[offers] advertised ${offers.length} offering(s)`);
+        /** @param {any} ctx */
+        handler: (ctx) => {
+          ctx.log?.(`[offers] advertised ${offers.length} offering(s)`);
           return { offers };
         },
       },

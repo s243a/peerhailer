@@ -41,6 +41,7 @@ const MAX_LAUNCHES = 4;
  * @param {{
  *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
  *   identity?: any,
+ *   fabric?: any,
  *   log?: (m: string) => void,
  * }} [options]
  */
@@ -74,7 +75,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   }
 
   /**
-   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string, timing?: object|null}} spec
+   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string, timing?: object|null, node?: string, service?: string, tunnel?: string, supervisorTunnel?: string}} spec
    */
   async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel, supervisorTunnel } = /** @type {any} */ ({})) {
     const isLocal = !node || node === "local";
@@ -100,7 +101,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     // runs `--supervisor-mcp` and we tee its stderr (where the seat URL prints)
     // into seatLog via `sh -c`; otherwise it is spawned directly.
     let config;
-    let remote = null;
+    let remote = /** @type {any} */ (null);
     if (node && node !== "local") {
       // Remote worker: start the bridge service on the chosen node and point T3's
       // ACP provider at `hail tunnel <node> <tunnel> pipe`. Remote MCP supervision
@@ -135,7 +136,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
           remote.seatUrl = `http://127.0.0.1:${forward.port}/mcp/supervisor`;
         } catch (error) {
           // Rather than fail the launch, run the worker unsupervised.
-          log(`[composer] could not forward the seat for ${node}: ${error?.message ?? error}`);
+          log(`[composer] could not forward the seat for ${node}: ${error instanceof Error ? error.message : error}`);
           supervision = "none";
         }
       } else {
