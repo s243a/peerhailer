@@ -30,7 +30,7 @@ function share(writable) {
   return { call, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-const dav = (url, method, opts = {}) => fetch(url, { method, ...opts });
+const dav = (url, method, opts = {}) => fetch(url, { method, ...opts, headers: { connection: "close", ...(opts.headers || {}) } });
 
 test("OPTIONS advertises DAV; PROPFIND lists; GET reads; PUT writes back", async (t) => {
   const { call, cleanup } = share(true);
@@ -101,21 +101,21 @@ test("the page mounts a peer's share and WebDAV works on the returned URL", asyn
   dirB.admit({ name: "alice", publicKey: A.publicKey }, { profile: "f" });
   const daemonA = createDaemon({ directory: dirA, identity: A, plugins: [hailPlugin] });
   const ctrlA = await daemonA.listen({ port: 0 });
-  t.after(() => { daemonA.close(); daemonB.close(); });
+  t.after(async () => { await daemonA.close(); await daemonB.close(); });
 
   const started = await fetch(`http://127.0.0.1:${ctrlA.port}/api/files/mount`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ peer: "bob", share: "docs" }),
+    method: "POST", headers: { "content-type": "application/json", connection: "close" }, body: JSON.stringify({ peer: "bob", share: "docs" }),
   }).then((r) => r.json());
   assert.match(started.url ?? "", /^http:\/\/127\.0\.0\.1:\d+\/$/, "a loopback mount URL");
 
-  const got = await fetch(started.url + "shared.txt");
+  const got = await fetch(started.url + "shared.txt", { headers: { connection: "close" } });
   assert.equal(await got.text(), "over the fabric, over dav", "reading the peer's file through the WebDAV mount");
 
-  const listed = await fetch(`http://127.0.0.1:${ctrlA.port}/api/files/mounts`).then((r) => r.json());
+  const listed = await fetch(`http://127.0.0.1:${ctrlA.port}/api/files/mounts`, { headers: { connection: "close" } }).then((r) => r.json());
   assert.equal(listed.mounts.length, 1);
 
   const stopped = await fetch(`http://127.0.0.1:${ctrlA.port}/api/files/mount/stop`, {
-    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mountId: started.mountId }),
+    method: "POST", headers: { "content-type": "application/json", connection: "close" }, body: JSON.stringify({ mountId: started.mountId }),
   }).then((r) => r.json());
   assert.equal(stopped.stopped, true, "the mount is torn down");
 });
