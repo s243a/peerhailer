@@ -189,6 +189,28 @@ Blocking is by key, so the check is available; it just has to be made on the
 next hop as well as on the requester. Without it, `hail block` protects only the
 front door.
 
+### The exit token: letting the local service check too (optional)
+
+Everything above is peerhailer's own gate — the `tunnel:<name>` capability decides
+who may *open* a tunnel. But the exit terminates onto a **local port**, and any
+other process on that box's loopback can reach that same port without going through
+peerhailer at all. Usually that is fine (the port is a private service). When it is
+not — a supervisor seat on a fixed port is the motivating case — declare the tunnel
+with an exit token:
+
+```
+hail tunnels add mcp-seat 127.0.0.1:9103 --exit-token <token>
+```
+
+On connect, before relaying any caller bytes, the exit writes one line to the local
+service: `PHT/1 <token>\r\n`. A service that checks for it can refuse a connection
+that did not arrive through the tunnel — the token is the proof of transit. It is
+defence in depth, not a replacement for the capability: the capability still gates
+the entrance; the token lets the *exit's own service* gate its door as well. The
+origin never sees the token; it is operator config on the two ends of the tunnel.
+(The bridge's supervisor seat checks exactly this line — see mcp-acp-bridge
+`docs/supervisor.md`, `--supervisor-mcp-token`.)
+
 ## Identity travels with the payload
 
 Sealing hides the content from the fabric. It does not hide the sender, because
