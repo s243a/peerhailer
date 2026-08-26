@@ -796,6 +796,56 @@ export function createDaemon({
         return send(response, 200, { entries });
       }
 
+      // Chat: short in-memory messages to and from admitted peers, surfaced for
+      // the page. The chat plugin (present only with --chat) holds them; here we
+      // resolve peer names, deliver outgoing over the peer's /chat/send, and
+      // record our own side. Text is attacker-chosen — the page MUST escape it.
+      const chat = /** @type {any} */ (
+        plugins.find(
+          (pl) => pl && typeof (/** @type {any} */ (pl).conversations) === "function" && typeof (/** @type {any} */ (pl).say) === "function",
+        )
+      );
+      const chatNames = () => new Map((directory.listAdmitted?.() ?? []).map((peer) => [peer.publicKey, peer.name]));
+      if (scope === "control" && url.pathname === "/api/chat/state" && request.method === "GET") {
+        if (!chat) return send(response, 200, { enabled: false, self: directory.self?.name ?? null, conversations: [], peers: [] });
+        const names = chatNames();
+        const conversations = chat.conversations().map((/** @type {any} */ c) => ({
+          key: c.peerKey,
+          name: names.get(c.peerKey) ?? null,
+          fp: fingerprint(c.peerKey),
+          count: c.count,
+          last: c.last,
+        }));
+        // Admitted peers you could start a chat with, even before any message.
+        const peers = (directory.listAdmitted?.() ?? []).map((peer) => peer.name);
+        return send(response, 200, { enabled: true, self: directory.self?.name ?? null, conversations, peers });
+      }
+      if (scope === "control" && url.pathname === "/api/chat/thread" && request.method === "GET") {
+        if (!chat) return send(response, 200, { messages: [] });
+        const record = directory.get?.(url.searchParams.get("peer") ?? "");
+        if (!record) return send(response, 404, { error: "unknown peer" });
+        return send(response, 200, { messages: chat.thread(record.publicKey) });
+      }
+      if (scope === "control" && url.pathname === "/api/chat/send" && request.method === "POST") {
+        if (!chat) return send(response, 501, { error: "chat is off — start the daemon with --chat" });
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const record = directory.get?.(body?.peer ?? "");
+        const text = typeof body?.text === "string" ? body.text : "";
+        if (!record) return send(response, 404, { error: "unknown peer" });
+        if (!text.trim()) return send(response, 400, { error: "an empty message is not a message" });
+        const result = await callNode(record.name, "/chat/send", { text });
+        if (!result?.ok) return send(response, 502, { error: result?.error ?? "the peer did not accept the message" });
+        const message = chat.say(record.publicKey, text);
+        return send(response, 200, { ok: true, message });
+      }
+      if (scope === "control" && url.pathname === "/api/chat/clear" && request.method === "POST") {
+        if (!chat) return send(response, 200, { cleared: false });
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const record = directory.get?.(body?.peer ?? "");
+        if (record) chat.forget(record.publicKey);
+        return send(response, 200, { cleared: Boolean(record) });
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.

@@ -1,9 +1,10 @@
 # A chat plugin
 
-**Status: the plugin is built; the sealed relay to a non-peer (below) is designed.**
-Short messages between admitted peers work today, over an encrypted arrival.
-Reaching someone who is *not* a peer — sealed so the relay cannot read it —
-depends on the relay, which is not built.
+**Status: the plugin and a page for it are built; the sealed relay to a non-peer
+(below) is designed.** Short messages between admitted peers work today, over an
+encrypted arrival, and the daemon's `--ui` page has a **Chat** section to read and
+send them. Reaching someone who is *not* a peer — sealed so the relay cannot read
+it — depends on the relay, which is not built.
 
 ## Why this one is not already solved
 
@@ -153,3 +154,17 @@ because every other input in this project carries an identity.
   is the plugin shape today; a machine that only checks when a human opens a page
   will be a machine that misses things.
 
+## The page
+
+The daemon's `--ui` page (loopback control only) has a **Chat** section: pick an
+admitted peer, read the conversation, and send a short message. It is backed by
+four control routes — `GET /api/chat/state` (conversations + admittable peers),
+`GET /api/chat/thread?peer=<name>`, `POST /api/chat/send {peer, text}` (delivers
+over the peer's `/chat/send` and records our side), and `POST /api/chat/clear
+{peer}`. Outgoing delivery reuses the same signed `callPeer` path as the rest of
+the fabric; names resolve through the directory.
+
+**The renderer honours the plugin's requirement.** Message text is attacker-chosen
+and stored verbatim, so the page escapes every message (`esc`) and never makes it
+actionable — no link, no markup, no command. That requirement, stated in
+`chatPlugin.js` where the store lives, is now met by the code that renders it.
