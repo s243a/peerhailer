@@ -491,8 +491,10 @@ switch (command) {
         : []),
       ...(await loadPlugins(stored.plugins ?? [], { log })),
     ];
-    for (const [name, address] of Object.entries(tunnels)) {
-      log(`[tunnel] ${name} -> ${address} (needs tunnel:${name})`);
+    for (const [name, value] of Object.entries(tunnels)) {
+      const addr = typeof value === "string" ? value : value.address;
+      const gated = typeof value === "string" || !value.exitToken ? "" : " (exit token-gated)";
+      log(`[tunnel] ${name} -> ${addr}${gated} (needs tunnel:${name})`);
     }
     for (const name of Object.keys(declaredCommands)) {
       log(`[command] ${name} (needs command:${name})`);
@@ -1014,14 +1016,28 @@ switch (command) {
     const tunnels = stored.tunnels ?? {};
 
     if (action === "add") {
-      if (!name || !address) fail("usage: hail tunnels add <name> <host:port>");
+      if (!name || !address) fail("usage: hail tunnels add <name> <host:port> [--exit-token <token>]");
       if (!/^[a-z0-9][a-z0-9-]*$/i.test(name)) fail("a tunnel name is letters, digits and dashes");
       // Written down here, and named by callers. A peer says `acp`; it never
       // says an address, or this is a port forward into whatever trusts
       // localhost for the reason that nothing remote should reach it.
-      stored.tunnels = { ...tunnels, [name]: address };
+      // With --exit-token, the tunnel writes `PHT/1 <token>` as the first line to
+      // the local service on connect, so a service that checks it can refuse a
+      // connection that did not arrive through the tunnel (defence in depth on the
+      // exit, on top of the capability on the entrance). The caller never sees it.
+      const exitToken = typeof flags["exit-token"] === "string" ? flags["exit-token"] : null;
+      if (flags["exit-token"] === true) fail("--exit-token needs a value");
+      // Printable ASCII, no whitespace, >= 8 chars: the token is written verbatim
+      // on one line to the exit and compared byte-for-byte by the service, so
+      // whitespace or control bytes would make the two ends silently disagree, and
+      // a very short token is trivially brute-forced from loopback.
+      if (exitToken && !/^[\x21-\x7e]{8,}$/.test(exitToken)) {
+        fail("--exit-token must be >= 8 printable non-space characters");
+      }
+      const value = exitToken ? { address, exitToken } : address;
+      stored.tunnels = { ...tunnels, [name]: value };
       persist();
-      log(`tunnel ${name} -> ${address}`);
+      log(`tunnel ${name} -> ${address}${exitToken ? "  (exit token-gated)" : ""}`);
       log(`peers need the ${`tunnel:${name}`} capability; no profile grants it yet`);
       break;
     }
@@ -1040,7 +1056,12 @@ switch (command) {
       log("no tunnels declared. hail tunnels add <name> <host:port>");
       break;
     }
-    for (const entry of names) log(`  ${entry.padEnd(12)} -> ${tunnels[entry]}   needs tunnel:${entry}`);
+    for (const entry of names) {
+      const v = tunnels[entry];
+      const addr = typeof v === "string" ? v : v.address;
+      const gated = typeof v === "string" ? "" : v.exitToken ? " (exit token-gated)" : "";
+      log(`  ${entry.padEnd(12)} -> ${addr}${gated}   needs tunnel:${entry}`);
+    }
     break;
   }
 

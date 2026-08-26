@@ -41,6 +41,7 @@ const MAX_LAUNCHES = 4;
  * @param {{
  *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
  *   identity?: any,
+ *   fabric?: any,
  *   log?: (m: string) => void,
  * }} [options]
  */
@@ -139,9 +140,9 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   }
 
   /**
-   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string}} spec
+   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string, timing?: object|null, node?: string, service?: string, tunnel?: string, supervisorTunnel?: string}} spec
    */
-  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel, supervisorTunnel } = {}) {
+  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel, supervisorTunnel } = /** @type {any} */ ({})) {
     const isLocal = !node || node === "local";
     if (isLocal && !KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
     if (gate && !gateConfig())
@@ -165,7 +166,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     // runs `--supervisor-mcp` and we tee its stderr (where the seat URL prints)
     // into seatLog via `sh -c`; otherwise it is spawned directly.
     let config;
-    let remote = null;
+    let remote = /** @type {any} */ (null);
     if (node && node !== "local") {
       // Remote worker: start the bridge service on the chosen node and point T3's
       // ACP provider at `hail tunnel <node> <tunnel> pipe`. Remote MCP supervision
@@ -200,7 +201,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
           remote.seatUrl = `http://127.0.0.1:${forward.port}/mcp/supervisor`;
         } catch (error) {
           // Rather than fail the launch, run the worker unsupervised.
-          log(`[composer] could not forward the seat for ${node}: ${error?.message ?? error}`);
+          log(`[composer] could not forward the seat for ${node}: ${error instanceof Error ? error.message : error}`);
           supervision = "none";
         }
       } else {
@@ -234,13 +235,14 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     // Spawn the T3 server (its own process group) and wait for it to serve.
     const { t3, origin, pairingUrl } = await spawnT3({ home, ws, onFail: removeHome, label: launchId });
 
-    const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: null, remote };
+    const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: /** @type {import("node:http").Server | null} */ (null), remote };
     launches.set(launchId, entry);
 
     let gateUrl = null;
     if (gate) {
       try {
         const g = gateConfig();
+        if (!g) throw badRequest("no gate password set — run: hail gate set-password", 502);
         const proxy = createGate({ target: origin, passwordHash: g.passwordHash, secret: g.secret, log });
         const server = createHttpsServer(selfSignedCert(identity), proxy.onRequest);
         server.on("upgrade", proxy.onUpgrade);
@@ -248,7 +250,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
         // 8443 and strand this T3.
         const port = await new Promise((resolve, reject) => {
           server.once("error", reject);
-          server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+          server.listen(0, "127.0.0.1", () => resolve(/** @type {import("node:net").AddressInfo} */ (server.address()).port));
         });
         entry.gate = server;
         gateUrl = `https://127.0.0.1:${port}`;
@@ -257,7 +259,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
         launches.delete(launchId);
         kill(t3);
         removeHome();
-        throw badRequest(`gate failed to start: ${error.message}`, 502);
+        throw badRequest(`gate failed to start: ${error instanceof Error ? error.message : String(error)}`, 502);
       }
     }
 
@@ -266,6 +268,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   }
 
   /** The supervisor seat URL, once T3 has activated the worker (bridge spawned). */
+  /** @param {string} launchId */
   function seat(launchId) {
     const entry = launches.get(launchId);
     if (!entry) return { error: "no such launch" };
@@ -282,6 +285,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       : { seatUrl: null, hint: "open a thread in T3 with the 'Composer worker' provider to activate the supervisor seat" };
   }
 
+  /** @param {string} launchId */
   async function stop(launchId) {
     const entry = launches.get(launchId);
     if (!entry) return { stopped: false };
@@ -438,10 +442,12 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   return { agents, nodes, launch, controlRemote, stopControl, seat, stop, list, closeAll };
 }
 
+/** @param {import("node:child_process").ChildProcess} child */
 function kill(child) {
   if (!child || child.exitCode !== null || child.signalCode) return;
   const pid = child.pid;
-  const term = (signal) => {
+  if (typeof pid !== "number") return;
+  const term = (/** @type {NodeJS.Signals} */ signal) => {
     try {
       process.kill(-pid, signal);
     } catch {
@@ -458,17 +464,20 @@ function kill(child) {
   }, 3000).unref?.();
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Single-quote a token for `sh -c`, escaping embedded quotes. */
+/** Single-quote a token for `sh -c`, escaping embedded quotes.
+ * @param {unknown} value */
 function shq(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
+/** @param {unknown} text @param {number} [n] */
 function tail(text, n = 600) {
   return String(text).slice(-n);
 }
 
+/** @param {string} message @param {number} [status] */
 function badRequest(message, status = 400) {
   const error = new Error(message);
   // @ts-expect-error tag for the route to map to an HTTP status
