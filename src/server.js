@@ -885,7 +885,8 @@ export function createDaemon({
         try {
           return send(response, 200, await composer.controlRemote(body));
         } catch (error) {
-          return send(response, error?.status ?? 500, { error: String(error?.message ?? error) });
+          const e = /** @type {any} */ (error);
+          return send(response, e?.status ?? 500, { error: String(e?.message ?? error) });
         }
       }
       if (scope === "control" && url.pathname === "/api/compose/control/stop" && request.method === "POST") {

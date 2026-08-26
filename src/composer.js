@@ -68,7 +68,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
    * @returns {Promise<{t3: import("node:child_process").ChildProcess, origin: string, pairingUrl: string|null, devUrl: string|null}>}
    */
   async function spawnT3({ home, ws, onFail = () => {}, label = "t3" }) {
-    const [cmd, ...rest] = t3Cmd;
+    const [cmd = "node", ...rest] = t3Cmd;
     const t3 = spawn(cmd, [...rest, "serve", "--host", "127.0.0.1", "--no-browser"], {
       cwd: ws,
       env: { ...process.env, T3CODE_HOME: home },
@@ -76,8 +76,8 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       detached: true,
     });
     let t3out = "";
-    let spawnError = null;
-    const capture = (d) => {
+    let spawnError = /** @type {Error | null} */ (null);
+    const capture = (/** @type {string | Buffer} */ d) => {
       t3out += d;
     };
     t3.stdout.setEncoding("utf8");
@@ -86,10 +86,10 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     t3.stderr.on("data", capture);
     // Never let a spawn error (e.g. a missing T3CODE_CMD binary) become an
     // uncaught exception — that would take down the whole daemon.
-    t3.on("error", (error) => {
+    t3.on("error", (/** @type {Error} */ error) => {
       spawnError = error;
     });
-    t3.on("exit", (code) => log(`[composer] t3 for ${label} exited (${code})`));
+    t3.on("exit", (/** @type {number | null} */ code) => log(`[composer] t3 for ${label} exited (${code})`));
 
     const runtimePath = join(home, "userdata", "server-runtime.json");
     let origin = null;
@@ -318,7 +318,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
    * that expires on its own — the tunnel stays a byte carrier.
    * @param {{node: string, pairCommand?: string, tunnel?: string, localT3?: "existing"|"new"}} spec
    */
-  async function controlRemote({ node, pairCommand = "pair", tunnel = "t3", localT3 = "existing" } = {}) {
+  async function controlRemote({ node, pairCommand = "pair", tunnel = "t3", localT3 = "existing" } = /** @type {any} */ ({})) {
     if (!fabric?.runCommand || !fabric?.forward)
       throw badRequest("remote control needs the fabric (peers + tunnelPipeCommand)", 501);
     if (!node || node === "local") throw badRequest("remote control targets a peer node, not local");
@@ -408,6 +408,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     }
   }
 
+  /** @param {string} controlId */
   async function stopControl(controlId) {
     const entry = controls.get(controlId);
     if (!entry) return { stopped: false };
