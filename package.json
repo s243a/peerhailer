@@ -50,7 +50,8 @@
     "test:codex-fabric": "node test/live-codex-fabric.mjs",
     "test:acp-native": "node test/live-acp-native-fabric.mjs",
     "test:codex-appserver": "node test/live-codex-appserver-fabric.mjs",
-    "test:codex-steer": "node test/live-codex-steer-fabric.mjs"
+    "test:codex-steer": "node test/live-codex-steer-fabric.mjs",
+    "test:composer": "node test/live-composer.mjs"
   },
   "types": "types/index.d.ts",
   "devDependencies": {

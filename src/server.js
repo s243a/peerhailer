@@ -40,6 +40,7 @@ import {
 } from "./profiles.js";
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
+import { createComposer } from "./composer.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -109,6 +110,8 @@ export function createDaemon({
   requireTargetBinding = false,
   onReload,
   applyChange,
+  /** Session composer: whether a gate password is set, for the optional bastion. */
+  gateConfig = () => null,
   log = () => {},
 }) {
   // Our own fingerprint, computed once: the value a bound hail's `to` must
@@ -121,6 +124,10 @@ export function createDaemon({
   // does not catch.
   let plugins = initialPlugins;
   let profiles = initialProfiles;
+
+  // Local-first session composer: spawns/tracks T3 (+ gate) children. Loopback
+  // control routes below drive it; children are torn down on `close`.
+  const composer = createComposer({ gateConfig, identity, log });
 
   /**
    * Every runtime mutation goes through here: applied to what is on disk now,
@@ -790,6 +797,30 @@ export function createDaemon({
         return send(response, 200, { forgotten });
       }
 
+      // The session composer: one-click launch of a local T3 instance whose model
+      // is a bridged coding agent, with an optional MCP supervision seat and an
+      // optional password bastion. Loopback control only — it spawns processes,
+      // so it is far more powerful than the rest of the page: never expose these
+      // to a browser origin via --allow-origin.
+      if (scope === "control" && url.pathname === "/api/compose/agents" && request.method === "GET") {
+        return send(response, 200, composer.agents());
+      }
+      if (scope === "control" && url.pathname === "/api/compose/launch" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        try {
+          return send(response, 200, await composer.launch(body));
+        } catch (error) {
+          return send(response, error?.status ?? 500, { error: String(error?.message ?? error) });
+        }
+      }
+      if (scope === "control" && url.pathname === "/api/compose/seat" && request.method === "GET") {
+        return send(response, 200, composer.seat(url.searchParams.get("launchId") ?? ""));
+      }
+      if (scope === "control" && url.pathname === "/api/compose/stop" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        return send(response, 200, await composer.stop(body?.launchId));
+      }
+
       return nothingHere(response);
     } catch (cause) {
       log(`[daemon] ${url.pathname} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -951,6 +982,7 @@ export function createDaemon({
     },
 
     close: async () => {
+      composer.closeAll();
       await Promise.all(hailServers.map(stop));
       hailServers.length = 0;
       await stop(control);

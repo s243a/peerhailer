@@ -569,6 +569,16 @@ switch (command) {
       // turn it on once every peer that hails this machine sends `to`. See
       // docs/hail-target-binding.md.
       requireTargetBinding: flags["require-target-binding"] === true,
+      // The session composer's optional password bastion needs to know a gate
+      // password is set. Re-read state each call so a `hail gate set-password`
+      // run after the daemon started (or a rotation) is seen without a restart.
+      gateConfig: () => {
+        try {
+          return loadState(statePath).gate ?? null;
+        } catch {
+          return stored.gate ?? null;
+        }
+      },
       onReload: async () => daemon.reload(await rebuild()),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
