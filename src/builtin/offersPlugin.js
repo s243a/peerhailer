@@ -24,21 +24,25 @@ export const OFFERS = "offers";
 export function createOffersPlugin({ services = {}, tunnels = {} } = {}) {
   const offers = Object.entries(services).flatMap(([name, decl]) => {
     if (!decl || typeof decl !== "object") return []; // a bare command string carries no metadata
-    const { label, agent, role, tunnel } = decl;
+    const { label, agent, role, tunnel, supervisorTunnel } = decl;
     if (!agent && !role) return []; // not a launchable offer, just a plain service
     const tunnelName = typeof tunnel === "string" && tunnel ? tunnel : name;
     // Startable but unreachable is not an offer: without the paired tunnel the
     // caller could start it and never speak to it. Advertise only complete pairs.
     if (!tunnels[tunnelName]) return [];
-    return [
-      {
-        service: name,
-        label: typeof label === "string" && label ? label : name,
-        agent: typeof agent === "string" ? agent : null,
-        role: role === "supervisor" ? "supervisor" : "worker",
-        tunnel: tunnelName,
-      },
-    ];
+    const offer = {
+      service: name,
+      label: typeof label === "string" && label ? label : name,
+      agent: typeof agent === "string" ? agent : null,
+      role: role === "supervisor" ? "supervisor" : "worker",
+      tunnel: tunnelName,
+    };
+    // Advertise a supervisor seat only when its tunnel is declared too — else the
+    // caller could enable supervision it cannot actually reach.
+    if (typeof supervisorTunnel === "string" && supervisorTunnel && tunnels[supervisorTunnel]) {
+      offer.supervisorTunnel = supervisorTunnel;
+    }
+    return [offer];
   });
 
   return {

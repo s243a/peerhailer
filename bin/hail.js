@@ -41,7 +41,7 @@ function hasLaunchableOffer(services, tunnels) {
 }
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
-import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel } from "../src/tunnelClient.js";
+import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel, forwardTunnel } from "../src/tunnelClient.js";
 import { collectProfiles, collectRoutes, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
@@ -806,7 +806,7 @@ switch (command) {
     // T3 here. open/send/poll/close are the low-level pieces, for scripting.
     const [peerName, name, action, ...more] = rest;
     if (!peerName || !name || !action) {
-      fail("usage: hail tunnel <peer> <name> <pipe|open|send|poll|close> [args]");
+      fail("usage: hail tunnel <peer> <name> <pipe|forward [localport]|open|send|poll|close> [args]");
     }
     const record = directory.get(peerName);
     if (!record) fail(`unknown peer ${peerName} — see hail peers`);
@@ -828,6 +828,20 @@ switch (command) {
       );
       if (!result.ok) fail(result.error);
       process.exit(0);
+    }
+    if (action === "forward") {
+      // Expose the remote endpoint as a local TCP port — for a client that speaks
+      // a socket (an HTTP MCP supervisor) rather than stdio. Runs until stopped.
+      const requested = more[0] ? Number(more[0]) : 0;
+      const fwd = await forwardTunnel(call, name, {
+        port: Number.isInteger(requested) && requested >= 0 ? requested : 0,
+        log: (m) => process.stderr.write(`${m}\n`),
+      });
+      log(`forwarding http://127.0.0.1:${fwd.port} -> tunnel ${name} on ${peerName} (Ctrl-C to stop)`);
+      const stop = () => fwd.close().finally(() => process.exit(0));
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      await new Promise(() => {});
     }
     if (action === "open") {
       const res = need(await openTunnel(call, name));
@@ -915,8 +929,9 @@ switch (command) {
       const svcAgent = typeof flags.agent === "string" ? flags.agent : undefined;
       const svcRole = typeof flags.role === "string" ? flags.role : undefined;
       const svcTunnel = typeof flags.tunnel === "string" ? flags.tunnel : undefined;
+      const svcSeatTunnel = typeof flags["supervisor-tunnel"] === "string" ? flags["supervisor-tunnel"] : undefined;
       if (svcRole && svcRole !== "worker" && svcRole !== "supervisor") fail("--role must be worker or supervisor");
-      const meta = { ...(label ? { label } : {}), ...(svcAgent ? { agent: svcAgent } : {}), ...(svcRole ? { role: svcRole } : {}), ...(svcTunnel ? { tunnel: svcTunnel } : {}) };
+      const meta = { ...(label ? { label } : {}), ...(svcAgent ? { agent: svcAgent } : {}), ...(svcRole ? { role: svcRole } : {}), ...(svcTunnel ? { tunnel: svcTunnel } : {}), ...(svcSeatTunnel ? { supervisorTunnel: svcSeatTunnel } : {}) };
       const hasMeta = Object.keys(meta).length > 0;
       stored.services = {
         ...declared,

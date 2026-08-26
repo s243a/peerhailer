@@ -116,10 +116,24 @@ node's capability-gated `/offers` route via `callPeer`), and a launch:
 T3's config only ever names the relay, so local-vs-remote and which-agent are the
 composer's choices, not T3's.
 
-**Remaining gap — remote MCP supervision.** The supervisor seat only exists in the
-bridge's stdio mode on a loopback URL, so a *remote* worker can't yet be supervised
-by your Claude Code over MCP (the Node picker disables supervision for peers). That
-needs a `--supervisor-mcp-port` on the bridge so the seat lands on a fixed,
-tunnelable port, plus a supervisor tunnel — the next step.
+### Supervising a *remote* worker
+
+A remote worker can be MCP-supervised too, when the node offers a seat. The node's
+worker runs in stdio mode behind `acp-passthrough` (so the bridge's seat wires) and
+pins the seat with `--supervisor-mcp-port`, and declares a second tunnel to it:
+
+```sh
+hail services add agy-worker   "acp-passthrough --listen 9102 -- node ~/mcp-acp-bridge/bin/bridge.js --agent agy --supervisor-mcp --supervisor-mcp-port 9103"   --agent agy --role worker --label "Gemini worker" --tunnel agy-worker --supervisor-tunnel mcp-seat
+hail tunnels add agy-worker 127.0.0.1:9102   # worker ACP
+hail tunnels add mcp-seat   127.0.0.1:9103   # supervisor seat (fixed /mcp/supervisor)
+# grant the composer: hail profiles add composer --allows hail,offers,service:agy-worker,tunnel:agy-worker,tunnel:mcp-seat
+```
+
+The offer then advertises `supervisorTunnel`; the composer re-enables Supervision
+for that node, and on a supervised launch it forwards the seat tunnel to a local
+port and hands you `http://127.0.0.1:<port>/mcp/supervisor` to point Claude Code
+at. The seat's credential is the tunnel capability, not the URL — see
+mcp-acp-bridge `docs/supervisor.md`. A fixed seat port means one supervised worker
+process on that node.
 
 [mcp-acp-bridge]: ../../mcp-acp-bridge

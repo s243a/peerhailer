@@ -38,9 +38,12 @@ const fabric = {
   tunnelPipeCommand: (peer, tunnel) => ({ command: "echo", args: ["tunnel", peer, tunnel, "pipe"] }),
   startRemote: async (peer, service) => (calls.push(["start", peer, service]), { ok: true, response: { id: "svc-abc", name: service, port: 9102 } }),
   stopRemote: async (peer, service, id) => (calls.push(["stop", peer, service, id]), { ok: true, response: { stopped: true } }),
+  forwardSeat: async (peer, seatTunnel) => (calls.push(["forward", peer, seatTunnel]), { port: 9200, close: () => calls.push(["forward-close"]) }),
   listNodes: async () => ({
     self: "me",
-    nodes: [{ peer: "puppy", reachable: true, offers: [{ service: "agy-worker", label: "Gemini", agent: "agy", role: "worker", tunnel: "agy-worker" }] }],
+    nodes: [
+      { peer: "puppy", reachable: true, offers: [{ service: "agy-worker", label: "Gemini", agent: "agy", role: "worker", tunnel: "acp-worker", supervisorTunnel: "mcp-seat" }] },
+    ],
   }),
 };
 const composer = createComposer({ gateConfig: () => null, identity: null, log: () => {}, fabric });
@@ -50,14 +53,17 @@ const nodes = await composer.nodes();
 assert.equal(nodes.self, "me");
 assert.equal(nodes.nodes[0].offers[0].service, "agy-worker");
 
-const res = await composer.launch({ node: "puppy", service: "agy-worker", tunnel: "agy-worker", supervision: "mcp" });
+const res = await composer.launch({ node: "puppy", service: "agy-worker", tunnel: "acp-worker", supervisorTunnel: "mcp-seat", supervision: "mcp" });
 assert.equal(res.node, "puppy");
-assert.equal(res.supervision, "none", "remote supervision is forced off in v1");
+assert.equal(res.supervision, "mcp", "remote supervision stays on when a seat tunnel is offered");
+assert.equal(res.seatUrl, "http://127.0.0.1:9200/mcp/supervisor", "the forwarded seat URL is surfaced");
+assert.equal(composer.seat(res.launchId).seatUrl, res.seatUrl, "seat() returns the known remote seat URL");
+assert.ok(calls.some((c) => c[0] === "forward" && c[1] === "puppy" && c[2] === "mcp-seat"), "the seat tunnel was forwarded");
 
 const home = res.seatLog.replace(/\/seat\.log$/, "");
 const cfg = JSON.parse(readFileSync(join(home, "userdata", "settings.json"), "utf8")).providerInstances.relay.config;
 assert.equal(cfg.command, "echo");
-assert.equal(cfg.args.join(" "), "tunnel puppy agy-worker pipe", "T3 provider points at the tunnel pipe");
+assert.equal(cfg.args.join(" "), "tunnel puppy acp-worker pipe", "T3 provider points at the worker tunnel pipe");
 assert.deepEqual(
   calls.find((c) => c[0] === "start"),
   ["start", "puppy", "agy-worker"],
@@ -70,6 +76,7 @@ assert.deepEqual(
   ["stop", "puppy", "agy-worker", "svc-abc"],
   "the remote service was stopped on teardown",
 );
+assert.ok(calls.some((c) => c[0] === "forward-close"), "the seat forward was closed on teardown");
 
-console.log("PASS — remote launch: started the service, relayed T3 through the tunnel, supervision off, stopped remotely");
+console.log("PASS — supervised remote launch: started the worker, relayed T3, forwarded the seat, and tore both down");
 process.exit(0);

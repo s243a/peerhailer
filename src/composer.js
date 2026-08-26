@@ -76,7 +76,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   /**
    * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string}} spec
    */
-  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel } = {}) {
+  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel, supervisorTunnel } = {}) {
     const isLocal = !node || node === "local";
     if (isLocal && !KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
     if (gate && !gateConfig())
@@ -126,7 +126,21 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       remote = { node, service, id: info.id, port: info.port };
       const pipe = fabric.tunnelPipeCommand(node, tunnel);
       config = { command: pipe.command, args: pipe.args };
-      supervision = "none";
+      // Remote MCP supervision: expose the node's seat tunnel as a local port so a
+      // Claude Code MCP client can reach it at the fixed /mcp/supervisor path.
+      if (supervision === "mcp" && supervisorTunnel && fabric.forwardSeat) {
+        try {
+          const forward = await fabric.forwardSeat(node, supervisorTunnel);
+          remote.seatForward = forward;
+          remote.seatUrl = `http://127.0.0.1:${forward.port}/mcp/supervisor`;
+        } catch (error) {
+          // Rather than fail the launch, run the worker unsupervised.
+          log(`[composer] could not forward the seat for ${node}: ${error?.message ?? error}`);
+          supervision = "none";
+        }
+      } else {
+        supervision = "none";
+      }
     } else {
       const bridgeArgs = ["--agent", agent, "--cwd", ws];
       if (supervision === "mcp") {
@@ -232,13 +246,14 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     }
 
     log(`[composer] launched ${launchId}: ${agent} → ${origin}${gateUrl ? ` (gated ${gateUrl})` : ""}`);
-    return { launchId, agent, supervision, node, t3Url: origin, pairingUrl, gateUrl, seatLog };
+    return { launchId, agent, supervision, node, t3Url: origin, pairingUrl, gateUrl, seatUrl: remote?.seatUrl ?? null, seatLog };
   }
 
   /** The supervisor seat URL, once T3 has activated the worker (bridge spawned). */
   function seat(launchId) {
     const entry = launches.get(launchId);
     if (!entry) return { error: "no such launch" };
+    if (entry.remote?.seatUrl) return { seatUrl: entry.remote.seatUrl };
     let seatUrl = null;
     try {
       // Loopback only: the seat is on 127.0.0.1, so refuse a forged seat line a
@@ -257,10 +272,15 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     launches.delete(launchId);
     kill(entry.t3);
     entry.gate?.close();
-    if (entry.remote && fabric?.stopRemote) {
+    if (entry.remote) {
       try {
-        await fabric.stopRemote(entry.remote.node, entry.remote.service, entry.remote.id);
+        entry.remote.seatForward?.close?.();
       } catch {}
+      if (fabric?.stopRemote) {
+        try {
+          await fabric.stopRemote(entry.remote.node, entry.remote.service, entry.remote.id);
+        } catch {}
+      }
     }
     try {
       rmSync(entry.home, { recursive: true, force: true });

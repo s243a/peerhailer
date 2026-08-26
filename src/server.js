@@ -42,6 +42,7 @@ import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 import { createComposer } from "./composer.js";
 import { callPeer } from "./hail.js";
+import { forwardTunnel } from "./tunnelClient.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -143,6 +144,12 @@ export function createDaemon({
         tunnelPipeCommand,
         startRemote: (peer, service) => callNode(peer, `/service/${service}/start`, {}),
         stopRemote: (peer, service, id) => callNode(peer, `/service/${service}/stop`, { id }),
+        forwardSeat: (peer, seatTunnel) => {
+          const record = directory.get?.(peer);
+          if (!record) return Promise.reject(new Error("unknown peer"));
+          const call = (path, body) => callPeer(record, path, body, { as: asSelf() });
+          return forwardTunnel(call, seatTunnel, { port: 0, log });
+        },
         listNodes: async () => {
           const admitted = directory.listAdmitted?.() ?? [];
           const nodes = await Promise.all(
