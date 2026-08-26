@@ -211,6 +211,11 @@ origin never sees the token; it is operator config on the two ends of the tunnel
 (The bridge's supervisor seat checks exactly this line — see mcp-acp-bridge
 `docs/supervisor.md`, `--supervisor-mcp-token`.)
 
+The token is written verbatim on the wire and compared byte-for-byte at the exit,
+so both ends must spell it identically: it is required to be **>= 8 printable,
+non-space characters**, which the CLIs enforce. Like the gate's cookie secret and
+the identity key, it sits plaintext in `state.json` — keep that file `0600`.
+
 ## Identity travels with the payload
 
 Sealing hides the content from the fabric. It does not hide the sender, because

@@ -978,6 +978,13 @@ switch (command) {
       // exit, on top of the capability on the entrance). The caller never sees it.
       const exitToken = typeof flags["exit-token"] === "string" ? flags["exit-token"] : null;
       if (flags["exit-token"] === true) fail("--exit-token needs a value");
+      // Printable ASCII, no whitespace, >= 8 chars: the token is written verbatim
+      // on one line to the exit and compared byte-for-byte by the service, so
+      // whitespace or control bytes would make the two ends silently disagree, and
+      // a very short token is trivially brute-forced from loopback.
+      if (exitToken && !/^[\x21-\x7e]{8,}$/.test(exitToken)) {
+        fail("--exit-token must be >= 8 printable non-space characters");
+      }
       const value = exitToken ? { address, exitToken } : address;
       stored.tunnels = { ...tunnels, [name]: value };
       persist();
