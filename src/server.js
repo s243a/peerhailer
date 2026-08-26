@@ -41,6 +41,8 @@ import {
 import { fingerprint } from "./identity.js";
 import { renderPage } from "./ui.js";
 import { createComposer } from "./composer.js";
+import { callPeer } from "./hail.js";
+import { forwardTunnel } from "./tunnelClient.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -81,6 +83,7 @@ function readBody(request) {
  *   onReload?: () => any | Promise<any>,
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
+ *   tunnelPipeCommand?: any,
  *   log?: (message: string) => void,
  * }} options
  */
@@ -113,6 +116,8 @@ export function createDaemon({
   applyChange,
   /** Session composer: whether a gate password is set, for the optional bastion. */
   gateConfig = () => null,
+  /** Builds `{command,args}` for `hail tunnel <peer> <name> pipe` — enables remote workers. */
+  tunnelPipeCommand = null,
   log = () => {},
 }) {
   // Our own fingerprint, computed once: the value a bound hail's `to` must
@@ -126,9 +131,45 @@ export function createDaemon({
   let plugins = initialPlugins;
   let profiles = initialProfiles;
 
-  // Local-first session composer: spawns/tracks T3 (+ gate) children. Loopback
-  // control routes below drive it; children are torn down on `close`.
-  const composer = createComposer({ gateConfig, identity, log });
+  // The fabric seam for the composer: enumerate peers' offers and start/stop a
+  // worker service on one, all via the same signed `callPeer` the CLI uses.
+  // Present only when the host can build a tunnel-pipe command (bin/hail.js does).
+  const asSelf = () => ({ name: directory.self?.name, publicKey: identity?.publicKey, privateKey: identity?.privateKey });
+  const callNode = (/** @type {string} */ name, /** @type {string} */ path, /** @type {any} */ body) => {
+    const record = directory.get?.(name);
+    return record ? callPeer(record, path, body, { as: asSelf() }) : Promise.resolve({ ok: false, error: "unknown peer" });
+  };
+  const raceTimeout = (/** @type {Promise<any>} */ promise, /** @type {number} */ ms) =>
+    Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: "timeout" }), ms))]);
+  const fabric = tunnelPipeCommand
+    ? {
+        tunnelPipeCommand,
+        startRemote: (/** @type {string} */ peer, /** @type {string} */ service) => callNode(peer, `/service/${service}/start`, {}),
+        stopRemote: (/** @type {string} */ peer, /** @type {string} */ service, /** @type {any} */ id) => callNode(peer, `/service/${service}/stop`, { id }),
+        forwardSeat: (/** @type {string} */ peer, /** @type {string} */ seatTunnel) => {
+          const record = directory.get?.(peer);
+          if (!record) return Promise.reject(new Error("unknown peer"));
+          const call = (/** @type {string} */ path, /** @type {any} */ body) => callPeer(record, path, body, { as: asSelf() });
+          return forwardTunnel(call, seatTunnel, { port: 0, log });
+        },
+        listNodes: async () => {
+          const admitted = directory.listAdmitted?.() ?? [];
+          const nodes = await Promise.all(
+            admitted.map(async (peer) => {
+              const r = await raceTimeout(callNode(peer.name, "/offers", {}), 4000);
+              return r?.ok
+                ? { peer: peer.name, reachable: true, offers: r.response?.offers ?? [] }
+                : { peer: peer.name, reachable: false, error: r?.error ?? "unreachable" };
+            }),
+          );
+          return { self: directory.self?.name ?? null, nodes };
+        },
+      }
+    : null;
+
+  // Local-first-plus-fabric session composer: spawns/tracks T3 (+ gate) children,
+  // and can start a worker on a peer. Loopback control routes below drive it.
+  const composer = createComposer({ gateConfig, identity, log, fabric });
 
   /**
    * Every runtime mutation goes through here: applied to what is on disk now,
@@ -805,6 +846,9 @@ export function createDaemon({
       // to a browser origin via --allow-origin.
       if (scope === "control" && url.pathname === "/api/compose/agents" && request.method === "GET") {
         return send(response, 200, composer.agents());
+      }
+      if (scope === "control" && url.pathname === "/api/compose/nodes" && request.method === "GET") {
+        return send(response, 200, await composer.nodes());
       }
       if (scope === "control" && url.pathname === "/api/compose/launch" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");

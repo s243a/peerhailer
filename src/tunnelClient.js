@@ -1,3 +1,4 @@
+import net from "node:net";
 /**
  * The caller side of the tunnel plugin: driving a byte pipe to an endpoint a
  * peer declared.
@@ -113,4 +114,46 @@ export async function pipeTunnel(call, name, { input, output }, { wait = default
   await finish("pump ended");
   await Promise.allSettled([reader, poller]);
   return { ok: true, closed: why };
+}
+
+
+/**
+ * Expose a peer's tunnel endpoint as a local TCP port: every inbound connection is
+ * pumped through the tunnel with `pipeTunnel`, so a client can reach the remote
+ * endpoint at `127.0.0.1:<port>` — the counterpart to `pipe` for something that
+ * speaks a socket (an HTTP MCP client) rather than stdio.
+ *
+ * @param {(path: string, body: any) => Promise<any>} call
+ * @param {string} name
+ * @param {{ host?: string, port?: number, log?: (m: string) => void }} [options]
+ * @returns {Promise<{ port: number, host: string, close: () => Promise<void> }>}
+ */
+export function forwardTunnel(call, name, { host = "127.0.0.1", port = 0, log = () => {} } = {}) {
+  const sockets = new Set();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+    pipeTunnel(call, name, { input: socket, output: socket }, { log })
+      .catch((error) => log(`[forward] ${error instanceof Error ? error.message : error}`))
+      .finally(() => socket.destroy());
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      const bound = /** @type {import("node:net").AddressInfo} */ (server.address());
+      resolve({
+        port: bound.port,
+        host,
+        // Force-close live connections rather than waiting for them: `server.close`
+        // alone waits for a still-open forward to end, which it will not on its own.
+        close: () =>
+          new Promise((done) => {
+            for (const socket of sockets) socket.destroy();
+            sockets.clear();
+            server.close(() => done(undefined));
+          }),
+      });
+    });
+  });
 }

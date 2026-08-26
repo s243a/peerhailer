@@ -30,9 +30,18 @@ import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
+import { createOffersPlugin } from "../src/builtin/offersPlugin.js";
+
+/** True when any declared service is a launchable offer with a matching tunnel. */
+function hasLaunchableOffer(services, tunnels) {
+  return Object.entries(services ?? {}).some(
+    ([name, decl]) =>
+      decl && typeof decl === "object" && (decl.agent || decl.role) && (tunnels ?? {})[decl.tunnel ?? name] !== undefined,
+  );
+}
 import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
-import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel } from "../src/tunnelClient.js";
+import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel, forwardTunnel } from "../src/tunnelClient.js";
 import { collectProfiles, collectRoutes, loadPlugins } from "../src/plugins.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
@@ -466,6 +475,7 @@ switch (command) {
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
+      ...(hasLaunchableOffer(declaredServices, tunnels) ? [createOffersPlugin({ services: declaredServices, tunnels })] : []),
       ...(Object.keys(declaredShells).length ? [createShellPlugin({ shells: declaredShells })] : []),
       ...(Object.keys(declaredCommands).length
         ? [
@@ -545,6 +555,7 @@ switch (command) {
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
         ...(Object.keys(nextServices).length ? [createServicePlugin({ services: nextServices })] : []),
+        ...(hasLaunchableOffer(nextServices, nextTunnels) ? [createOffersPlugin({ services: nextServices, tunnels: nextTunnels })] : []),
         ...(Object.keys(nextShells).length ? [createShellPlugin({ shells: nextShells })] : []),
         ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
         // The externally-loaded ones too. Dropping them silently on reload
@@ -581,6 +592,13 @@ switch (command) {
           return stored.gate ?? null;
         }
       },
+      // Enables remote workers: how the composer builds the ACP provider command
+      // T3 runs to drive a worker over a peer's tunnel. Reuses this state file so
+      // the subprocess shares the daemon's identity and peer records.
+      tunnelPipeCommand: (peer, tunnel) => ({
+        command: process.execPath,
+        args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
+      }),
       onReload: async () => daemon.reload(await rebuild()),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
@@ -790,7 +808,7 @@ switch (command) {
     // T3 here. open/send/poll/close are the low-level pieces, for scripting.
     const [peerName, name, action, ...more] = rest;
     if (!peerName || !name || !action) {
-      fail("usage: hail tunnel <peer> <name> <pipe|open|send|poll|close> [args]");
+      fail("usage: hail tunnel <peer> <name> <pipe|forward [localport]|open|send|poll|close> [args]");
     }
     const record = directory.get(peerName);
     if (!record) fail(`unknown peer ${peerName} — see hail peers`);
@@ -812,6 +830,20 @@ switch (command) {
       );
       if (!result.ok) fail(result.error);
       process.exit(0);
+    }
+    if (action === "forward") {
+      // Expose the remote endpoint as a local TCP port — for a client that speaks
+      // a socket (an HTTP MCP supervisor) rather than stdio. Runs until stopped.
+      const requested = more[0] ? Number(more[0]) : 0;
+      const fwd = await forwardTunnel(call, name, {
+        port: Number.isInteger(requested) && requested >= 0 ? requested : 0,
+        log: (m) => process.stderr.write(`${m}\n`),
+      });
+      log(`forwarding http://127.0.0.1:${fwd.port} -> tunnel ${name} on ${peerName} (Ctrl-C to stop)`);
+      const stop = () => fwd.close().finally(() => process.exit(0));
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      await new Promise(() => {});
     }
     if (action === "open") {
       const res = need(await openTunnel(call, name));
@@ -894,10 +926,27 @@ switch (command) {
       if (!reportsPort && !line.includes("{port}")) {
         fail('a claim-mode service needs {port} in its line, or pass --reports-port if the child announces its own');
       }
-      stored.services = { ...declared, [name]: reportsPort ? { command: line, reportsPort: true } : line };
+      // Optional offer metadata — what the session composer advertises via /offers.
+      const label = typeof flags.label === "string" ? flags.label : undefined;
+      const svcAgent = typeof flags.agent === "string" ? flags.agent : undefined;
+      const svcRole = typeof flags.role === "string" ? flags.role : undefined;
+      const svcTunnel = typeof flags.tunnel === "string" ? flags.tunnel : undefined;
+      const svcSeatTunnel = typeof flags["supervisor-tunnel"] === "string" ? flags["supervisor-tunnel"] : undefined;
+      if (svcRole && svcRole !== "worker" && svcRole !== "supervisor") fail("--role must be worker or supervisor");
+      const meta = { ...(label ? { label } : {}), ...(svcAgent ? { agent: svcAgent } : {}), ...(svcRole ? { role: svcRole } : {}), ...(svcTunnel ? { tunnel: svcTunnel } : {}), ...(svcSeatTunnel ? { supervisorTunnel: svcSeatTunnel } : {}) };
+      const hasMeta = Object.keys(meta).length > 0;
+      stored.services = {
+        ...declared,
+        [name]: reportsPort || hasMeta ? { command: line, ...(reportsPort ? { reportsPort: true } : {}), ...meta } : line,
+      };
       persist();
       log(`service ${name} runs: ${line}`);
       log(reportsPort ? 'port: read from the child\'s announced {"port":N}' : "port: allocated and substituted for {port} (a routing hint, not proof)");
+      if (hasMeta) {
+        const t = svcTunnel ?? name;
+        log(`offer: ${label ?? name}${svcAgent ? ` (agent ${svcAgent})` : ""} — reachable via tunnel:${t}${stored.tunnels?.[t] ? "" : " (declare that tunnel too, or /offers hides it)"}`);
+        log(`the composer needs offers granted to enumerate it`);
+      }
       log(`peers need service:${name}; no profile grants it yet`);
       log(`this runs as ${process.env.USER ?? "this user"}, and stays running — declare only what you mean`);
       break;

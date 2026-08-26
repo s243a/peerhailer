@@ -73,6 +73,7 @@ export function renderPage(self) {
 </p>
 <section id="composer">
   <div class="cx-row">
+    <label>Node <select id="cx-node"></select></label>
     <label>Agent <select id="cx-agent"></select></label>
     <label>Supervision
       <select id="cx-sup">
@@ -359,15 +360,50 @@ $("tree").innerHTML = [
 ].join("");
 
 // --- session composer ---
-let cxRes = null, cxSeatTimer = null;
-async function cxLoadAgents() {
+let cxRes = null, cxSeatTimer = null, cxNodes = null, cxLocalAgents = [];
+async function cxLoadAll() {
   try {
     const info = await api("/api/compose/agents");
-    $("cx-agent").innerHTML = info.agents.map((a) => "<option>" + esc(a) + "</option>").join("");
+    cxLocalAgents = info.agents;
     const gate = $("cx-gate");
     gate.disabled = !info.gateConfigured;
     gate.title = info.gateConfigured ? "" : "run: hail gate set-password";
-  } catch (cause) { $("cx-status").textContent = "could not load agents: " + (cause.message ?? cause); }
+    let opts = '<option value="local">This machine (local)</option>';
+    if (info.remote) {
+      try {
+        cxNodes = await api("/api/compose/nodes");
+        for (const n of (cxNodes.nodes || [])) {
+          const workers = (n.offers || []).filter((o) => o.role === "worker");
+          if (workers.length) opts += '<option value="' + esc(n.peer) + '">' + esc(n.peer) + " (" + workers.length + " offered)</option>";
+        }
+      } catch (ignore) {}
+    }
+    $("cx-node").innerHTML = opts;
+    cxRefreshAgents();
+  } catch (cause) { $("cx-status").textContent = "could not load: " + (cause.message ?? cause); }
+}
+function cxRefreshAgents() {
+  const remote = $("cx-node").value !== "local";
+  if (!remote) {
+    $("cx-agent").innerHTML = cxLocalAgents.map((a) => "<option>" + esc(a) + "</option>").join("");
+  } else {
+    const n = (cxNodes && cxNodes.nodes || []).find((x) => x.peer === $("cx-node").value);
+    const workers = ((n && n.offers) || []).filter((o) => o.role === "worker");
+    $("cx-agent").innerHTML = workers.length
+      ? workers.map((o) => '<option value="' + esc(o.service) + '" data-tunnel="' + esc(o.tunnel) + '" data-seat="' + esc(o.supervisorTunnel || "") + '">' + esc(o.label) + (o.agent ? " — " + esc(o.agent) : "") + "</option>").join("")
+      : '<option value="">(no worker offers)</option>';
+  }
+  $("cx-pace").disabled = remote; // pacing stays a local option for now
+  cxUpdateSupervision();
+}
+function cxUpdateSupervision() {
+  const remote = $("cx-node").value !== "local";
+  if (!remote) { $("cx-sup").disabled = false; return; }
+  // A remote offer can be MCP-supervised only if it advertised a seat tunnel.
+  const opt = $("cx-agent").selectedOptions[0];
+  const canSupervise = !!(opt && opt.dataset.seat);
+  $("cx-sup").disabled = !canSupervise;
+  if (!canSupervise) $("cx-sup").value = "none";
 }
 async function cxPost(path, body) {
   const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
@@ -380,13 +416,14 @@ function cxRender(seat) {
   const rows = ['T3: <a href="' + esc(cxRes.t3Url) + '" target="_blank">' + esc(cxRes.t3Url) + "</a>"];
   if (cxRes.gateUrl) rows.push('Gated: <a href="' + esc(cxRes.gateUrl) + '" target="_blank">' + esc(cxRes.gateUrl) + "</a>");
   if (cxRes.pairingUrl) rows.push("Pairing: <code>" + esc(cxRes.pairingUrl) + "</code>");
-  if (seat && seat.seatUrl) rows.push("Supervisor seat (point Claude Code here): <code>" + esc(seat.seatUrl) + "</code>");
+  const seatUrl = cxRes.seatUrl || (seat && seat.seatUrl);
+  if (seatUrl) rows.push("Supervisor seat (point Claude Code here): <code>" + esc(seatUrl) + "</code>");
   else if (cxRes.supervision === "mcp") rows.push('<span class="muted">' + esc((seat && seat.hint) || "waiting for the supervisor seat…") + "</span>");
   $("cx-status").innerHTML = rows.join("<br>");
 }
 function cxPollSeat() {
   if (cxSeatTimer) clearInterval(cxSeatTimer);
-  if (!cxRes || cxRes.supervision !== "mcp") return;
+  if (!cxRes || cxRes.supervision !== "mcp" || cxRes.seatUrl) return;
   const lid = cxRes.launchId;
   cxSeatTimer = setInterval(async () => {
     if (!cxRes || cxRes.launchId !== lid) { clearInterval(cxSeatTimer); return; }
@@ -401,13 +438,29 @@ async function cxLaunchNow() {
   $("cx-status").textContent = "launching… (starting a T3 server can take a few seconds)";
   $("cx-launch").disabled = true;
   try {
-    cxRes = await cxPost("/api/compose/launch", {
-      agent: $("cx-agent").value,
-      supervision: $("cx-sup").value,
-      gate: $("cx-gate").checked,
-      cwd: $("cx-cwd").value.trim() || undefined,
-      timing: $("cx-pace").value === "human" ? { min: 2000, max: 30000, dist: "gamma", shape: 2 } : undefined,
-    });
+    const node = $("cx-node").value;
+    let body;
+    if (node === "local") {
+      body = {
+        agent: $("cx-agent").value,
+        supervision: $("cx-sup").value,
+        gate: $("cx-gate").checked,
+        cwd: $("cx-cwd").value.trim() || undefined,
+        timing: $("cx-pace").value === "human" ? { min: 2000, max: 30000, dist: "gamma", shape: 2 } : undefined,
+      };
+    } else {
+      const opt = $("cx-agent").selectedOptions[0];
+      if (!opt || !opt.value) throw new Error("that node offers no worker");
+      body = {
+        node,
+        service: opt.value,
+        tunnel: opt.dataset.tunnel,
+        supervisorTunnel: opt.dataset.seat || undefined,
+        supervision: $("cx-sup").disabled ? "none" : $("cx-sup").value,
+        gate: $("cx-gate").checked,
+      };
+    }
+    cxRes = await cxPost("/api/compose/launch", body);
     $("cx-stop").disabled = false;
     cxRender(null);
     cxPollSeat();
@@ -427,7 +480,9 @@ async function cxStopNow() {
 }
 $("cx-launch").addEventListener("click", cxLaunchNow);
 $("cx-stop").addEventListener("click", cxStopNow);
-cxLoadAgents();
+$("cx-node").addEventListener("change", cxRefreshAgents);
+$("cx-agent").addEventListener("change", cxUpdateSupervision);
+cxLoadAll();
 
 refresh();
 setInterval(refresh, 5000);

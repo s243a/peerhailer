@@ -41,10 +41,11 @@ const MAX_LAUNCHES = 4;
  * @param {{
  *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
  *   identity?: any,
+ *   fabric?: any,
  *   log?: (m: string) => void,
  * }} [options]
  */
-export function createComposer({ gateConfig = () => null, identity, log = () => {} } = {}) {
+export function createComposer({ gateConfig = () => null, identity, log = () => {}, fabric = null } = {}) {
   const bridgePath =
     process.env.MCP_ACP_BRIDGE || join(homedir(), "Projects/mcp-acp-bridge/bin/bridge.js");
   // Default T3 launcher: an explicit T3CODE_CMD wins; else the local t3code
@@ -63,14 +64,22 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
       bridgePath,
       t3Cmd: t3Cmd.join(" "),
       gateConfigured: Boolean(gateConfig()),
+      remote: Boolean(fabric),
     };
   }
 
+  /** Self + admitted peers with the offers each advertises (for the node picker). */
+  async function nodes() {
+    if (!fabric?.listNodes) return { self: null, nodes: [] };
+    return fabric.listNodes();
+  }
+
   /**
-   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string, timing?: object|null}} spec
+   * @param {{agent: string, supervision?: "none"|"mcp", gate?: boolean, cwd?: string, timing?: object|null, node?: string, service?: string, tunnel?: string, supervisorTunnel?: string}} spec
    */
-  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null } = /** @type {any} */ ({})) {
-    if (!KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
+  async function launch({ agent, supervision = "none", gate = false, cwd, timing = null, node = "local", service, tunnel, supervisorTunnel } = /** @type {any} */ ({})) {
+    const isLocal = !node || node === "local";
+    if (isLocal && !KNOWN_AGENTS.includes(agent)) throw badRequest(`unknown agent '${agent}'`);
     if (gate && !gateConfig())
       throw badRequest("no gate password set — run: hail gate set-password", 502);
     if (launches.size >= MAX_LAUNCHES)
@@ -91,16 +100,59 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     // T3's ACP provider = the worker bridge. Under MCP supervision the bridge
     // runs `--supervisor-mcp` and we tee its stderr (where the seat URL prints)
     // into seatLog via `sh -c`; otherwise it is spawned directly.
-    const bridgeArgs = ["--agent", agent, "--cwd", ws];
     let config;
-    if (supervision === "mcp") {
-      bridgeArgs.push("--supervisor-mcp");
-      // Optional human-like response pacing on the supervisor's verdicts.
-      if (timing) bridgeArgs.push("--supervisor-timing", JSON.stringify(timing));
-      const inner = ["node", bridgePath, ...bridgeArgs].map(shq).join(" ");
-      config = { command: "sh", args: ["-c", `exec ${inner} 2>> ${shq(seatLog)}`] };
+    let remote = /** @type {any} */ (null);
+    if (node && node !== "local") {
+      // Remote worker: start the bridge service on the chosen node and point T3's
+      // ACP provider at `hail tunnel <node> <tunnel> pipe`. Remote MCP supervision
+      // is not wired yet (the seat is stdio/loopback), so supervision stays off.
+      if (!fabric?.startRemote || !fabric?.tunnelPipeCommand) {
+        removeHome();
+        throw badRequest("remote launches are not available on this daemon");
+      }
+      if (!service || !tunnel) {
+        removeHome();
+        throw badRequest("a remote launch needs a service and tunnel (from /api/compose/nodes)");
+      }
+      const started = await fabric.startRemote(node, service);
+      if (!started?.ok) {
+        removeHome();
+        throw badRequest(`could not start ${service} on ${node}: ${started?.error ?? "unreachable"}`, 502);
+      }
+      const info = started.response ?? {};
+      if (!info.id) {
+        removeHome();
+        throw badRequest(`${node} refused to start ${service}: ${info.reason ?? info.error ?? "no id returned"}`, 502);
+      }
+      remote = { node, service, id: info.id, port: info.port };
+      const pipe = fabric.tunnelPipeCommand(node, tunnel);
+      config = { command: pipe.command, args: pipe.args };
+      // Remote MCP supervision: expose the node's seat tunnel as a local port so a
+      // Claude Code MCP client can reach it at the fixed /mcp/supervisor path.
+      if (supervision === "mcp" && supervisorTunnel && fabric.forwardSeat) {
+        try {
+          const forward = await fabric.forwardSeat(node, supervisorTunnel);
+          remote.seatForward = forward;
+          remote.seatUrl = `http://127.0.0.1:${forward.port}/mcp/supervisor`;
+        } catch (error) {
+          // Rather than fail the launch, run the worker unsupervised.
+          log(`[composer] could not forward the seat for ${node}: ${error instanceof Error ? error.message : error}`);
+          supervision = "none";
+        }
+      } else {
+        supervision = "none";
+      }
     } else {
-      config = { command: "node", args: [bridgePath, ...bridgeArgs] };
+      const bridgeArgs = ["--agent", agent, "--cwd", ws];
+      if (supervision === "mcp") {
+        bridgeArgs.push("--supervisor-mcp");
+        // Optional human-like response pacing on the supervisor's verdicts.
+        if (timing) bridgeArgs.push("--supervisor-timing", JSON.stringify(timing));
+        const inner = ["node", bridgePath, ...bridgeArgs].map(shq).join(" ");
+        config = { command: "sh", args: ["-c", `exec ${inner} 2>> ${shq(seatLog)}`] };
+      } else {
+        config = { command: "node", args: [bridgePath, ...bridgeArgs] };
+      }
     }
     writeFileSync(
       join(home, "userdata", "settings.json"),
@@ -167,7 +219,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     }
     const pairingUrl = (t3out.match(/pairing\s*url:?\s*(\S+)/i) || t3out.match(/(https?:\/\/\S*pair\S*)/) || [])[1] || null;
 
-    const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: /** @type {import("node:http").Server | null} */ (null) };
+    const entry = { home, ws, seatLog, t3, origin, pairingUrl, gate: /** @type {import("node:http").Server | null} */ (null), remote };
     launches.set(launchId, entry);
 
     let gateUrl = null;
@@ -196,7 +248,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     }
 
     log(`[composer] launched ${launchId}: ${agent} → ${origin}${gateUrl ? ` (gated ${gateUrl})` : ""}`);
-    return { launchId, agent, supervision, t3Url: origin, pairingUrl, gateUrl, seatLog };
+    return { launchId, agent, supervision, node, t3Url: origin, pairingUrl, gateUrl, seatUrl: remote?.seatUrl ?? null, seatLog };
   }
 
   /** The supervisor seat URL, once T3 has activated the worker (bridge spawned). */
@@ -204,6 +256,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
   function seat(launchId) {
     const entry = launches.get(launchId);
     if (!entry) return { error: "no such launch" };
+    if (entry.remote?.seatUrl) return { seatUrl: entry.remote.seatUrl };
     let seatUrl = null;
     try {
       // Loopback only: the seat is on 127.0.0.1, so refuse a forged seat line a
@@ -223,6 +276,16 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     launches.delete(launchId);
     kill(entry.t3);
     entry.gate?.close();
+    if (entry.remote) {
+      try {
+        entry.remote.seatForward?.close?.();
+      } catch {}
+      if (fabric?.stopRemote) {
+        try {
+          await fabric.stopRemote(entry.remote.node, entry.remote.service, entry.remote.id);
+        } catch {}
+      }
+    }
     try {
       rmSync(entry.home, { recursive: true, force: true });
     } catch {}
@@ -243,7 +306,7 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     };
   }
 
-  return { agents, launch, seat, stop, list, closeAll };
+  return { agents, nodes, launch, seat, stop, list, closeAll };
 }
 
 /** @param {import("node:child_process").ChildProcess} child */
