@@ -48,6 +48,44 @@ function asRecord(custom) {
 }
 
 /**
+ * Carry the monotone sealing-key trust forward across independent writers.
+ *
+ * A writer snapshots the directory it loaded at startup and wholesale-replaces
+ * `admitted` on disk. A verified sealing key is monotone — like `bindingSeen` —
+ * so a writer that loaded *before* a walk elsewhere bound one must not erase it
+ * on the way out, or the peer silently downgrades to cleartext after the write.
+ * This reconciles a snapshot against current on-disk state, per peer:
+ *
+ * - Only when the identity key still matches — a rotated identity invalidates
+ *   the old sealing binding, so its key is not resurrected onto a new identity.
+ * - A verified on-disk key the snapshot lacks is carried forward (the stale
+ *   writer never saw the bind).
+ * - Two *different* verified keys is a genuine disagreement — kept as a
+ *   conflict, not silently picked, so the send path fails closed.
+ *
+ * Pure and exported for direct testing; `persist()` composes it with the
+ * `bindingSeen` max-merge it already does.
+ *
+ * @param {any[]} onDisk current on-disk admitted records
+ * @param {any[]} snap this writer's admitted snapshot
+ * @returns {any[]} the snapshot with sealing trust reconciled
+ */
+export function carryVerifiedSeal(onDisk, snap) {
+  const prior = new Map((onDisk ?? []).map((p) => [p.name, p]));
+  return (snap ?? []).map((p) => {
+    const was = prior.get(p.name);
+    if (!was?.sealSeen || !was.sealPublicKey || was.publicKey !== p.publicKey) return p;
+    if (p.sealSeen && p.sealPublicKey && p.sealPublicKey !== was.sealPublicKey) {
+      return { ...p, sealPublicKey: was.sealPublicKey, sealSeen: true, sealConflict: p.sealPublicKey };
+    }
+    if (!p.sealSeen || !p.sealPublicKey) {
+      return { ...p, sealPublicKey: was.sealPublicKey, sealSeen: true, ...(was.sealConflict ? { sealConflict: was.sealConflict } : {}) };
+    }
+    return was.sealConflict && !p.sealConflict ? { ...p, sealConflict: was.sealConflict } : p;
+  });
+}
+
+/**
  * @param {{
  *   self?: any,
  *   admitted?: any[],
@@ -78,6 +116,7 @@ export function createDirectory(state = {}) {
    *   profileAfter?: string,
    *   bindingSeen?: number,
    *   sealSeen?: boolean,
+   *   sealConflict?: string,
    * }} StoredPeer
    */
   /** @type {Map<string, StoredPeer>} */
@@ -166,10 +205,12 @@ export function createDirectory(state = {}) {
       // clear the downgrade guard until the next verified walk. `merged` came
       // from `mergePeerRecord`, which does not carry this stored-only field.
       ...(existing?.bindingSeen ? { bindingSeen: existing.bindingSeen } : {}),
-      // Likewise the sealing-key trust marker: re-admitting a peer (a new
-      // address, a profile change) must not drop the fact that we verified its
-      // sealing key, or the next send falls back to cleartext.
+      // Likewise the sealing-key trust marker and any conflict: re-admitting a
+      // peer (a new address, a profile change) must not drop the fact that we
+      // verified its sealing key, or the next send falls back to cleartext —
+      // nor silently clear a conflict a person still has to resolve.
       ...(existing?.sealSeen ? { sealSeen: existing.sealSeen } : {}),
+      ...(existing?.sealConflict ? { sealConflict: existing.sealConflict } : {}),
       ...elevation,
     };
     admitted.set(withProfile.name, withProfile);
@@ -270,7 +311,11 @@ export function createDirectory(state = {}) {
     const record = admitted.get(name);
     const key = normalizeKey(publicKey);
     if (!record || !key) return null;
-    const { conflicts: _dropped, ...rest } = record;
+    // A deliberate identity rotation invalidates the sealing binding, which was
+    // verified against the *old* identity. Drop it (and any conflict) so the
+    // next walk re-binds the sealing key against the new identity — otherwise we
+    // would keep encrypting to a key proven only against a key just replaced.
+    const { conflicts: _dropped, sealPublicKey: _sk, sealSeen: _ss, sealConflict: _sc, ...rest } = record;
     const rotated = { ...rest, publicKey: key };
     admitted.set(name, rotated);
     return rotated;
@@ -323,8 +368,10 @@ export function createDirectory(state = {}) {
       // Same discipline for the sealing key: once a verified record bound it,
       // that trust is ours and monotone. A rebuild from any source keeps it, or
       // a routine route-stamp would drop the marker and silently downgrade the
-      // peer to cleartext on the next send.
+      // peer to cleartext on the next send. The conflict flag rides along too,
+      // or a rebuild would clear a fail-closed state a person has to resolve.
       ...(previous?.sealSeen ? { sealSeen: previous.sealSeen } : {}),
+      ...(previous?.sealConflict ? { sealConflict: previous.sealConflict } : {}),
     };
   }
 
@@ -342,34 +389,79 @@ export function createDirectory(state = {}) {
    *
    * Once bound, a *different* verified key is a rotation or an attack — a
    * deliberate act, like the identity key — so it is never silently replaced.
-   * An unverified key sitting on the record (no `sealSeen`) is not trusted and
-   * is replaced freely.
+   * Instead it raises a **conflict**: the held key is kept, the disagreeing key
+   * recorded, and the peer's seal state becomes `conflict`, which fails sends
+   * closed rather than encrypting to a key that may be stale or compromised. An
+   * unverified key sitting on the record (no `sealSeen`) is not trusted and is
+   * replaced freely.
+   *
+   * `expectedIdentity` is the identity key the sealing key was verified against.
+   * A walk captures the peer, does network I/O, then mutates the *current*
+   * record by name — so if a concurrent rotation changed the identity in the
+   * meantime, the proof no longer applies to who this record is now, and the
+   * bind is refused. Callers that just bound a fresh identity (TOFU) pass it.
    *
    * @param {string} name
    * @param {string} sealPublicKey
+   * @param {string} [expectedIdentity] identity key the sealing key was verified against
    */
-  function bindSealKey(name, sealPublicKey) {
+  function bindSealKey(name, sealPublicKey, expectedIdentity) {
     const record = admitted.get(name);
     const key = normalizeKey(sealPublicKey);
     if (!record || !key) return record ?? null;
-    if (record.sealSeen && record.sealPublicKey && record.sealPublicKey !== key) return record;
-    if (record.sealSeen && record.sealPublicKey === key) return record;
+    const expected = normalizeKey(expectedIdentity);
+    if (expected && record.publicKey && record.publicKey !== expected) return record;
+    if (record.sealSeen && record.sealPublicKey && record.sealPublicKey !== key) {
+      if (record.sealConflict === key) return record;
+      const updated = { ...record, sealConflict: key };
+      admitted.set(name, updated);
+      return updated;
+    }
+    if (record.sealSeen && record.sealPublicKey === key) {
+      // Re-confirming the held key answers any prior disagreement.
+      if (record.sealConflict) {
+        const { sealConflict: _cleared, ...rest } = record;
+        admitted.set(name, rest);
+        return rest;
+      }
+      return record;
+    }
     const updated = { ...record, sealPublicKey: key, sealSeen: true };
     admitted.set(name, updated);
     return updated;
   }
 
   /**
-   * The peer's sealing key, but only once a verified record bound it. A key
-   * that merely rode in on gossip — present on the record, `sealSeen` absent —
-   * is not one we encrypt to. This is the accessor a sender consults; reading
-   * `record.sealPublicKey` directly would trust an unverified claim.
+   * The peer's sealing key, but only once a verified record bound it and no
+   * conflict is outstanding. A key that merely rode in on gossip (`sealSeen`
+   * absent), or one under dispute (`sealConflict` set), is not returned. This is
+   * the accessor a sender consults; reading `record.sealPublicKey` directly
+   * would trust an unverified — or contested — claim.
    *
    * @param {string} name
    */
   function sealKeyFor(name) {
     const record = admitted.get(name);
-    return record?.sealSeen && record.sealPublicKey ? record.sealPublicKey : null;
+    if (!record || record.sealConflict) return null;
+    return record.sealSeen && record.sealPublicKey ? record.sealPublicKey : null;
+  }
+
+  /**
+   * The peer's sealing trust as a tri-state a sender acts on:
+   * - `verified`  — a walk bound the key; encrypt to it.
+   * - `conflict`  — two verified keys disagree; fail the send closed, do not
+   *   fall back to cleartext (that would hide a rotation or an attack).
+   * - `unverified`— no key bound yet (an older peer); cleartext is the legacy
+   *   fallback until the first walk.
+   *
+   * @param {string} name
+   * @returns {"verified" | "conflict" | "unverified"}
+   */
+  function sealState(name) {
+    const record = admitted.get(name);
+    if (!record) return "unverified";
+    if (record.sealConflict) return "conflict";
+    return record.sealSeen && record.sealPublicKey ? "verified" : "unverified";
   }
 
   /**
@@ -504,6 +596,7 @@ export function createDirectory(state = {}) {
     bindKey,
     bindSealKey,
     sealKeyFor,
+    sealState,
     noteBinding,
     noteKeyConflict,
     rotateKey,

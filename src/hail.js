@@ -204,8 +204,13 @@ export async function walk(directory, options = {}) {
     // The sealing key rode the same signed record, so verifying it against the
     // admitted identity binds it too. This is the only path that makes a sealing
     // key trusted enough to encrypt to — a key learned any other way (gossip, a
-    // candidate) is a claim we do not seal to until a walk confirms it here.
-    if (proof.record?.sealPublicKey) directory.bindSealKey?.(peer.name, proof.record.sealPublicKey);
+    // candidate) is a claim we do not seal to until a walk confirms it here. The
+    // identity we verified against is passed so the bind is refused if a
+    // concurrent rotation changed who this record is during the network round
+    // trip — otherwise we would bind a key proven against a since-replaced key.
+    if (proof.record?.sealPublicKey) {
+      directory.bindSealKey?.(peer.name, proof.record.sealPublicKey, peer.publicKey ?? proof.key);
+    }
     reached.push({ name: peer.name, via: result.address });
     // Whose leads we follow is a judgement about the peer, not a property of
     // having reached it. Without this, any peer we could hail could put names,

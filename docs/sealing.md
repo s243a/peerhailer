@@ -229,18 +229,38 @@ first consumer does not rediscover them.
    key, a PAKE) **must move the recipient identity into the associated data**, or that
    gap becomes real.
 
-5. **Seal only to a *verified* sealing key.** The recipient's sealing key rides its
-   signed record, but a key that reached the directory any other way — a gossip mention,
-   an introducer's candidate — is an unverified claim, and a malicious introducer can
-   staple its own X25519 key beside a peer's real identity key. A consumer MUST seal only
-   to a key a walk bound from the peer's *verified* record (`directory.sealKeyFor`, backed
-   by the `sealSeen` marker `directory.bindSealKey` sets), never to `record.sealPublicKey`
-   raw. Once bound, the marker is sticky across merges and re-admits, so a peer known to
-   seal cannot be silently downgraded to cleartext; a peer with **no** verified key yet
-   (an older build) legitimately falls back to cleartext until its first walk. **Deferred
-   (chat):** the *receiver* still accepts a cleartext message from a peer whose sealing key
-   it holds — closing that (refuse/warn on an unexpected cleartext) needs the plugin to
-   consult the directory, and is tracked for a follow-up.
+5. **Seal only to a *verified* sealing key, and treat trust as a tri-state.** The
+   recipient's sealing key rides its signed record, but a key that reached the directory
+   any other way — a gossip mention, an introducer's candidate — is an unverified claim,
+   and a malicious introducer can staple its own X25519 key beside a peer's real identity
+   key. A consumer reads `directory.sealState(name)`, never `record.sealPublicKey` raw:
+   - **`verified`** — a walk bound the key from the peer's signed record (`sealSeen`);
+     encrypt to `directory.sealKeyFor(name)`.
+   - **`conflict`** — two verified keys disagree (a rotation, or an attack). **Fail the
+     send closed** — do *not* fall back to cleartext, which would hide the disagreement.
+     A person resolves it (re-walk, or forget + re-admit).
+   - **`unverified`** — no key bound yet (an older peer); cleartext is the legacy fallback
+     until the first walk.
+
+   The marker is monotone and sticky: it survives merges, re-admits, **and the write
+   path** (`carryVerifiedSeal` reconciles it across concurrent writers, so a stale writer
+   cannot erase a verified key and silently downgrade the peer after a restart). It is
+   dropped only by a deliberate identity rotation (`rotateKey`), which invalidates a
+   binding verified against the old identity and forces the next walk to re-verify. The
+   bind itself is identity-guarded: a walk that verified against one identity will not
+   bind onto a record a concurrent rotation changed underneath it.
+
+   **Deferred, tracked for follow-up:**
+   - *Receiver-side downgrade refusal.* The receiver still accepts a cleartext message
+     from a peer whose sealing key it holds. It must not gate on `sealKeyFor(sender)` —
+     holding the sender's recipient key does not prove the sender verified *ours*. The fix
+     is an inbound `requireSealFrom` marker set after the first sealed message from a peer,
+     after which cleartext from that peer is refused. **Mandatory before any relayed
+     consumer.**
+   - *Operator rotation path.* A `conflict` is currently cleared only by a walk
+     re-confirming the held key, or by forget + re-admit; a smooth `acceptSealKey` /
+     `rotateSealKey` (and an atomic identity-plus-sealing rotation) lands when sealing-key
+     rotation becomes a supported operation.
 
 **Forward-secrecy scope, stated for consumers:** sender-side only. If the *recipient's*
 static sealing key is later compromised, every past block sealed to it is decryptable

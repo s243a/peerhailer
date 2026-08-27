@@ -846,6 +846,13 @@ export function createDaemon({
         // Falls back to cleartext only for a peer we have never verified a
         // sealing key for (an older build); once verified, `sealSeen` is sticky
         // and the send stays sealed, so there is no silent downgrade after that.
+        // Conflict is a fail-closed state, not a cleartext fallback: two
+        // verified sealing keys disagree (a rotation or an attack), so refuse
+        // rather than silently encrypting to a possibly-stale key — or leaking
+        // the message in the clear. A person resolves it (re-walk, or re-admit).
+        if (directory.sealState?.(record.name) === "conflict") {
+          return send(response, 409, { error: "this peer's sealing key is in conflict — resolve it before sending" });
+        }
         const sealKey = directory.sealKeyFor?.(record.name) ?? null;
         let payload;
         let sealed = false;

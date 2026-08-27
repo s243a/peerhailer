@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory } from "../src/directory.js";
+import { createDirectory, carryVerifiedSeal } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -154,10 +154,15 @@ const persist = () =>
       // as never-lowered lowerable by an unrelated CLI command. Only this one
       // field is merged by `max`; the rest stays "this command's peers win".
       const priorBinding = new Map((onDisk.admitted ?? []).map((p) => [p.name, p.bindingSeen]));
-      const admitted = (snap.admitted ?? []).map((p) => {
+      const withBinding = (snap.admitted ?? []).map((p) => {
         const seen = Math.max(Number(p.bindingSeen) || 0, Number(priorBinding.get(p.name)) || 0);
         return seen > 0 ? { ...p, bindingSeen: seen } : p;
       });
+      // A verified sealing key is monotone the same way, and `snapshot()` would
+      // erase one this process loaded too early to see — a stale writer landing
+      // last would silently downgrade the peer to cleartext. Carried forward
+      // (identity-matched; disagreements flagged) alongside the binding signal.
+      const admitted = carryVerifiedSeal(onDisk.admitted ?? [], withBinding);
       return { ...onDisk, ...stored, ...snap, admitted };
     },
     { log: (m) => process.stderr.write(`${m}\n`) },

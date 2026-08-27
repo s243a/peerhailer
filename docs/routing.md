@@ -151,6 +151,29 @@ The follow-up Stage 1's honesty makes urgent — cheap exploration *and*
 confidentiality, before anything large or private is routed. What fell out of design
 discussion is one mechanism, not a separate discovery phase:
 
+> **Carried over from the sealing review (Sol, on PR #20) — the two things Stage 1.5
+> must not inherit wrong:**
+>
+> 1. **Sealing to a routed destination needs a different key-discovery model than
+>    direct chat.** `directory.sealKeyFor` works only on an admitted, directly-walked
+>    neighbour, but a router seals to a destination D it knows only by Ed25519 key and
+>    reaches through relays — it cannot walk D. Stage 1.5 needs a **public, data-free
+>    routed exchange of D's signed self-record**, verified locally against D's known
+>    identity key, plus a sealing-key store **indexed by identity key**, not by
+>    direct-neighbour name. Routed sealing must **fail closed** — never seal to a
+>    relay-stapled key, never fall back to cleartext to "get through".
+> 2. **The direct-chat `opened.from === caller.publicKey` binding cannot be reused.** At
+>    D the caller is the relay (the last hop), while the sealed `from` is the origin. A
+>    relayed consumer authenticates the **carrier** (the hop it's talking to) and the
+>    **end-to-end signed origin** (from inside the sealed block) as two separate facts —
+>    see the "do not copy this into a relayed path" note at the chat binding site.
+>
+> **Also confirmed: a live Stage-1 replay hole.** `send` mints an envelope id, but
+> forwarding drops it, so replaying the same id through a relay was delivered **twice**
+> at the destination. Stage 1.5's id, sequence, count, expiry, and origin must be
+> **signature-covered inside the sealed block** — mutable outer metadata a relay can
+> rewrite is not enough. (Fix this in the routing forwarding path, not the sealing PR.)
+
 - **Chunk the payload, and let the first block be the probe.** Break a payload into
   small blocks and send block 1 through the route search. Its success both confirms a
   working path (which is cached) *and* delivers real data — no separate no-payload

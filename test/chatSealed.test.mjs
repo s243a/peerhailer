@@ -88,11 +88,14 @@ test("a gossiped sealing key is never trusted; a peer with no verified key stays
 
   // The walk verifies bob's real signed record; only then is a key trusted, and
   // it is bob's own, not the introducer's.
-  dir.bindSealKey("bob", bob.sealPublicKey);
+  dir.bindSealKey("bob", bob.sealPublicKey, bob.publicKey);
   assert.ok(sameKey(dir.sealKeyFor("bob"), bob.sealPublicKey));
-  // A later gossip cannot overwrite the verified key with a different one.
-  dir.bindSealKey("bob", mallory.sealPublicKey);
-  assert.ok(sameKey(dir.sealKeyFor("bob"), bob.sealPublicKey), "a verified key is never silently replaced");
+  // A later verified key that disagrees is never silently swapped in — it raises
+  // a conflict, and the send path then fails closed rather than sealing to a key
+  // that might be stale or attacker-supplied.
+  dir.bindSealKey("bob", mallory.sealPublicKey, bob.publicKey);
+  assert.equal(dir.sealState("bob"), "conflict", "a disagreeing verified key is a conflict");
+  assert.equal(dir.sealKeyFor("bob"), null, "no key is handed out under conflict");
 });
 
 test("a replayed sealed block is dropped; a sealed sender that isn't the caller is refused", () => {
