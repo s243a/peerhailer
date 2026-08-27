@@ -229,6 +229,19 @@ first consumer does not rediscover them.
    key, a PAKE) **must move the recipient identity into the associated data**, or that
    gap becomes real.
 
+5. **Seal only to a *verified* sealing key.** The recipient's sealing key rides its
+   signed record, but a key that reached the directory any other way — a gossip mention,
+   an introducer's candidate — is an unverified claim, and a malicious introducer can
+   staple its own X25519 key beside a peer's real identity key. A consumer MUST seal only
+   to a key a walk bound from the peer's *verified* record (`directory.sealKeyFor`, backed
+   by the `sealSeen` marker `directory.bindSealKey` sets), never to `record.sealPublicKey`
+   raw. Once bound, the marker is sticky across merges and re-admits, so a peer known to
+   seal cannot be silently downgraded to cleartext; a peer with **no** verified key yet
+   (an older build) legitimately falls back to cleartext until its first walk. **Deferred
+   (chat):** the *receiver* still accepts a cleartext message from a peer whose sealing key
+   it holds — closing that (refuse/warn on an unexpected cleartext) needs the plugin to
+   consult the directory, and is tracked for a follow-up.
+
 **Forward-secrecy scope, stated for consumers:** sender-side only. If the *recipient's*
 static sealing key is later compromised, every past block sealed to it is decryptable
 (mitigate with recipient key rotation / one-time pre-keys). A compromised *sender*

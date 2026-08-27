@@ -201,6 +201,11 @@ export async function walk(directory, options = {}) {
     // targets, our verifier requires `to` from it and a rolled-back record
     // cannot lower that. See docs/hail-target-binding.md.
     if (proof.record?.v) directory.noteBinding(peer.name, proof.record.v);
+    // The sealing key rode the same signed record, so verifying it against the
+    // admitted identity binds it too. This is the only path that makes a sealing
+    // key trusted enough to encrypt to — a key learned any other way (gossip, a
+    // candidate) is a claim we do not seal to until a walk confirms it here.
+    if (proof.record?.sealPublicKey) directory.bindSealKey?.(peer.name, proof.record.sealPublicKey);
     reached.push({ name: peer.name, via: result.address });
     // Whose leads we follow is a judgement about the peer, not a property of
     // having reached it. Without this, any peer we could hail could put names,

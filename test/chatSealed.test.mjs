@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 
 import { createDaemon } from "../src/server.js";
 import { createDirectory } from "../src/directory.js";
-import { generateIdentity } from "../src/identity.js";
+import { generateIdentity, sameKey } from "../src/identity.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { seal } from "../src/sealing.js";
@@ -36,12 +36,26 @@ test("Alice's chat to Bob crosses the wire sealed and Bob opens it, sender bound
   const B = await node("bob", { canOpen: true });
   t.after(async () => { await A.daemon.close(); await B.daemon.close(); });
 
-  // Alice admits Bob WITH his sealing key; Bob admits Alice.
+  // Alice admits Bob WITH his sealing key on the record; Bob admits Alice.
   A.directory.admit({ name: "bob", publicKey: B.id.publicKey, sealPublicKey: B.id.sealPublicKey, addresses: [{ value: `https://127.0.0.1:${B.hailPort}` }] }, { profile: "chatp" });
   B.directory.admit({ name: "alice", publicKey: A.id.publicKey }, { profile: "chatp" });
 
+  // A sealing key merely present on the admitted record is NOT trusted to
+  // encrypt to — only a verified walk binds it. So the first send, before any
+  // walk, goes cleartext (no silent seal to an unverified key).
+  assert.equal(A.directory.sealKeyFor("bob"), null, "unverified sealing key is not sealed to");
+  const early = await post(A, "/api/chat/send", { peer: "bob", text: "hello" });
+  assert.equal(early.json.sealed, false, "pre-walk send is cleartext");
+
+  // A verified walk binds Bob's sealing key from his signed record — modelled
+  // here by bindSealKey, exactly what walk() calls after verifyRecord succeeds.
+  A.directory.bindSealKey("bob", B.id.sealPublicKey);
+  assert.ok(sameKey(A.directory.sealKeyFor("bob"), B.id.sealPublicKey), "verified key is now trusted");
+
   const sent = await post(A, "/api/chat/send", { peer: "bob", text: "meet at noon" });
   assert.equal(sent.status, 200, JSON.stringify(sent.json));
+  assert.equal(sent.json.sealed, true, "post-walk send is sealed");
+  assert.equal(sent.json.message.sealed, true, "sender's own copy is marked sealed");
 
   // Bob's stored thread has the plaintext, marked sealed, attributed to alice.
   const conv = B.chat.conversations()[0];
@@ -50,6 +64,35 @@ test("Alice's chat to Bob crosses the wire sealed and Bob opens it, sender bound
   assert.equal(msgs.at(-1).text, "meet at noon", "bob opened the sealed message");
   assert.equal(msgs.at(-1).sealed, true, "it arrived sealed, not cleartext");
   assert.equal(msgs.at(-1).from, "alice");
+
+  // Finding 1 regression: a gossip mention / re-admit after binding must not
+  // drop the verified key and silently downgrade the next send to cleartext.
+  A.directory.learnFrom("someone", [{ name: "bob", publicKey: B.id.publicKey, addresses: [{ value: "https://127.0.0.1:9" }] }]);
+  A.directory.admit({ name: "bob", addresses: [{ value: `https://127.0.0.1:${B.hailPort}` }] }, { profile: "chatp" });
+  assert.ok(sameKey(A.directory.sealKeyFor("bob"), B.id.sealPublicKey), "verified key survives gossip and re-admit");
+});
+
+test("a gossiped sealing key is never trusted; a peer with no verified key stays cleartext", () => {
+  const alice = generateIdentity();
+  const bob = generateIdentity();
+  const mallory = generateIdentity();
+  const dir = createDirectory({ self: { name: "me", publicKey: alice.publicKey, sealPublicKey: alice.sealPublicKey } });
+  dir.useProfiles(CHAT);
+
+  // An introducer gossips bob's real identity key but staples mallory's sealing
+  // key beside it. Even after admitting that candidate, the stapled key is not
+  // trusted — sealKeyFor stays null until a walk verifies bob's own signed key.
+  dir.learnFrom("introducer", [{ name: "bob", publicKey: bob.publicKey, sealPublicKey: mallory.sealPublicKey, addresses: [{ value: "https://127.0.0.1:9" }] }]);
+  dir.admit({ name: "bob", addresses: [{ value: "https://127.0.0.1:9" }] }, { profile: "chatp" });
+  assert.equal(dir.sealKeyFor("bob"), null, "a gossiped/stapled sealing key is never sealed to");
+
+  // The walk verifies bob's real signed record; only then is a key trusted, and
+  // it is bob's own, not the introducer's.
+  dir.bindSealKey("bob", bob.sealPublicKey);
+  assert.ok(sameKey(dir.sealKeyFor("bob"), bob.sealPublicKey));
+  // A later gossip cannot overwrite the verified key with a different one.
+  dir.bindSealKey("bob", mallory.sealPublicKey);
+  assert.ok(sameKey(dir.sealKeyFor("bob"), bob.sealPublicKey), "a verified key is never silently replaced");
 });
 
 test("a replayed sealed block is dropped; a sealed sender that isn't the caller is refused", () => {

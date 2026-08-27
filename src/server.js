@@ -838,21 +838,32 @@ export function createDaemon({
         const text = typeof body?.text === "string" ? body.text : "";
         if (!record) return send(response, 404, { error: "unknown peer" });
         if (!text.trim()) return send(response, 400, { error: "an empty message is not a message" });
-        // Seal end to end when the peer has advertised a sealing key: encrypt to it,
-        // signed with our identity so the peer authenticates us. Falls back to
-        // cleartext for a peer without a sealing key (an older build).
+        // Seal end to end when we hold a *verified* sealing key for the peer:
+        // encrypt to it, signed with our identity so the peer authenticates us.
+        // `sealKeyFor` returns a key only once a walk bound it from the peer's
+        // signed record — a key that merely rode in on gossip is not trusted, so
+        // it cannot silently redirect our ciphertext to an introducer's key.
+        // Falls back to cleartext only for a peer we have never verified a
+        // sealing key for (an older build); once verified, `sealSeen` is sticky
+        // and the send stays sealed, so there is no silent downgrade after that.
+        const sealKey = directory.sealKeyFor?.(record.name) ?? null;
         let payload;
-        if (record.sealPublicKey) {
+        let sealed = false;
+        if (sealKey) {
           const signer = { publicKey: identity.publicKey, privateKey: identity.privateKey };
           const inner = JSON.stringify({ text, at: Date.now(), nonce: randomUUID() });
-          payload = { sealed: seal(inner, record.sealPublicKey, { signer }) };
+          payload = { sealed: seal(inner, sealKey, { signer }) };
+          sealed = true;
         } else {
           payload = { text };
         }
         const result = await callNode(record.name, "/chat/send", payload);
         if (!result?.ok) return send(response, 502, { error: result?.error ?? "the peer did not accept the message" });
-        const message = chat.say(record.publicKey, text);
-        return send(response, 200, { ok: true, message });
+        // Record on our own copy whether it went sealed, so the sender's UI can
+        // show the 🔒 — and, by its absence, a cleartext send to a peer with no
+        // verified sealing key.
+        const message = chat.say(record.publicKey, text, { sealed });
+        return send(response, 200, { ok: true, message, sealed });
       }
       if (scope === "control" && url.pathname === "/api/chat/clear" && request.method === "POST") {
         if (!chat) return send(response, 200, { cleared: false });

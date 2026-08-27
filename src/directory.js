@@ -77,6 +77,7 @@ export function createDirectory(state = {}) {
    *   profileUntil?: number,
    *   profileAfter?: string,
    *   bindingSeen?: number,
+   *   sealSeen?: boolean,
    * }} StoredPeer
    */
   /** @type {Map<string, StoredPeer>} */
@@ -165,6 +166,10 @@ export function createDirectory(state = {}) {
       // clear the downgrade guard until the next verified walk. `merged` came
       // from `mergePeerRecord`, which does not carry this stored-only field.
       ...(existing?.bindingSeen ? { bindingSeen: existing.bindingSeen } : {}),
+      // Likewise the sealing-key trust marker: re-admitting a peer (a new
+      // address, a profile change) must not drop the fact that we verified its
+      // sealing key, or the next send falls back to cleartext.
+      ...(existing?.sealSeen ? { sealSeen: existing.sealSeen } : {}),
       ...elevation,
     };
     admitted.set(withProfile.name, withProfile);
@@ -315,7 +320,56 @@ export function createDirectory(state = {}) {
       // Once seen, never un-seen: the support observation is monotone, so a
       // rebuild from any source keeps the highest version we ever verified.
       ...(previous?.bindingSeen ? { bindingSeen: previous.bindingSeen } : {}),
+      // Same discipline for the sealing key: once a verified record bound it,
+      // that trust is ours and monotone. A rebuild from any source keeps it, or
+      // a routine route-stamp would drop the marker and silently downgrade the
+      // peer to cleartext on the next send.
+      ...(previous?.sealSeen ? { sealSeen: previous.sealSeen } : {}),
     };
+  }
+
+  /**
+   * Bind this peer's sealing key from a *verified* record — the only path by
+   * which a sealing key becomes trusted enough to encrypt to.
+   *
+   * The sealing key rides the signed record, so `verifyRecord` on a walk hands
+   * us one that genuinely belongs to the admitted identity. Everything before
+   * that — a gossip mention, a candidate an introducer described — is a claim we
+   * do not seal to, because a malicious introducer can staple its own X25519 key
+   * beside the victim's real identity key. Adopting it here, after the identity
+   * signature checked out, is what makes "bound to the identity" true across the
+   * directory's life and not merely on the wire.
+   *
+   * Once bound, a *different* verified key is a rotation or an attack — a
+   * deliberate act, like the identity key — so it is never silently replaced.
+   * An unverified key sitting on the record (no `sealSeen`) is not trusted and
+   * is replaced freely.
+   *
+   * @param {string} name
+   * @param {string} sealPublicKey
+   */
+  function bindSealKey(name, sealPublicKey) {
+    const record = admitted.get(name);
+    const key = normalizeKey(sealPublicKey);
+    if (!record || !key) return record ?? null;
+    if (record.sealSeen && record.sealPublicKey && record.sealPublicKey !== key) return record;
+    if (record.sealSeen && record.sealPublicKey === key) return record;
+    const updated = { ...record, sealPublicKey: key, sealSeen: true };
+    admitted.set(name, updated);
+    return updated;
+  }
+
+  /**
+   * The peer's sealing key, but only once a verified record bound it. A key
+   * that merely rode in on gossip — present on the record, `sealSeen` absent —
+   * is not one we encrypt to. This is the accessor a sender consults; reading
+   * `record.sealPublicKey` directly would trust an unverified claim.
+   *
+   * @param {string} name
+   */
+  function sealKeyFor(name) {
+    const record = admitted.get(name);
+    return record?.sealSeen && record.sealPublicKey ? record.sealPublicKey : null;
   }
 
   /**
@@ -448,6 +502,8 @@ export function createDirectory(state = {}) {
     learnFrom,
     markReachable,
     bindKey,
+    bindSealKey,
+    sealKeyFor,
     noteBinding,
     noteKeyConflict,
     rotateKey,

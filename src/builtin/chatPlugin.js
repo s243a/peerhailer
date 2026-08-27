@@ -60,13 +60,18 @@ export function createChatPlugin({
   // ignored. Bounded, time-windowed. (docs/sealing.md, consumer contract.)
   /** @type {Map<string, number>} nonce -> expiry */
   const seenNonces = new Map();
-  /** @param {string} nonce */
+  /** @param {string} nonce a non-empty, length-bounded nonce (caller enforces) */
   const freshNonce = (nonce) => {
-    if (!nonce) return true;
     const t = now();
     for (const [k, exp] of seenNonces) { if (exp <= t) seenNonces.delete(k); else break; }
     if (seenNonces.has(nonce)) return false;
     seenNonces.set(nonce, t + messageMs);
+    // The window is bounded by count as well as time. Eviction is by insertion
+    // order, which is expiry order (every entry shares `messageMs`), so this
+    // drops the oldest — but an authenticated peer flooding >4096 distinct
+    // nonces inside the window could evict a *seen* one and replay it. Bounded,
+    // requires an admitted peer, and the replay is a duplicate line; the
+    // freshness in the sealed payload and the hail layer are the real defence.
     while (seenNonces.size > 4096) { const oldest = seenNonces.keys().next().value; if (oldest === undefined) break; seenNonces.delete(oldest); }
     return true;
   };
@@ -140,6 +145,12 @@ export function createChatPlugin({
             } catch {
               return { [REFUSE]: true, reason: "sealed message did not open or verify" };
             }
+            // Bind the sealed sender to the transport-authenticated caller. NOTE
+            // for future consumers: this couples the seal's signer to the DIRECT
+            // caller, which is right for direct chat but wrong for a relayed
+            // consumer (e.g. routing) — there the caller is the last hop, not the
+            // origin, so authenticate the origin from INSIDE the sealed payload,
+            // not from `caller`. Do not copy this check into a relayed path.
             if (!sameKey(opened.from, caller.publicKey)) return { [REFUSE]: true, reason: "sealed sender is not the caller" };
             let payload;
             try {
@@ -147,9 +158,17 @@ export function createChatPlugin({
             } catch {
               return { [REFUSE]: true, reason: "sealed payload is malformed" };
             }
-            if (!freshNonce(String(payload?.nonce ?? ""))) return { received: true, duplicate: true };
+            // The nonce is the replay guard's whole basis, so a sealed message
+            // without a bounded one is refused rather than waved through — the
+            // sender is always this codebase, which always sets a UUID.
+            const nonce = String(payload?.nonce ?? "");
+            if (!nonce || nonce.length > 128) return { [REFUSE]: true, reason: "sealed message needs a bounded nonce" };
+            if (!freshNonce(nonce)) return { received: true, duplicate: true };
             text = typeof payload?.text === "string" ? payload.text : "";
-            at = Number.isFinite(payload?.at) ? payload.at : now();
+            // The timestamp is when WE received it. The sender's claimed `at` is
+            // attacker-controlled (inside the sealed payload it signed), so it is
+            // not trusted to order or date a message in our thread.
+            at = now();
             sealed = true;
           } else {
             text = typeof body?.text === "string" ? body.text : "";
@@ -191,11 +210,13 @@ export function createChatPlugin({
      *
      * @param {string} peerKey
      * @param {string} text
+     * @param {{sealed?: boolean}} [opts] whether the delivery went sealed, so
+     *   our own copy carries the 🔒 (and its absence flags a cleartext send).
      */
-    say: (peerKey, text) => {
+    say: (peerKey, text, { sealed = false } = {}) => {
       const trimmed = String(text ?? "").slice(0, MAX_MESSAGE);
       if (!trimmed.trim()) return null;
-      const message = { from: "me", text: trimmed, at: now(), mine: true };
+      const message = { from: "me", text: trimmed, at: now(), mine: true, sealed };
       append(peerKey, message);
       return message;
     },

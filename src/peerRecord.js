@@ -314,6 +314,15 @@ export function mergePeerRecord(mine, theirs) {
     // is a deliberate act, not something a peer can perform on our directory by
     // introducing itself differently tomorrow.
     publicKey: mine.publicKey ?? normalizeKey(theirs.publicKey),
+    // A sealing key we hold is never replaced by one arriving over the wire —
+    // the same rule as the identity key above. Unlike the identity key it does
+    // not fall back to `theirs`: a sealing key is trusted only once a *verified*
+    // record bound it (`directory.bindSealKey`), so a bare claim reaching a
+    // merge — an admit input, a gossip mention — cannot establish one. Carried
+    // here so a later route-stamp or gossip merge does not drop a bound key and
+    // silently downgrade the peer to cleartext. Its trust marker (`sealSeen`) is
+    // stored-only and rides `keepOurs`, like `bindingSeen`.
+    ...(mine.sealPublicKey ? { sealPublicKey: mine.sealPublicKey } : {}),
     addresses: normalizeAddresses([...merged.values()]),
     lastSeen: Math.max(mine.lastSeen ?? 0, theirs.lastSeen ?? 0) || null,
     ...(mine.note ? { note: mine.note } : theirs.note ? { note: theirs.note } : {}),
