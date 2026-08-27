@@ -123,6 +123,9 @@ const directory = createDirectory({
     // The key is this machine's identity, so the record always carries it —
     // a peer cannot check a claim it was never given a key for.
     publicKey: identity.publicKey,
+    // The sealing key travels in the same signed record, so peers learn where to
+    // seal content for this machine, bound to its identity.
+    sealPublicKey: identity.sealPublicKey,
   },
 });
 // Profiles ride alongside the directory: they are configuration about peers,

@@ -147,6 +147,7 @@ export const TRANSPORTS = ["lan", "tailscale", "tinc", "relay", "other"];
  * @typedef {{
  *   name: string,
  *   publicKey: string | null,
+ *   sealPublicKey?: string,
  *   addresses: PeerAddress[],
  *   lastSeen: number | null,
  *   note?: string,
@@ -169,10 +170,15 @@ const isPlainString = (value) => typeof value === "string" && value.trim().lengt
  */
 export function makePeerRecord(input) {
   if (!input || !isPlainString(input.name)) return null;
+  const sealPublicKey = normalizeKey(input.sealPublicKey);
   return {
     name: input.name.trim(),
     // The identity. A name is a label; this is what signed something.
     publicKey: normalizeKey(input.publicKey),
+    // The X25519 key peers seal content to for this machine (docs/sealing.md). It
+    // rides the signed record, so a peer that admitted this identity's signing key
+    // can trust the sealing key too — a relay cannot substitute it.
+    ...(sealPublicKey ? { sealPublicKey } : {}),
     addresses: normalizeAddresses(input.addresses),
     lastSeen: Number.isFinite(input.lastSeen) ? input.lastSeen : null,
     ...(isPlainString(input.note) ? { note: input.note.trim() } : {}),
@@ -349,6 +355,7 @@ export function publicRecord(record) {
     // A public key is public: sharing it is how another machine can check that
     // a claim about this one came from it.
     publicKey: safe.publicKey,
+    ...(safe.sealPublicKey ? { sealPublicKey: safe.sealPublicKey } : {}),
     addresses: safe.addresses.map(({ transport, value }) => ({ transport, value })),
     lastSeen: safe.lastSeen,
     ...(safe.note ? { note: safe.note } : {}),
