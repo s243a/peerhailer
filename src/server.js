@@ -1167,11 +1167,17 @@ export function createDaemon({
     },
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */
     listen: ({ port = 8787, host = "127.0.0.1" } = {}) =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
         // Whatever it was told to bind is a name it may answer to.
         controlNames.add(String(host).toLowerCase());
         controlLoopback = isLoopbackHost(host);
+        // A bind failure (a port already in use) emits `error`; without this it
+        // is unhandled and crashes the process instead of rejecting the caller,
+        // the same way `listenHail` already guards its listeners.
+        const onError = (/** @type {Error} */ err) => reject(err);
+        control.once("error", onError);
         control.listen(port, host, () => {
+          control.removeListener("error", onError);
           // A TCP listen always yields AddressInfo; the union covers pipes.
           const address = /** @type {import("node:net").AddressInfo} */ (control.address());
           log(`[daemon] control on http://${host}:${address.port} — page and local API`);

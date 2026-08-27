@@ -283,9 +283,16 @@ export function createDirectory(state = {}) {
     const elevation =
       until && profile
         ? { profileUntil: until, profileAfter: asOfNow(existing)?.profile ?? fallback ?? DEFAULT_PROFILE }
-        : existing?.profileUntil
-          ? { profileUntil: existing.profileUntil, ...(existing.profileAfter ? { profileAfter: existing.profileAfter } : {}) }
-          : {};
+        : // An explicit permanent profile (a profile with no `until`) is a
+          // deliberate set, so it clears any temporary elevation — otherwise the
+          // peer would later revert off a profile a person just chose for good.
+          // Only an address-only re-admission (no explicit profile) preserves a
+          // running elevation.
+          profile
+          ? {}
+          : existing?.profileUntil
+            ? { profileUntil: existing.profileUntil, ...(existing.profileAfter ? { profileAfter: existing.profileAfter } : {}) }
+            : {};
 
     const withProfile = {
       ...merged,
