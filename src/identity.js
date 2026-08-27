@@ -39,6 +39,7 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 
 import { defaultStatePath } from "./state.js";
+import { generateSealKeyPair } from "./sealing.js";
 
 /** @param {string} [statePath] */
 export function defaultIdentityPath(statePath = defaultStatePath()) {
@@ -93,12 +94,21 @@ export function fingerprint(publicKey) {
   return digest.match(/.{1,5}/g)?.join("-") ?? digest;
 }
 
-/** @returns {{publicKey: string, privateKey: string}} */
+/**
+ * A machine's identity: the Ed25519 signing key that *is* the identity, plus an
+ * X25519 **sealing** key. The signing key signs (hails, and seal-then-sign, so a
+ * sealed block's `from` is this identity); the sealing key is what peers encrypt to
+ * when they seal content for this machine (docs/sealing.md, suite A).
+ * @returns {{publicKey: string, privateKey: string, sealPublicKey: string, sealPrivateKey: string}}
+ */
 export function generateIdentity() {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const seal = generateSealKeyPair();
   return {
     publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
     privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    sealPublicKey: seal.publicKey,
+    sealPrivateKey: seal.privateKey,
   };
 }
 
@@ -110,13 +120,25 @@ export function generateIdentity() {
  *
  * @param {string} [path]
  * @param {{log?: (message: string) => void}} [options]
- * @returns {{publicKey: string, privateKey: string, created: boolean}}
+ * @returns {{publicKey: string, privateKey: string, sealPublicKey: string, sealPrivateKey: string, created: boolean}}
  */
 export function loadIdentity(path = defaultIdentityPath(), { log = () => {} } = {}) {
   try {
     const stored = JSON.parse(readFileSync(path, "utf8"));
     if (typeof stored?.publicKey === "string" && typeof stored?.privateKey === "string") {
-      return { publicKey: stored.publicKey, privateKey: stored.privateKey, created: false };
+      let sealPublicKey = stored.sealPublicKey;
+      let sealPrivateKey = stored.sealPrivateKey;
+      if (typeof sealPublicKey !== "string" || typeof sealPrivateKey !== "string") {
+        // An identity created before sealing existed gains an X25519 sealing key,
+        // generated once and saved beside the signing key — the signing key, and so
+        // the machine's identity, is untouched.
+        const seal = generateSealKeyPair();
+        sealPublicKey = seal.publicKey;
+        sealPrivateKey = seal.privateKey;
+        saveIdentity({ ...stored, sealPublicKey, sealPrivateKey }, path);
+        log(`[identity] added an X25519 sealing key to ${fingerprint(stored.publicKey)}`);
+      }
+      return { publicKey: stored.publicKey, privateKey: stored.privateKey, sealPublicKey, sealPrivateKey, created: false };
     }
     log(`[identity] ${path} is unusable; keeping it and generating a new key`);
   } catch (cause) {
@@ -135,7 +157,7 @@ export function loadIdentity(path = defaultIdentityPath(), { log = () => {} } = 
 }
 
 /**
- * @param {{publicKey: string, privateKey: string}} identity
+ * @param {{publicKey: string, privateKey: string, sealPublicKey?: string, sealPrivateKey?: string}} identity
  * @param {string} [path]
  */
 export function saveIdentity(identity, path = defaultIdentityPath()) {
