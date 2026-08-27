@@ -278,17 +278,22 @@ export function createDirectory(state = {}) {
     const heardOf = candidates.has(record.name);
     const broughtAddress = record.addresses.length > 0;
     const fallback = heardOf && !broughtAddress ? trust.candidateProfile : trust.admitProfile;
+    // A profile can arrive either as an option or on the peer record itself, and
+    // both forms are a deliberate set — resolve one value and use it for both the
+    // assignment and the elevation decision, or the `peer.profile` form changes
+    // the profile while silently keeping a stale expiry.
+    const requestedProfile = profile ?? peer?.profile;
     // What it reverts to is captured now, while we still know what it was
     // raised from. Working it out at expiry means guessing months later.
     const elevation =
-      until && profile
+      until && requestedProfile
         ? { profileUntil: until, profileAfter: asOfNow(existing)?.profile ?? fallback ?? DEFAULT_PROFILE }
         : // An explicit permanent profile (a profile with no `until`) is a
           // deliberate set, so it clears any temporary elevation — otherwise the
           // peer would later revert off a profile a person just chose for good.
           // Only an address-only re-admission (no explicit profile) preserves a
           // running elevation.
-          profile
+          requestedProfile
           ? {}
           : existing?.profileUntil
             ? { profileUntil: existing.profileUntil, ...(existing.profileAfter ? { profileAfter: existing.profileAfter } : {}) }
@@ -296,7 +301,7 @@ export function createDirectory(state = {}) {
 
     const withProfile = {
       ...merged,
-      profile: profile ?? peer?.profile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
+      profile: requestedProfile ?? existing?.profile ?? fallback ?? DEFAULT_PROFILE,
       ...(existing?.conflicts?.length ? { conflicts: existing.conflicts } : {}),
       // The support observation is monotone: re-attach it here, or a routine
       // address update (`hail add <known-peer> <new-address>`) would silently

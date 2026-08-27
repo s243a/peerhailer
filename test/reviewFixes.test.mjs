@@ -61,6 +61,17 @@ test("#4 an explicit permanent profile clears a running temporary elevation", ()
   assert.equal(readmitted.profileUntil, undefined, "a deliberate permanent profile does not keep the old expiry");
 });
 
+test("#4 the profile can also arrive on the peer record, and still clears the expiry", () => {
+  const bob = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" } });
+  dir.admit({ name: "p", publicKey: bob.publicKey, addresses: [{ value: "https://127.0.0.1:9" }] }, { profile: "temporary", until: Date.now() + 1_000_000 });
+  assert.ok(dir.get("p").profileUntil, "the temporary elevation is set");
+  // Profile supplied via peer.profile, not options — the same deliberate set.
+  const readmitted = dir.admit({ name: "p", publicKey: bob.publicKey, profile: "carrier", addresses: [{ value: "https://127.0.0.1:9" }] });
+  assert.equal(readmitted.profile, "carrier");
+  assert.equal(readmitted.profileUntil, undefined, "peer.profile clears the expiry too");
+});
+
 test("#5 a control listener on an occupied port rejects instead of crashing", async (t) => {
   const mk = (name) => createDaemon({ directory: createDirectory({ self: { name } }), identity: generateIdentity(), plugins: [] });
   const a = mk("a");
