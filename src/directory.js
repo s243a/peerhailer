@@ -68,15 +68,27 @@ function asRecord(custom) {
 export function reconcilePersist(onDisk, baseline, current) {
   /** @type {any} */
   const result = { ...onDisk };
-  const sameJson = (/** @type {any} */ a, /** @type {any} */ b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  // Presence is part of the comparison, not only value: a key this command
+  // *removed* (present at baseline, absent now) is a change, and must not read
+  // as "untouched" just because its value was null. Distinguishing absent from
+  // null is what lets a deliberate key removal win over a concurrent write.
+  const has = (/** @type {any} */ o, /** @type {string} */ k) => Object.prototype.hasOwnProperty.call(o ?? {}, k);
   for (const key of new Set([...Object.keys(baseline ?? {}), ...Object.keys(current ?? {})])) {
     if (key === "admitted") continue; // reconciled below, not diffed wholesale
-    if (!sameJson(current?.[key], baseline?.[key])) result[key] = current?.[key];
+    const inCur = has(current, key);
+    if (inCur === has(baseline, key) && JSON.stringify(current?.[key]) === JSON.stringify(baseline?.[key])) continue;
+    if (inCur) result[key] = current[key];
+    else delete result[key]; // this command removed the key
   }
   const baselineNames = new Set((baseline?.admitted ?? []).map((/** @type {any} */ p) => p.name));
   const currentNames = new Set((current?.admitted ?? []).map((/** @type {any} */ p) => p.name));
   const forgotten = new Set([...baselineNames].filter((n) => !currentNames.has(n)));
-  result.admitted = mergeByRevision(onDisk?.admitted ?? [], current?.admitted ?? [], { forgotten, baselineNames });
+  const admitted = mergeByRevision(onDisk?.admitted ?? [], current?.admitted ?? [], { forgotten, baselineNames });
+  // Only materialise `admitted` if any side actually had it, so a state that
+  // never carried the key round-trips unchanged rather than gaining an empty [].
+  if (admitted.length || has(onDisk, "admitted") || has(current, "admitted") || has(baseline, "admitted")) {
+    result.admitted = admitted;
+  }
   return result;
 }
 
@@ -125,6 +137,10 @@ export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineN
     }
     const winner = (Number(p.rev) || 0) > (Number(was.rev) || 0) ? p : was;
     const loser = winner === p ? was : p;
+    // Floors are raised from the loser too, so even a disk-winning tie can differ
+    // from the disk record if the snapshot carried a higher floor — that is the
+    // floor doing its job (never regress), not a merge instability. In practice a
+    // floor change bumps `rev`, so the winner already holds it.
     const bindingSeen = Math.max(Number(winner.bindingSeen) || 0, Number(loser.bindingSeen) || 0);
     const sealRequired = Boolean(winner.sealRequired || loser.sealRequired);
     byName.set(p.name, {

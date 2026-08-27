@@ -74,6 +74,18 @@ test("reconcilePersist: this command's own config change IS written", () => {
   assert.deepEqual(reconcilePersist(onDisk, baseline, current).blocklist.names, ["spammer"], "the command's block lands");
 });
 
+test("reconcilePersist: removing a config key that was null still counts as a change", () => {
+  const onDisk = { blocklist: { names: ["later"], keys: [] } }; // a concurrent block
+  const baseline = { blocklist: null };
+  const current = {}; // this command removed the key
+  // Presence-aware: absent != null, so the removal is honoured over the disk value.
+  assert.equal("blocklist" in reconcilePersist(onDisk, baseline, current), false, "the removal wins");
+});
+
+test("reconcilePersist: an empty state round-trips unchanged (no spurious admitted [])", () => {
+  assert.deepEqual(reconcilePersist({}, {}, {}), {}, "no key is materialised for a no-op write");
+});
+
 test("mergeByRevision: a revision tie resolves to disk (a stale writer does not overwrite)", () => {
   const disk = { name: "bob", publicKey: bob.publicKey, note: "committed", rev: 4 };
   const snap = { name: "bob", publicKey: bob.publicKey, note: "stale", rev: 4 };
