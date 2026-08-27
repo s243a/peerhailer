@@ -34,9 +34,13 @@
  * @module routing
  */
 
+import { randomUUID } from "node:crypto";
+
 export const DEFAULT_TTL = 16;
 export const DEFAULT_BUDGET = 64;
 export const DEFAULT_FANOUT_MAX = 8;
+export const DEFAULT_DEDUP_WINDOW_MS = 5 * 60_000;
+export const DEFAULT_DEDUP_MAX = 4096;
 
 /**
  * @param {{
@@ -50,6 +54,10 @@ export const DEFAULT_FANOUT_MAX = 8;
  *   budgetMax?: number,
  *   fanoutMax?: number,
  *   normalize?: (key: string) => string,
+ *   now?: () => number,
+ *   newId?: () => string,
+ *   dedupWindowMs?: number,
+ *   dedupMax?: number,
  * }} deps
  */
 export function createRouter({
@@ -63,9 +71,32 @@ export function createRouter({
   budgetMax = DEFAULT_BUDGET,
   fanoutMax = DEFAULT_FANOUT_MAX,
   normalize = (/** @type {string} */ k) => k,
+  now = () => Date.now(),
+  newId = () => randomUUID(),
+  dedupWindowMs = DEFAULT_DEDUP_WINDOW_MS,
+  dedupMax = DEFAULT_DEDUP_MAX,
 }) {
   const N = normalize;
   self = N(self);
+  // Replay guard, at the DESTINATION only. A message carries a unique `id`; the
+  // destination delivers each id at most once within a window, so a relay re-
+  // injecting an old envelope cannot make the destination act on it twice. Only the
+  // destination dedups — an intermediate keeps re-forwarding, so the recursive
+  // search stays complete (a node legitimately reached via a second path during
+  // backtracking is not wrongly refused). Absent an id (an old or non-originated
+  // envelope), delivery is not deduped.
+  /** @type {Map<string, number>} id -> expiry */
+  const seen = new Map();
+  /** @param {string | undefined} id */
+  const firstDelivery = (id) => {
+    if (!id) return true;
+    const t = now();
+    for (const [k, exp] of seen) { if (exp <= t) seen.delete(k); else break; }
+    if (seen.has(id)) return false;
+    seen.set(id, t + dedupWindowMs);
+    while (seen.size > dedupMax) { const oldest = seen.keys().next().value; if (oldest === undefined) break; seen.delete(oldest); }
+    return true;
+  };
   const order = policy.order ?? ((candidates) => candidates);
   // Fanout bounds the breadth a receipt imposes on *other* nodes, so — like ttl and
   // budget — it is clamped to a local maximum here, in the engine, not left to
@@ -80,7 +111,7 @@ export function createRouter({
    * it to us (never tried again). Returns
    * `{ delivered, response?, via?, spent }` — `spent` is forwards consumed, so a
    * caller can hold the shared budget across siblings.
-   * @param {{dest: string, ttl: number, budget: number, visited: string[], payload: any, origin?: string}} envelope
+   * @param {{dest: string, ttl: number, budget: number, visited: string[], payload: any, origin?: string, id?: string}} envelope
    * @param {string | null} [from]
    */
   async function relay(envelope, from = null) {
@@ -92,6 +123,7 @@ export function createRouter({
     const path = [...visited, self];
 
     if (dest === self) {
+      if (!firstDelivery(envelope.id)) return { delivered: true, duplicate: true, via: path, spent: 0 };
       return { delivered: true, response: await deliver(payload, { origin, via: path }), via: path, spent: 0 };
     }
     // Clamp on RECEIPT to this node's own maxima. The envelope's ttl and budget
@@ -144,12 +176,15 @@ export function createRouter({
    * Origin entry point: send a payload toward `dest` across the graph.
    * @param {string} dest
    * @param {any} payload
-   * @param {{ttl?: number, budget?: number}} [opts]
+   * @param {{ttl?: number, budget?: number, id?: string}} [opts]
    */
-  async function send(dest, payload, { ttl = ttlMax, budget = budgetMax } = {}) {
+  async function send(dest, payload, { ttl = ttlMax, budget = budgetMax, id = newId() } = {}) {
     const target = N(dest);
-    if (target === self) return { delivered: true, response: await deliver(payload, { origin: self, via: [self] }), via: [self] };
-    return relay({ dest: target, ttl: Math.min(ttl, ttlMax), budget: Math.min(budget, budgetMax), visited: [], payload, origin: self }, null);
+    if (target === self) {
+      if (!firstDelivery(id)) return { delivered: true, duplicate: true, via: [self] };
+      return { delivered: true, response: await deliver(payload, { origin: self, via: [self] }), via: [self] };
+    }
+    return relay({ dest: target, ttl: Math.min(ttl, ttlMax), budget: Math.min(budget, budgetMax), visited: [], payload, origin: self, id }, null);
   }
 
   return { relay, send, self };
