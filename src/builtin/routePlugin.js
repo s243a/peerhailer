@@ -14,6 +14,10 @@
 import { createRouter } from "../routing.js";
 import { REFUSE } from "../plugins.js";
 
+/** A caller may hand us at most this many relays per window before we refuse. */
+export const RELAY_WINDOW_MS = 10_000;
+export const MAX_RELAYS_PER_WINDOW = 60;
+
 /**
  * @param {{
  *   self: string,
@@ -24,15 +28,35 @@ import { REFUSE } from "../plugins.js";
  *   policy?: any,
  *   ttlMax?: number,
  *   budgetMax?: number,
+ *   now?: () => number,
  * }} deps
  */
 export function createRoutePlugin(deps) {
   const router = createRouter(deps);
+  const now = deps.now ?? Date.now;
+  // Per-caller token bucket. peerhailer has no framework rate limiter — command and
+  // shell each hand-roll one — so routing does too: one receipt can trigger up to
+  // fanout signed callPeers, so an unbounded relay rate is an amplification lever.
+  /** @type {Map<string, number[]>} */
+  const relays = new Map();
+  const withinLimit = (/** @type {string} */ key) => {
+    const t = now();
+    const recent = (relays.get(key) ?? []).filter((at) => t - at < RELAY_WINDOW_MS);
+    if (recent.length >= MAX_RELAYS_PER_WINDOW) {
+      relays.set(key, recent);
+      return false;
+    }
+    recent.push(t);
+    relays.set(key, recent);
+    return true;
+  };
   return {
     name: "route",
     description: "Relay and deliver multi-hop messages across admitted peers (Stage 1).",
-    // Sealed like chat and files: the fabric cannot see what a routed message
-    // carries, so it must not carry one in the clear.
+    // Encrypted *arrival* (each hop's transport), like chat and files. Note this is
+    // NOT payload confidentiality across the path: at Stage 1 every relay can read
+    // the payload — sealing to the destination is a near-term prerequisite before
+    // routing anything private (see src/routing.js and docs/routing.md).
     requiresEncryptedArrival: true,
     capabilities: ["route"],
     routes: [
@@ -43,6 +67,7 @@ export function createRoutePlugin(deps) {
         /** @param {any} input */
         handler: async ({ body, caller }) => {
           if (!caller?.publicKey) return { [REFUSE]: true, reason: "no key to attribute a relay to" };
+          if (!withinLimit(caller.publicKey)) return { [REFUSE]: true, reason: "relaying too fast" };
           // The neighbour that handed us this is the caller; the engine never
           // hands it straight back.
           return router.relay(body ?? {}, caller.publicKey);

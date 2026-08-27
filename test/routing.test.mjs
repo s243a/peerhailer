@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createRouter, greedyPolicy, floodPolicy, xorDistanceOver } from "../src/routing.js";
 
 /** Build a network from an adjacency map; returns the routers and a forward counter. */
-function net(adjacency, { policy, ttlMax, budgetMax, blocked = new Set() } = {}) {
+function net(adjacency, { policy, ttlMax, budgetMax, fanoutMax, blocked = new Set() } = {}) {
   const nodes = new Map();
   let forwards = 0;
   for (const key of Object.keys(adjacency)) {
@@ -29,6 +29,7 @@ function net(adjacency, { policy, ttlMax, budgetMax, blocked = new Set() } = {})
         policy,
         ttlMax,
         budgetMax,
+        fanoutMax,
       }),
     );
   }
@@ -150,4 +151,16 @@ test("clamps ttl and budget on RECEIPT to local maxima — an oversized envelope
   );
   const ok = await n2.get("b").relay({ dest: "d", ttl: 99999, budget: 99999, visited: ["a"], payload: "x" }, "a");
   assert.equal(ok.delivered, true, "within the clamped bound it still works");
+});
+
+test("fanoutMax bounds per-node breadth in the engine, whatever policy asks", async () => {
+  // A hub with five dead-end leaves and a flood policy (fanout Infinity). fanoutMax
+  // caps how many the hub actually tries.
+  const { nodes, forwards } = net(
+    { a: ["l1", "l2", "l3", "l4", "l5"], l1: ["a"], l2: ["a"], l3: ["a"], l4: ["a"], l5: ["a"] },
+    { policy: floodPolicy(), fanoutMax: 2, budgetMax: 64 },
+  );
+  const r = await nodes.get("a").send("z", "x");
+  assert.equal(r.delivered, false, "z is unreachable");
+  assert.ok(forwards() <= 2, `the hub tried at most fanoutMax neighbours (${forwards()}), not all five`);
 });

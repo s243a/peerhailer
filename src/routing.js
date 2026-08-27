@@ -3,11 +3,20 @@
  * construction. See docs/routing.md for the roadmap this is the floor of.
  *
  * The engine is the **protocol**, and it is fixed and shared: a message carries a
- * `dest`, a hard `ttl` (a depth ceiling nobody may raise), a `budget` (a ceiling on
- * total forwards, so a search cannot fan out into a flood), a `visited` set (so a
- * node is never on a path twice), and an opaque sealed `payload`. The rules here —
- * decrement ttl and budget, never revisit, never step toward a blocked key —
- * are not negotiable.
+ * `dest`, a hard `ttl` (a depth ceiling), a `budget` (a soft ceiling on total
+ * forwards), a `visited` set (so a node is never on a path twice), a `payload`, and
+ * an `origin`. The hard rules — clamp ttl/budget/fanout to local maxima on receipt,
+ * decrement ttl, never revisit, never step toward a blocked key — are not
+ * negotiable.
+ *
+ * **Confidentiality, stated honestly: at Stage 1 the `payload` is NOT sealed.**
+ * Every relay on the path can read it (and log or alter it). `requiresEncryptedArrival`
+ * on the plugin protects each *hop's* transport, not the path — an intermediary is
+ * an admitted peer, and admission is not confidentiality. Sealing the payload to the
+ * destination's key is a near-term prerequisite before routing anything private (see
+ * docs/routing.md); it is distinct from the Stage 5 *anonymity* (onion) work. The
+ * `origin` field is likewise carried **unsigned** at Stage 1 — advisory only; it
+ * becomes load-bearing (and must be signed) once replies are origin-addressed.
  *
  * Everything *else* is **policy**, injected: which admitted neighbour to try first,
  * how many to try (`fanout`), and the distance metric that orders them. The engine
@@ -27,6 +36,7 @@
 
 export const DEFAULT_TTL = 16;
 export const DEFAULT_BUDGET = 64;
+export const DEFAULT_FANOUT_MAX = 8;
 
 /**
  * @param {{
@@ -38,6 +48,7 @@ export const DEFAULT_BUDGET = 64;
  *   policy?: { order?: (candidates: string[], dest: string) => string[], fanout?: number },
  *   ttlMax?: number,
  *   budgetMax?: number,
+ *   fanoutMax?: number,
  *   normalize?: (key: string) => string,
  * }} deps
  */
@@ -50,12 +61,18 @@ export function createRouter({
   policy = {},
   ttlMax = DEFAULT_TTL,
   budgetMax = DEFAULT_BUDGET,
+  fanoutMax = DEFAULT_FANOUT_MAX,
   normalize = (/** @type {string} */ k) => k,
 }) {
   const N = normalize;
   self = N(self);
   const order = policy.order ?? ((candidates) => candidates);
-  const fanout = typeof policy.fanout === "number" && Number.isInteger(policy.fanout) && policy.fanout > 0 ? policy.fanout : Infinity;
+  // Fanout bounds the breadth a receipt imposes on *other* nodes, so — like ttl and
+  // budget — it is clamped to a local maximum here, in the engine, not left to
+  // policy. A policy may ask for less; it can never ask for more than fanoutMax.
+  const requested =
+    typeof policy.fanout === "number" && Number.isInteger(policy.fanout) && policy.fanout > 0 ? policy.fanout : fanoutMax;
+  const fanout = Math.min(requested, fanoutMax);
 
   /**
    * Handle a message at this node: deliver it if we are the destination, else try
