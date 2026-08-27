@@ -138,32 +138,56 @@ each plugin rolls its own). Ships `custom` + a **`source-route`** family.
 floods a small *route request* to discover a path, then source-routes the data; the
 Stage 1 relay instead carries the **payload** down every exploratory branch, so one
 misrouted send can move up to `budget × payload` of exploratory traffic. Survivable
-on tens of nodes, but it makes **Stage 1.5 — discover a path once with a lightweight
-request, cache it, then source-route without re-searching — a hard prerequisite
-before routing large payloads** (or Stage 1 must cap exploratory payload size).
+on tens of nodes, but it makes **Stage 1.5 — chunk the payload, let the first block probe and cache the
+route, then source-route the rest — a hard prerequisite before routing large payloads**
+(or Stage 1 must cap exploratory payload size).
 (2) Backtracking can starve a shallow valid route behind a deep dead-end subtree;
 greedy ordering only mitigates it. Stats are **first-party** only. Prove it on a
 3–5 node loopback graph. *(Covers outline items 1's delivery half, 2's bound, and 5.)*
 
-### Stage 1.5 — discover-then-source-route, and seal the payload
+### Stage 1.5 — chunked, route-caching, end-to-end-sealed relay
 
-The follow-up Stage 1's honesty makes urgent — efficiency *and* confidentiality,
-before anything private or large is routed:
+The follow-up Stage 1's honesty makes urgent — cheap exploration *and*
+confidentiality, before anything large or private is routed. What fell out of design
+discussion is one mechanism, not a separate discovery phase:
 
-- **Discover once, then source-route.** Replace the payload-carrying DFS with a
-  lightweight *route request* that finds a path, a cache of that path, and
-  source-routed data that never re-searches — so a send no longer carries the payload
-  down every exploratory branch. This is the DSR/AODV shape Stage 1 only approximates.
-- **Seal the payload to the destination.** Encrypt-to-`dest` so relays carry an
-  opaque blob, not readable content — the *confidentiality* the envelope already
-  names, closing the Stage 1 "every relay reads everything" gap. Distinct from Stage
-  5 onion, which hides *who*, not *what*.
-- **Sign `origin`, add an envelope id + expiry.** So a reply can be origin-addressed
-  and a replayed envelope is rejected (the dedup cache pairs with the plugin's rate
-  limit).
+- **Chunk the payload, and let the first block be the probe.** Break a payload into
+  small blocks and send block 1 through the route search. Its success both confirms a
+  working path (which is cached) *and* delivers real data — no separate no-payload
+  scout, no wasted probe traffic. Blocks 2…N then source-route down the cached path.
+  Exploration cost is bounded to **one block**, not the whole payload, whatever its
+  size. It degrades perfectly: a message smaller than a block is a single sealed block
+  that is at once probe and data, so the common small-message case pays nothing extra.
+- **Optimistic reuse, with re-discovery on a miss.** A path that carried block 1 can
+  still fail on block 5 (a relay drops, congests, or loses the capability), so "block 1
+  arrived" is a *probability*, not a guarantee. Cache and reuse the path; when a later
+  block fails, re-run the search for that block and update the cache. (Freenet reuses
+  paths this way.)
+- **Sequence numbers, for reassembly.** Each block carries an index so the destination
+  reassembles in order and can detect and re-request a missing one — needed once blocks
+  can take different paths or arrive out of order.
+- **Seal end to end, per block.** Encryption is between the two endpoints — *not*
+  decrypted and re-encrypted at each hop; a relay carries an opaque block it cannot
+  read. (Per-hop TLS still protects the wire and hides metadata; the end-to-end seal is
+  what protects the content from the relays themselves.) Derive one shared key to the
+  destination once, then seal each block independently (shared key + a per-block nonce,
+  AES-GCM) so a block decrypts on its own, whatever path it took. **Sealing is a
+  fabric-level primitive, not a routing feature** — the same seal chat and tunnel-exits
+  want; the identity-key decision it rests on is its own record, `docs/sealing.md`.
+  Distinct from Stage 5 *anonymity*, which hides *who*, not *what*.
+- **Sign `origin`; replay is already handled.** Signing `origin` lets a reply be
+  addressed to it rather than threaded back up the call chain. Replay itself was closed
+  in Stage 1 (a per-destination envelope-id dedup — a relay cannot make the destination
+  act on an old envelope twice); an envelope expiry can tighten it further.
 - **Asynchronous reply routing.** Stage 1 threads replies synchronously up the call
   chain, which caps chain length at `ttl × per-hop timeout` and holds a call open per
-  hop; once a source route exists, a reply can travel its own path.
+  hop; once a cached source route exists, a reply can travel its own path.
+
+On the block size: Freenet's 32 KiB came from *storing* content-addressed blocks on a
+filesystem. peerhailer routes to a node rather than storing, so that particular
+rationale does not transfer — but a **small fixed block is still right here**, for the
+reason above (cheap exploration, few round-trips). Tune it to the ~1 MB message
+envelope and the round-trip cost; 32 KiB is a reasonable starting point.
 
 ### Stage 2 — adaptive next-hop (greedy, with the honest caveat)
 
@@ -261,7 +285,8 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
 - **Confidentiality:** Stage 1 payloads are **cleartext to every relay**. Sealing to
   the destination's key is the fix and a near-term prerequisite for private payloads
   — and it is distinct from anonymity: confidentiality hides *what* is carried,
-  anonymity hides *who* is talking.
+  anonymity hides *who* is talking. Sealing is a fabric-level primitive with its own
+  decision record: `docs/sealing.md`.
 - **Routing attacks** (blackhole, grayhole, misdirection): mitigated by first-party
   success/RTT measurement feeding the next-hop weights (a peer that silently drops
   loses weight fast), by trust-weighting, and by keeping the "never relay toward a
