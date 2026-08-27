@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory, carryVerifiedSeal } from "../src/directory.js";
+import { createDirectory, mergeByRevision } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -147,22 +147,14 @@ const persist = () =>
     statePath,
     (onDisk) => {
       const snap = directory.snapshot();
-      // Carry the monotone target-binding signal forward across writers. This
-      // process's directory may have loaded before a running daemon learned a
-      // peer binds (passively, from a hail), and `snapshot()` wholesale-replaces
-      // `admitted`, which would drop it — making a field the whole design treats
-      // as never-lowered lowerable by an unrelated CLI command. Only this one
-      // field is merged by `max`; the rest stays "this command's peers win".
-      const priorBinding = new Map((onDisk.admitted ?? []).map((p) => [p.name, p.bindingSeen]));
-      const withBinding = (snap.admitted ?? []).map((p) => {
-        const seen = Math.max(Number(p.bindingSeen) || 0, Number(priorBinding.get(p.name)) || 0);
-        return seen > 0 ? { ...p, bindingSeen: seen } : p;
-      });
-      // A verified sealing key is monotone the same way, and `snapshot()` would
-      // erase one this process loaded too early to see — a stale writer landing
-      // last would silently downgrade the peer to cleartext. Carried forward
-      // (identity-matched; disagreements flagged) alongside the binding signal.
-      const admitted = carryVerifiedSeal(onDisk.admitted ?? [], withBinding);
+      // Merge this process's snapshot against current disk by per-record
+      // revision, so a writer that loaded stale state — a slow walk, an unrelated
+      // CLI command — cannot roll a peer back over a rotation or a fresh sealing
+      // bind another writer already committed. Monotone floors (target-binding
+      // support, seal-required) never regress in the merge. Replaces the old
+      // per-field reconcile, which could not tell a stale snapshot from a
+      // deliberate change and so rolled newer trust back (see the sealing review).
+      const admitted = mergeByRevision(onDisk.admitted ?? [], snap.admitted ?? []);
       return { ...onDisk, ...stored, ...snap, admitted };
     },
     { log: (m) => process.stderr.write(`${m}\n`) },
@@ -444,6 +436,38 @@ switch (command) {
     const forgotten = directory.forget(name);
     persist();
     log(forgotten ? `forgot ${name}` : `${name} was not known`);
+    break;
+  }
+
+  case "seal": {
+    // The operator side of the sealing trust model. A sealing conflict (two
+    // verified keys disagree) and a `reverify` state (rotated, or rolled back)
+    // both fail sends closed rather than downgrading to cleartext; this is where
+    // a person resolves one, since a replayable re-walk deliberately cannot.
+    const [action, name] = rest;
+    if (!action || action === "status") {
+      let any = false;
+      for (const peer of directory.listAdmitted()) {
+        const state = directory.sealState(peer.name);
+        if (state === "unverified") continue;
+        any = true;
+        const pending = peer.sealConflict ? ` (pending ${fingerprint(peer.sealConflict).slice(0, 14)})` : "";
+        log(`${peer.name}: ${state}${pending}`);
+      }
+      if (!any) log("no peer has a sealing key yet");
+      break;
+    }
+    if (action === "accept") {
+      if (!name) fail("usage: hail seal accept <name>   (accepts the key the last walk presented)");
+      if (!directory.get(name)) fail(`no peer called ${name}`);
+      if (directory.sealState(name) !== "conflict") fail(`${name} has no sealing conflict to accept (state: ${directory.sealState(name)})`);
+      const accepted = directory.acceptSealKey(name);
+      if (!accepted?.sealPublicKey) fail(`could not accept a sealing key for ${name}`);
+      persist();
+      log(`accepted sealing key ${fingerprint(accepted.sealPublicKey).slice(0, 14)} for ${name}`);
+      break;
+    }
+    fail("usage: hail seal status | hail seal accept <name>");
     break;
   }
 

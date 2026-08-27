@@ -83,7 +83,7 @@ test("a gossiped sealing key is never trusted; a peer with no verified key stays
   // key beside it. Even after admitting that candidate, the stapled key is not
   // trusted — sealKeyFor stays null until a walk verifies bob's own signed key.
   dir.learnFrom("introducer", [{ name: "bob", publicKey: bob.publicKey, sealPublicKey: mallory.sealPublicKey, addresses: [{ value: "https://127.0.0.1:9" }] }]);
-  dir.admit({ name: "bob", addresses: [{ value: "https://127.0.0.1:9" }] }, { profile: "chatp" });
+  dir.admit({ name: "bob", publicKey: bob.publicKey, addresses: [{ value: "https://127.0.0.1:9" }] }, { profile: "chatp" });
   assert.equal(dir.sealKeyFor("bob"), null, "a gossiped/stapled sealing key is never sealed to");
 
   // The walk verifies bob's real signed record; only then is a key trusted, and
@@ -96,6 +96,43 @@ test("a gossiped sealing key is never trusted; a peer with no verified key stays
   dir.bindSealKey("bob", mallory.sealPublicKey, bob.publicKey);
   assert.equal(dir.sealState("bob"), "conflict", "a disagreeing verified key is a conflict");
   assert.equal(dir.sealKeyFor("bob"), null, "no key is handed out under conflict");
+});
+
+test("a sealing conflict/reverify fails the send closed (409), and the API resolves a conflict", async (t) => {
+  const A = await node("alice");
+  const B = await node("bob", { canOpen: true });
+  t.after(async () => { await A.daemon.close(); await B.daemon.close(); });
+
+  A.directory.admit({ name: "bob", publicKey: B.id.publicKey, addresses: [{ value: `https://127.0.0.1:${B.hailPort}` }] }, { profile: "chatp" });
+  B.directory.admit({ name: "alice", publicKey: A.id.publicKey }, { profile: "chatp" });
+  A.directory.bindSealKey("bob", B.id.sealPublicKey, B.id.publicKey);
+
+  // Verified: the send seals.
+  assert.equal((await post(A, "/api/chat/send", { peer: "bob", text: "hi" })).json.sealed, true);
+
+  // A different verified key raises a conflict → the send now FAILS CLOSED,
+  // never falling back to cleartext.
+  const other = generateIdentity();
+  A.directory.bindSealKey("bob", other.sealPublicKey, B.id.publicKey);
+  assert.equal(A.directory.sealState("bob"), "conflict");
+  const blocked = await post(A, "/api/chat/send", { peer: "bob", text: "still there?" });
+  assert.equal(blocked.status, 409, "a conflict refuses the send");
+  assert.equal(blocked.json.sealState, "conflict");
+
+  // The operator resolves it deliberately through the API; sending works again.
+  const accepted = await post(A, "/api/seal/accept", { peer: "bob" });
+  assert.equal(accepted.json.accepted, true);
+  assert.equal(A.directory.sealState("bob"), "verified", "conflict resolved");
+  // The fail-closed gate is cleared — the send is attempted again (it seals to
+  // the accepted key; delivery itself is a separate matter from the gate).
+  assert.notEqual((await post(A, "/api/chat/send", { peer: "bob", text: "back" })).status, 409, "resolved conflict no longer blocks the send");
+
+  // A rotation drops the key but keeps seal-required → reverify also fails closed.
+  A.directory.rotateKey("bob", generateIdentity().publicKey);
+  assert.equal(A.directory.sealState("bob"), "reverify");
+  const reverify = await post(A, "/api/chat/send", { peer: "bob", text: "hello?" });
+  assert.equal(reverify.status, 409, "a peer awaiting re-verification is not downgraded to cleartext");
+  assert.equal(reverify.json.sealState, "reverify");
 });
 
 test("a replayed sealed block is dropped; a sealed sender that isn't the caller is refused", () => {

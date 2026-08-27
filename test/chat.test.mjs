@@ -72,7 +72,7 @@ test("two peers exchange chat through the page routes; state lists it; clear for
   assert.equal(state.enabled, true);
   const conv = state.conversations.find((c) => c.name === "bob");
   assert.ok(conv && conv.count === 2, "state lists the bob conversation with count 2");
-  assert.ok(state.peers.includes("bob"), "bob is an admitted peer you can chat with");
+  assert.ok(state.peers.some((p) => p.name === "bob"), "bob is an admitted peer you can chat with");
 
   // Unknown peer and empty text are refused cleanly.
   assert.equal((await post(A, "/api/chat/send", { peer: "nobody", text: "x" })).status, 404);

@@ -814,15 +814,20 @@ export function createDaemon({
       if (scope === "control" && url.pathname === "/api/chat/state" && request.method === "GET") {
         if (!chat) return send(response, 200, { enabled: false, self: directory.self?.name ?? null, conversations: [], peers: [] });
         const names = chatNames();
-        const conversations = chat.conversations().map((/** @type {any} */ c) => ({
-          key: c.peerKey,
-          name: names.get(c.peerKey) ?? null,
-          fp: fingerprint(c.peerKey),
-          count: c.count,
-          last: c.last,
-        }));
+        const conversations = chat.conversations().map((/** @type {any} */ c) => {
+          const peerName = names.get(c.peerKey);
+          return {
+            key: c.peerKey,
+            name: peerName ?? null,
+            fp: fingerprint(c.peerKey),
+            count: c.count,
+            last: c.last,
+            // So the UI can show a 🔒/conflict badge and offer to resolve one.
+            seal: peerName ? (directory.sealState?.(peerName) ?? "unverified") : "unverified",
+          };
+        });
         // Admitted peers you could start a chat with, even before any message.
-        const peers = (directory.listAdmitted?.() ?? []).map((peer) => peer.name);
+        const peers = (directory.listAdmitted?.() ?? []).map((peer) => ({ name: peer.name, seal: directory.sealState?.(peer.name) ?? "unverified" }));
         return send(response, 200, { enabled: true, self: directory.self?.name ?? null, conversations, peers });
       }
       if (scope === "control" && url.pathname === "/api/chat/thread" && request.method === "GET") {
@@ -846,12 +851,20 @@ export function createDaemon({
         // Falls back to cleartext only for a peer we have never verified a
         // sealing key for (an older build); once verified, `sealSeen` is sticky
         // and the send stays sealed, so there is no silent downgrade after that.
-        // Conflict is a fail-closed state, not a cleartext fallback: two
-        // verified sealing keys disagree (a rotation or an attack), so refuse
-        // rather than silently encrypting to a possibly-stale key — or leaking
-        // the message in the clear. A person resolves it (re-walk, or re-admit).
-        if (directory.sealState?.(record.name) === "conflict") {
-          return send(response, 409, { error: "this peer's sealing key is in conflict — resolve it before sending" });
+        // Fail closed rather than ever downgrading a peer we know can seal. Two
+        // states forbid a send: `conflict` (two verified keys disagree — a
+        // rotation or an attack) and `reverify` (the peer has been sealed to
+        // before but the key is currently absent — a rotation, or a stale writer
+        // rolled it back). Only a peer we have *never* sealed to falls back to
+        // cleartext. A person resolves a conflict with `hail seal accept`.
+        const trust = directory.sealState?.(record.name) ?? "unverified";
+        if (trust === "conflict" || trust === "reverify") {
+          return send(response, 409, {
+            error: trust === "conflict"
+              ? "this peer's sealing key is in conflict — resolve it with `hail seal accept` before sending"
+              : "this peer's sealing key needs re-verifying (walk it) before sending — not downgrading to cleartext",
+            sealState: trust,
+          });
         }
         const sealKey = directory.sealKeyFor?.(record.name) ?? null;
         let payload;
@@ -997,6 +1010,18 @@ export function createDaemon({
         const name = url.searchParams.get("name");
         const forgotten = name ? change((peers) => peers.forget(name)) : false;
         return send(response, 200, { forgotten });
+      }
+
+      // Resolve a sealing conflict deliberately — the operator act a replayable
+      // re-walk is not allowed to perform. Routed through `change`, so it applies
+      // to current disk state and cannot be rolled back by a stale writer.
+      if (scope === "control" && url.pathname === "/api/seal/accept" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const name = typeof body?.peer === "string" ? body.peer : "";
+        if (!name || !directory.get?.(name)) return send(response, 404, { error: "unknown peer" });
+        if (directory.sealState?.(name) !== "conflict") return send(response, 409, { error: "no sealing conflict to accept", sealState: directory.sealState?.(name) });
+        const accepted = change((peers) => peers.acceptSealKey(name));
+        return send(response, 200, { accepted: Boolean(accepted?.sealPublicKey), sealState: directory.sealState?.(name) });
       }
 
       // The session composer: one-click launch of a local T3 instance whose model

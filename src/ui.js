@@ -126,6 +126,8 @@ export function renderPage(self) {
 <section id="chat">
   <div class="cx-row">
     <label>Peer <select id="ch-peer"></select></label>
+    <span id="ch-seal" class="muted"></span>
+    <button id="ch-accept" style="display:none" title="accept the sealing key this peer now presents">Accept new key</button>
     <button id="ch-clear" title="forget this conversation (memory only)">Clear</button>
   </div>
   <div id="ch-thread" class="ch-thread"></div>
@@ -688,7 +690,15 @@ $("fx-mount").addEventListener("click", fxMount);
 fxLoadPeers();
 fxLoadMounts();
 // --- chat: short messages to/from admitted peers (memory only) ---
-let chPeer = null, chTimer = null, chEnabled = false;
+let chPeer = null, chTimer = null, chEnabled = false, chSeal = {};
+// How each sealing state reads to the operator. conflict/reverify block a
+// send (fail closed, never cleartext); the accept button shows only for a conflict.
+const SEAL_BADGE = {
+  verified: "🔒 sealed",
+  conflict: "⚠ sealing conflict — the peer presents a different key",
+  reverify: "⚠ needs re-verify — walk this peer before sending",
+  unverified: "",
+};
 async function chLoad() {
   try {
     const st = await api("/api/chat/state");
@@ -696,12 +706,18 @@ async function chLoad() {
     if (!chEnabled) { $("ch-status").textContent = "chat is off — start the daemon with --chat"; $("ch-peer").innerHTML = '<option value="">(chat off)</option>'; return; }
     const named = new Set();
     const opts = [];
-    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
-    for (const p of (st.peers || [])) if (!named.has(p)) opts.push('<option value="' + esc(p) + '">' + esc(p) + "</option>");
+    chSeal = {};
+    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); chSeal[c.name] = c.seal; opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
+    for (const p of (st.peers || [])) if (!named.has(p.name)) { chSeal[p.name] = p.seal; opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>"); }
     $("ch-peer").innerHTML = opts.length ? opts.join("") : '<option value="">(no admitted peers)</option>';
     if (chPeer && [...$("ch-peer").options].some((o) => o.value === chPeer)) $("ch-peer").value = chPeer;
     await chOpen();
   } catch (e) { $("ch-status").textContent = "could not load chat: " + (e.message ?? e); }
+}
+function chSealBadge() {
+  const state = chSeal[$("ch-peer").value] || "unverified";
+  $("ch-seal").textContent = SEAL_BADGE[state] || "";
+  $("ch-accept").style.display = state === "conflict" ? "" : "none";
 }
 function chRender(messages) {
   const box = $("ch-thread");
@@ -715,6 +731,7 @@ function chRender(messages) {
 async function chOpen() {
   const peer = $("ch-peer").value;
   chPeer = peer || null;
+  chSealBadge();
   if (!peer) { chRender([]); return; }
   try { const t = await api("/api/chat/thread?peer=" + encodeURIComponent(peer)); chRender(t.messages); $("ch-status").textContent = ""; }
   catch (e) { $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
@@ -723,9 +740,17 @@ async function chSend() {
   const peer = $("ch-peer").value, text = $("ch-text").value;
   if (!peer || !text.trim()) return;
   $("ch-send").disabled = true;
-  try { await cxPost("/api/chat/send", { peer: peer, text: text }); $("ch-text").value = ""; await chOpen(); }
+  try { await cxPost("/api/chat/send", { peer: peer, text: text }); $("ch-text").value = ""; await chLoad(); }
   catch (e) { $("ch-status").textContent = "send failed: " + (e.message ?? e); }
   finally { $("ch-send").disabled = false; }
+}
+async function chAccept() {
+  const peer = $("ch-peer").value;
+  if (!peer) return;
+  $("ch-accept").disabled = true;
+  try { await cxPost("/api/seal/accept", { peer: peer }); await chLoad(); }
+  catch (e) { $("ch-status").textContent = "could not accept key: " + (e.message ?? e); }
+  finally { $("ch-accept").disabled = false; }
 }
 async function chClear() {
   const peer = $("ch-peer").value;
@@ -733,6 +758,7 @@ async function chClear() {
   try { await cxPost("/api/chat/clear", { peer: peer }); await chLoad(); } catch (ignore) {}
 }
 $("ch-peer").addEventListener("change", chOpen);
+$("ch-accept").addEventListener("click", chAccept);
 $("ch-send").addEventListener("click", chSend);
 $("ch-text").addEventListener("keydown", (e) => { if (e.key === "Enter") chSend(); });
 $("ch-clear").addEventListener("click", chClear);
