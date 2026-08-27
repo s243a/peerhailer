@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 
-import { seal, open, generateSealKeyPair, SUITE } from "../src/sealing.js";
+import { seal, open, openSigned, generateSealKeyPair, SUITE } from "../src/sealing.js";
 
 const edKeyPair = () => {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -99,4 +99,40 @@ test("two seals of the same content differ (fresh ephemeral key + nonce)", () =>
   const b = seal("same", bob.publicKey);
   assert.notEqual(a.ct, b.ct, "no deterministic ciphertext");
   assert.notEqual(a.epk, b.epk, "a fresh ephemeral key each time");
+});
+
+test("a signed block cannot be silently stripped to unsigned; openSigned enforces auth", () => {
+  const bob = generateSealKeyPair();
+  const alice = edKeyPair();
+  const signed = seal("auth me", bob.publicKey, { signer: alice });
+  // `from` is bound into the AEAD, so stripping the signature breaks decryption —
+  // a signed block cannot be downgraded to a working unsigned one.
+  const stripped = { ...signed };
+  delete stripped.sig;
+  delete stripped.from;
+  assert.throws(() => open(stripped, bob.privateKey), /./, "stripping a signed block's from breaks decryption");
+  // The only from:null case is a block sealed without a signer; openSigned refuses it.
+  const unsigned = seal("anon", bob.publicKey);
+  assert.equal(open(unsigned, bob.privateKey).from, null);
+  assert.throws(() => openSigned(unsigned, bob.privateKey), /authentication is required/);
+  assert.equal(openSigned(signed, bob.privateKey).from, alice.publicKey, "a signed block passes openSigned");
+});
+
+test("a non-contributory (low-order) ephemeral key is rejected", () => {
+  const bob = generateSealKeyPair();
+  const sealed = seal("x", bob.publicKey);
+  // The all-zero X25519 point (valid encoding, low order → all-zero shared secret).
+  const zeroSpki = Buffer.concat([Buffer.from("302a300506032b656e032100", "hex"), Buffer.alloc(32)]);
+  const zeroEpk = "-----BEGIN PUBLIC KEY-----\n" + zeroSpki.toString("base64") + "\n-----END PUBLIC KEY-----\n";
+  assert.throws(() => open({ ...sealed, epk: zeroEpk }, bob.privateKey), /non-contributory|malformed/);
+});
+
+test("malformed fields are rejected with legible errors before any crypto", () => {
+  const bob = generateSealKeyPair();
+  const sealed = seal("y", bob.publicKey);
+  assert.throws(() => open({ ...sealed, nonce: "AAAA" }, bob.privateKey), /nonce wrong length/);
+  assert.throws(() => open({ ...sealed, salt: "!!!!not base64!!!!" }, bob.privateKey), /salt is not canonical/);
+  assert.throws(() => open({ ...sealed, epk: "-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n" }, bob.privateKey), /malformed ephemeral/);
+  const ed = edKeyPair();
+  assert.throws(() => open({ ...sealed, epk: ed.publicKey }, bob.privateKey), /not an X25519 key/);
 });

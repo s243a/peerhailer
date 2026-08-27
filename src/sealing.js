@@ -54,8 +54,38 @@ export function generateSealKeyPair() {
 
 /** ECDH → HKDF → 32-byte AES key. */
 function deriveKey(/** @type {import("node:crypto").KeyObject} */ privateKey, /** @type {import("node:crypto").KeyObject} */ publicKey, /** @type {Buffer} */ salt) {
-  const shared = diffieHellman({ privateKey, publicKey });
+  let shared;
+  try {
+    shared = diffieHellman({ privateKey, publicKey });
+  } catch {
+    // Node rejects low-order points during derivation; surface it legibly.
+    throw new Error("seal: non-contributory key agreement");
+  }
+  // Belt and suspenders, and mandatory for any future static-static / mutual-auth
+  // suite: an all-zero shared secret is a key anyone can recompute.
+  if (shared.every((b) => b === 0)) throw new Error("seal: non-contributory key agreement");
   return Buffer.from(hkdfSync("sha256", shared, salt, HKDF_INFO, KEY_LEN));
+}
+
+/** Strict base64 decode: rejects non-canonical encodings (so a block has one form). */
+function decodeStrict(/** @type {string} */ value, /** @type {string} */ name, /** @type {number | null} */ len = null) {
+  if (typeof value !== "string") throw new Error(`seal: ${name} missing`);
+  const buf = Buffer.from(value, "base64");
+  if (buf.toString("base64") !== value) throw new Error(`seal: ${name} is not canonical base64`);
+  if (len !== null && buf.length !== len) throw new Error(`seal: ${name} wrong length`);
+  return buf;
+}
+
+/** Parse an X25519 public key (PEM), or throw a legible error. */
+function x25519Public(/** @type {string} */ pem, /** @type {string} */ name) {
+  let key;
+  try {
+    key = createPublicKey(pem);
+  } catch {
+    throw new Error(`seal: malformed ${name}`);
+  }
+  if (key.asymmetricKeyType !== "x25519") throw new Error(`seal: ${name} is not an X25519 key`);
+  return key;
 }
 
 /** Associated data bound into the AEAD (and covered by the signature). */
@@ -86,7 +116,7 @@ function associatedData(/** @type {string} */ epkPem, /** @type {Buffer} */ salt
  */
 export function seal(plaintext, recipientPublicKeyPem, { signer } = {}) {
   const pt = Buffer.isBuffer(plaintext) ? plaintext : Buffer.from(String(plaintext));
-  const recipient = createPublicKey(recipientPublicKeyPem);
+  const recipient = x25519Public(recipientPublicKeyPem, "recipient key");
   // Ephemeral sender key: forward secrecy on our side, and no need for the
   // recipient to be online.
   const eph = generateKeyPairSync("x25519");
@@ -128,29 +158,46 @@ export function seal(plaintext, recipientPublicKeyPem, { signer } = {}) {
  * caller must still authorise; a valid signature only proves the holder of that key
  * produced it.
  *
+ * **Contract:** the sender `from` is bound into the AEAD, so a *signed* block cannot
+ * be silently stripped to unsigned — deleting `from` breaks decryption. The only
+ * `from === null` case is a block that was sealed *without* a signer. A caller that
+ * requires authentication MUST still reject `from === null` (an unsigned block, or an
+ * attacker's own unsigned block, carries one) — or call `openSigned`, which does.
+ * Freshness/replay is the caller's job: a sealed block is a bearer artifact that opens
+ * identically forever, so the consumer puts a nonce/id/timestamp *inside the plaintext*
+ * (routing uses its envelope-id dedup).
+ *
  * @param {{ suite: string, epk: string, salt: string, nonce: string, ct: string, from?: string, sig?: string }} sealed
  * @param {string} recipientPrivateKeyPem  the recipient's X25519 private key (PEM)
  * @returns {{ plaintext: Buffer, from: string | null }}
  */
 export function open(sealed, recipientPrivateKeyPem) {
   if (!sealed || sealed.suite !== SUITE) throw new Error(`seal: unsupported suite ${sealed?.suite}`);
-  const nonce = Buffer.from(sealed.nonce, "base64");
-  const ct = Buffer.from(sealed.ct, "base64");
-  const salt = Buffer.from(sealed.salt, "base64");
+  // Cheap shape checks first, so garbage dies before key derivation (fail fast, the
+  // same principle as verify-before-decrypt one layer down).
+  const nonce = decodeStrict(sealed.nonce, "nonce", NONCE_LEN);
+  const salt = decodeStrict(sealed.salt, "salt", 16);
+  const ct = decodeStrict(sealed.ct, "ct");
+  if (ct.length < 16) throw new Error("seal: ciphertext too short");
+  const eph = x25519Public(sealed.epk, "ephemeral key");
   const ad = associatedData(sealed.epk, salt, nonce, sealed.from);
 
   // Verify the signature before decrypting — reject forged/substituted blocks
   // without spending decryption on attacker-chosen bytes.
   if (sealed.sig || sealed.from) {
     if (!sealed.sig || !sealed.from) throw new Error("seal: a signed block must carry both from and sig");
+    let fromKey;
+    try {
+      fromKey = createPublicKey(sealed.from);
+    } catch {
+      throw new Error("seal: malformed from key");
+    }
     const signed = Buffer.concat([ct, ad]);
-    const okSig = edVerify(null, signed, createPublicKey(sealed.from), Buffer.from(sealed.sig, "base64"));
+    const okSig = edVerify(null, signed, fromKey, decodeStrict(sealed.sig, "sig"));
     if (!okSig) throw new Error("seal: signature does not verify");
   }
 
-  const eph = createPublicKey(sealed.epk);
   const key = deriveKey(createPrivateKey(recipientPrivateKeyPem), eph, salt);
-  if (ct.length < 16) throw new Error("seal: ciphertext too short");
   const tag = ct.subarray(ct.length - 16);
   const body = ct.subarray(0, ct.length - 16);
   const decipher = createDecipheriv("aes-256-gcm", key, nonce);
@@ -158,4 +205,21 @@ export function open(sealed, recipientPrivateKeyPem) {
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(body), decipher.final()]); // throws on tamper
   return { plaintext, from: sealed.from ?? null };
+}
+
+/**
+ * open() for a consumer that **requires** an authenticated sender. A stripped or
+ * unsigned block (`from === null`) is rejected here rather than opening with a null
+ * sender — so a call site that needs authentication cannot forget to check. The
+ * caller still authorises *which* `from` is acceptable; this only guarantees there
+ * is one.
+ *
+ * @param {Parameters<typeof open>[0]} sealed
+ * @param {string} recipientPrivateKeyPem
+ * @returns {{ plaintext: Buffer, from: string }}
+ */
+export function openSigned(sealed, recipientPrivateKeyPem) {
+  const result = open(sealed, recipientPrivateKeyPem);
+  if (result.from == null) throw new Error("seal: block is unsigned but authentication is required");
+  return { plaintext: result.plaintext, from: result.from };
 }
