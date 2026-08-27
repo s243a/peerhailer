@@ -376,7 +376,25 @@ Stage 2 carries the local-minima caveat.
    bounded flood cost too much — pushing us to source routes handed in out-of-band?
 3. Should the first named family be `source-route` (safest) or a `*-delegate` over
    an existing mesh (least code, most proven) — i.e. is Stage 6 actually Stage 1?
+   *(Review lean: no. A `*-delegate` family delegates routing trust to an open-ish
+   external overlay, reopening the Sybil surface the F2F reframe exists to close — it
+   is a reachability escape hatch, not the floor. `source-route` first.)*
 4. Where does the sealed/onion relay (currently unbuilt) sit — a prerequisite for
    *any* multi-hop, or only for the Stage 5 anonymity knob?
+   *(Now split in the body: **confidentiality** — seal-to-`dest` — is a near-term
+   prerequisite before routing anything private, Stage 1.5, distinct from and earlier
+   than Stage 5 **anonymity** — onion, which hides *who*, not *what*. The open half is
+   the exact mechanism and whether it must gate every multi-hop of private data.)*
 5. Is a routing plugin the right unit at all, or should this be a mode of the
    existing relay path rather than a new plugin surface?
+
+## Provenance
+
+The Stage 1 implementation and this design were reviewed (round H). The review's
+substantive points are folded into the body above — the confidentiality-before-
+anonymity split, the honest "recursive DFS, not DSR, that carries the payload"
+framing, fanout as protocol (clamped on receipt) rather than policy, the per-caller
+rate limit (peerhailer has no framework limiter), the admitted-insider-vs-Sybil
+distinction, and replay/idempotency as a named gap. Two items were deferred, not
+resolved: implementing the envelope-id dedup (harmless while `deliver` is a log+ack),
+and the exact stage and mechanism for payload sealing.
