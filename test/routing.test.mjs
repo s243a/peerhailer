@@ -164,3 +164,48 @@ test("fanoutMax bounds per-node breadth in the engine, whatever policy asks", as
   assert.equal(r.delivered, false, "z is unreachable");
   assert.ok(forwards() <= 2, `the hub tried at most fanoutMax neighbours (${forwards()}), not all five`);
 });
+
+test("the destination delivers an id once, refuses a replay, and re-allows after the window", async () => {
+  let clock = 1000;
+  let delivers = 0;
+  const d = createRouter({
+    self: "d",
+    neighbors: () => [],
+    forward: async () => ({ delivered: false, spent: 0 }),
+    deliver: () => { delivers += 1; return { ok: true }; },
+    now: () => clock,
+    dedupWindowMs: 10_000,
+  });
+  const env = (id) => ({ dest: "d", ttl: 4, budget: 8, visited: ["a"], payload: "x", id, origin: "a" });
+
+  const first = await d.relay(env("m1"), "a");
+  assert.equal(first.delivered, true);
+  assert.notEqual(first.duplicate, true);
+  assert.equal(delivers, 1);
+
+  const replay = await d.relay(env("m1"), "a");
+  assert.equal(replay.delivered, true);
+  assert.equal(replay.duplicate, true, "a replayed id reports duplicate");
+  assert.equal(delivers, 1, "deliver is not re-run on a replay");
+
+  await d.relay(env("m2"), "a"); // a different id still delivers
+  assert.equal(delivers, 2);
+
+  clock += 10_001; // past the window
+  await d.relay(env("m1"), "a");
+  assert.equal(delivers, 3, "after the window the id is allowed again");
+});
+
+test("an envelope with no id is not deduped (only originated messages carry one)", async () => {
+  let delivers = 0;
+  const d = createRouter({
+    self: "d",
+    neighbors: () => [],
+    forward: async () => ({ delivered: false, spent: 0 }),
+    deliver: () => { delivers += 1; return {}; },
+  });
+  const env = { dest: "d", ttl: 4, budget: 8, visited: ["a"], payload: "x" }; // no id
+  await d.relay(env, "a");
+  await d.relay(env, "a");
+  assert.equal(delivers, 2, "without an id there is nothing to dedup");
+});
