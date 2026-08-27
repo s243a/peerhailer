@@ -192,6 +192,48 @@ not a Stage 1.5 blocker.
   avoids the decryption-DoS of sign-then-seal (which forces the recipient to decrypt
   attacker-chosen bytes before it can reject them). This is the Noise/WireGuard pattern.
 
+## The consumer contract
+
+A crypto review (round J) confirmed the suite-A primitive sound and surfaced four
+obligations that live in the *consumer*, not the primitive. A consumer that wires the
+seal into routing, chat, or a tunnel MUST honour these — they are recorded here so the
+first consumer does not rediscover them.
+
+1. **Authentication is opt-in, and `from` must be checked.** `open()` returns
+   `from: null` for a block sealed without a signer. Because `from` is bound into the
+   AEAD, a *signed* block cannot be silently stripped to unsigned — deleting `from`
+   breaks decryption — but an unsigned block (including one an attacker sealed
+   themselves) still carries `from: null`. So a consumer that requires an authenticated
+   sender MUST reject `from === null`, or call `openSigned`, which does.
+
+2. **An authenticated `from` is only worth its binding to an identity.** `from` is a
+   bare Ed25519 public key. For it to mean "this peer sent it," the consumer must map
+   `from` to a peerhailer identity — which holds only if the **sealing signer key is the
+   identity's Ed25519 key** (or the directory/hello record binds the two). Until that
+   binding exists, `from` is an unanchored self-assertion, worth no more than an
+   unsigned block. Adding the identity/directory binding is therefore a **correctness
+   prerequisite** for any authenticated consumer, not an independent feature — the
+   signer should be the identity key.
+
+3. **Freshness is the consumer's job.** A sealed block is a *bearer artifact*: captured,
+   it opens identically forever. The seal gives confidentiality, integrity, and
+   (optionally) authentication — **not** freshness. A consumer that must not act on a
+   replayed block puts a nonce / id / timestamp **inside the plaintext** (routing already
+   has its envelope-id dedup; chat and tunnels need their own).
+
+4. **Recipient binding is implicit — do not "optimise" it away.** The recipient's static
+   key is the ECDH input, so a block that opens under one recipient's key cannot open
+   under another's; recipient identity is bound *by the ciphertext*, not by an AD field.
+   This is why there is no unknown-key-share gap for suite A. **A future suite that
+   derives the key from anything other than the recipient's static key** (a pre-shared
+   key, a PAKE) **must move the recipient identity into the associated data**, or that
+   gap becomes real.
+
+**Forward-secrecy scope, stated for consumers:** sender-side only. If the *recipient's*
+static sealing key is later compromised, every past block sealed to it is decryptable
+(mitigate with recipient key rotation / one-time pre-keys). A compromised *sender*
+signing key permits forgery of that sender's blocks but does not decrypt anyone else's.
+
 ## Questions for review
 
 1. Is the directory/hello cost of carrying a second key (Option A) acceptable? *Largely
