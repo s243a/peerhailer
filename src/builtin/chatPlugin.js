@@ -63,20 +63,26 @@ export function createChatPlugin({
   // operator-triggered; the hail layer's freshness bounds the real exposure.
   /** @type {Map<string, number>} nonce -> expiry */
   const seenNonces = new Map();
-  /** @param {string} nonce a non-empty, length-bounded nonce (caller enforces) */
-  const freshNonce = (nonce) => {
+  /** Has this nonce been seen? Sweeps expired entries first. No reservation —
+   * so a message that turns out to be malformed does not burn its nonce and make
+   * a corrected retry read as a duplicate.
+   * @param {string} nonce */
+  const nonceSeen = (nonce) => {
     const t = now();
     for (const [k, exp] of seenNonces) { if (exp <= t) seenNonces.delete(k); else break; }
-    if (seenNonces.has(nonce)) return false;
-    seenNonces.set(nonce, t + messageMs);
-    // The window is bounded by count as well as time. Eviction is by insertion
-    // order, which is expiry order (every entry shares `messageMs`), so this
-    // drops the oldest — but an authenticated peer flooding >4096 distinct
-    // nonces inside the window could evict a *seen* one and replay it. Bounded,
-    // requires an admitted peer, and the replay is a duplicate line; the
-    // freshness in the sealed payload and the hail layer are the real defence.
+    return seenNonces.has(nonce);
+  };
+  /** Reserve a nonce — called only once a message has fully validated.
+   * @param {string} nonce */
+  const rememberNonce = (nonce) => {
+    seenNonces.set(nonce, now() + messageMs);
+    // Bounded by count as well as time. Eviction is by insertion order, which is
+    // expiry order (every entry shares `messageMs`), so this drops the oldest —
+    // an authenticated peer flooding >4096 distinct nonces inside the window
+    // could evict a *seen* one and replay it. Bounded, requires an admitted peer,
+    // a duplicate line; the sealed payload's freshness and the hail layer are the
+    // real defence.
     while (seenNonces.size > 4096) { const oldest = seenNonces.keys().next().value; if (oldest === undefined) break; seenNonces.delete(oldest); }
-    return true;
   };
   /**
    * Peer fingerprint -> their messages, newest last.
@@ -90,19 +96,38 @@ export function createChatPlugin({
   const threads = new Map();
 
   /**
+   * Drop a thread's expired and over-cap messages in place; returns it.
+   *
+   * @param {{from: string, text: string, at: number, mine: boolean, sealed?: boolean}[]} thread
+   */
+  const trim = (thread) => {
+    const oldest = now() - messageMs;
+    while (thread.length && (thread.length > maxPerPeer || (thread[0]?.at ?? oldest) < oldest)) thread.shift();
+    return thread;
+  };
+
+  // Prune every thread of expired messages and drop the empties. Called on reads
+  // too, so an idle conversation actually disappears once its messages age out,
+  // rather than lingering visible until its next message.
+  const sweep = () => {
+    for (const [key, thread] of threads) {
+      trim(thread);
+      if (thread.length === 0) threads.delete(key);
+    }
+  };
+
+  /**
    * @param {string} peerKey
    * @param {{from: string, text: string, at: number, mine: boolean, sealed?: boolean}} message
    */
   const append = (peerKey, message) => {
-    const thread = threads.get(peerKey) ?? [];
+    const thread = trim(threads.get(peerKey) ?? []);
     thread.push(message);
-    const oldest = now() - messageMs;
-    while (thread.length && (thread.length > maxPerPeer || (thread[0]?.at ?? oldest) < oldest)) thread.shift();
+    // Delete then re-insert so a touched conversation moves to the Map's end —
+    // `set` alone does not reorder an existing key, so eviction below is then
+    // genuinely least-recently-touched (front = coldest), as intended.
+    threads.delete(peerKey);
     threads.set(peerKey, thread);
-
-    // Evict the least-recently-touched whole conversation past the ceiling. A
-    // Map preserves insertion order and `set` above moved this key to the end,
-    // so the front is the coldest.
     while (threads.size > maxConversations) {
       const coldest = threads.keys().next().value;
       if (coldest === undefined || coldest === peerKey) break;
@@ -136,6 +161,7 @@ export function createChatPlugin({
           let text;
           let at = now();
           let sealed = false;
+          let nonce = "";
           if (body?.sealed) {
             // End-to-end sealed: only this machine can read it, and it is
             // authenticated. Consumer-contract obligations, all here: require a
@@ -163,10 +189,13 @@ export function createChatPlugin({
             }
             // The nonce is the replay guard's whole basis, so a sealed message
             // without a bounded one is refused rather than waved through — the
-            // sender is always this codebase, which always sets a UUID.
-            const nonce = String(payload?.nonce ?? "");
+            // sender is always this codebase, which always sets a UUID. It is
+            // only *checked* here; it is reserved after the message validates
+            // (below), so a malformed message does not burn its nonce and turn a
+            // corrected retry into a phantom duplicate.
+            nonce = String(payload?.nonce ?? "");
             if (!nonce || nonce.length > 128) return { [REFUSE]: true, reason: "sealed message needs a bounded nonce" };
-            if (!freshNonce(nonce)) return { received: true, duplicate: true };
+            if (nonceSeen(nonce)) return { received: true, duplicate: true };
             text = typeof payload?.text === "string" ? payload.text : "";
             // The timestamp is when WE received it. The sender's claimed `at` is
             // attacker-controlled (inside the sealed payload it signed), so it is
@@ -179,6 +208,9 @@ export function createChatPlugin({
           if (!text.trim()) return { [REFUSE]: true, reason: "an empty message is not a message" };
           if (text.length > MAX_MESSAGE) return { [REFUSE]: true, reason: "that is longer than a note" };
 
+          // Validated — now the nonce is spent. A retry of a genuinely-delivered
+          // message repeats this nonce and is correctly dropped as a duplicate.
+          if (sealed) rememberNonce(nonce);
           // `mine: false` — it came from them. Stored verbatim, and this is the
           // one place to be clear about it: the text is attacker-chosen and the
           // storage does not sanitise it. Whatever renders a thread MUST escape
@@ -197,15 +229,17 @@ export function createChatPlugin({
      *
      * @param {string} peerKey
      */
-    thread: (peerKey) => [...(threads.get(peerKey) ?? [])],
+    thread: (peerKey) => { sweep(); return [...(threads.get(peerKey) ?? [])]; },
 
     /** Every conversation, for a page that lists them. */
-    conversations: () =>
-      [...threads.entries()].map(([peerKey, messages]) => ({
+    conversations: () => {
+      sweep();
+      return [...threads.entries()].map(([peerKey, messages]) => ({
         peerKey,
         count: messages.length,
         last: messages[messages.length - 1]?.at ?? null,
-      })),
+      }));
+    },
 
     /**
      * This machine says something to a peer. Recorded on our side; delivery is

@@ -17,7 +17,14 @@
 
 /** @param {{name: string, fingerprint: string}} self */
 export function renderPage(self) {
-  return `<!doctype html>
+  // String.raw, not a cooked template: the inline browser script below is the
+  // real payload, and a cooked literal eats its backslash escapes before they
+  // reach the browser — `\/` in a regex collapses to `/` (turning `/\/+$/` into
+  // the comment `//+$/`) and a string's `\n` becomes a raw newline, both of
+  // which are syntax errors in the served <script>. String.raw passes every
+  // escape through untouched while still interpolating ${...}. (See the
+  // renderPage parse test — the served script must parse.)
+  return String.raw`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">

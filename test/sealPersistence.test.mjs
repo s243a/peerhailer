@@ -86,6 +86,16 @@ test("reconcilePersist: an empty state round-trips unchanged (no spurious admitt
   assert.deepEqual(reconcilePersist({}, {}, {}), {}, "no key is materialised for a no-op write");
 });
 
+test("setTrust changes the snapshot, so a trust change actually persists", () => {
+  const dir = createDirectory({ self: { name: "me" }, trust: { model: "direct" } });
+  const baseline = { trust: { ...dir.trust() } };
+  dir.setTrust({ model: "web-of-trust" });
+  assert.equal(dir.snapshot().trust.model, "web-of-trust", "the directory reflects the change");
+  const current = { trust: dir.snapshot().trust };
+  const written = reconcilePersist({ trust: { model: "direct" } }, baseline, current);
+  assert.equal(written.trust.model, "web-of-trust", "the change lands on disk, not diffed away");
+});
+
 test("mergeByRevision: a revision tie resolves to disk (a stale writer does not overwrite)", () => {
   const disk = { name: "bob", publicKey: bob.publicKey, note: "committed", rev: 4 };
   const snap = { name: "bob", publicKey: bob.publicKey, note: "stale", rev: 4 };
