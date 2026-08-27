@@ -75,11 +75,21 @@ A message that crosses several machines needs invariants **everyone** honours, o
 loops, amplifies, or gets stranded. So:
 
 - **The protocol is fixed, minimal, and shared.** A routing envelope carries:
-  a **destination key**, a **hard TTL** (a loop/cost ceiling nobody may raise), a
-  **visited-set or path** (so a hop is never repeated), the **sealed payload**, and
-  a **signed origin** (or onion layers — see anonymity). The rules for decrementing
-  TTL, refusing a revisit, and never relaying toward a blocked key are not
-  negotiable.
+  a **destination key**, a **hard TTL** (a depth ceiling), a **budget** (a soft
+  ceiling on total forwards) and a **fanout** (breadth per hop) — all three clamped
+  to *local* maxima **on receipt**, because they bound the cost a message imposes on
+  *other* nodes, which makes them protocol, not policy (fanout included — it is on
+  the protocol side of the line for exactly this reason) — a **visited-set** (so a
+  hop is never repeated), the **payload**, and an **origin**. The rules for clamping
+  ttl/budget/fanout, decrementing TTL, refusing a revisit, and never relaying toward
+  a blocked key are not negotiable.
+  **The payload is not confidential at Stage 1** — it is carried in the clear and
+  every relay can read it; `requiresEncryptedArrival` protects each hop's transport,
+  not the path. Sealing the payload to the destination's key (*confidentiality*) is a
+  near-term prerequisite before routing anything private, distinct from and earlier
+  than the Stage 5 *anonymity* (onion) work. `origin` is carried **unsigned** at
+  Stage 1 (advisory); it must be signed once a reply is addressed to it rather than
+  threaded back up the call chain.
 - **The policy is local and pluggable.** *Which* admitted peer to step to, how much
   to randomise, how long to wait, when to retry a more distant route, whether to
   share metadata — all local. This is your "each node chooses its own approach,"
@@ -116,15 +126,44 @@ next stage stands on.
 ### Stage 1 — deliverable multi-hop, loop-free by construction
 
 The floor: get a message across several hops without ever looping, over the trust
-graph, on a small network. **Reactive source routing**, the way MANET protocols
-**DSR/AODV** do it: flood a bounded, deduplicated *route request* to discover a path
-to the destination, then the origin **source-routes** subsequent traffic along the
-discovered path and caches it. Loop-free because the path is fixed and the
-visited-set is carried; bounded because the hard TTL and peerhailer's existing
-per-capability rate limits apply. Ships `custom` + a **`source-route`** family
-(CJDNS-flavoured in spirit). Stats are **first-party** only at this stage: your own
-observed round-trip and success per next hop. Prove it on a 3–5 node loopback graph.
-*(Covers outline items 1's delivery half, 2's bound, and 5.)*
+graph, on a small network. What ships is a **synchronous recursive relay** — a
+bounded DFS with backtracking that carries the payload and threads the destination's
+response back up the call chain (multi-hop callPeer). Loop-free because the
+visited-set is carried and TTL is a hard ceiling; bounded because TTL (depth),
+fanout (breadth) and budget (total) are clamped to local maxima on receipt, plus a
+**per-caller rate limit in the route plugin** (peerhailer has no framework limiter —
+each plugin rolls its own). Ships `custom` + a **`source-route`** family.
+
+**Two honest caveats.** (1) This is *not* DSR/AODV yet. A true reactive protocol
+floods a small *route request* to discover a path, then source-routes the data; the
+Stage 1 relay instead carries the **payload** down every exploratory branch, so one
+misrouted send can move up to `budget × payload` of exploratory traffic. Survivable
+on tens of nodes, but it makes **Stage 1.5 — discover a path once with a lightweight
+request, cache it, then source-route without re-searching — a hard prerequisite
+before routing large payloads** (or Stage 1 must cap exploratory payload size).
+(2) Backtracking can starve a shallow valid route behind a deep dead-end subtree;
+greedy ordering only mitigates it. Stats are **first-party** only. Prove it on a
+3–5 node loopback graph. *(Covers outline items 1's delivery half, 2's bound, and 5.)*
+
+### Stage 1.5 — discover-then-source-route, and seal the payload
+
+The follow-up Stage 1's honesty makes urgent — efficiency *and* confidentiality,
+before anything private or large is routed:
+
+- **Discover once, then source-route.** Replace the payload-carrying DFS with a
+  lightweight *route request* that finds a path, a cache of that path, and
+  source-routed data that never re-searches — so a send no longer carries the payload
+  down every exploratory branch. This is the DSR/AODV shape Stage 1 only approximates.
+- **Seal the payload to the destination.** Encrypt-to-`dest` so relays carry an
+  opaque blob, not readable content — the *confidentiality* the envelope already
+  names, closing the Stage 1 "every relay reads everything" gap. Distinct from Stage
+  5 onion, which hides *who*, not *what*.
+- **Sign `origin`, add an envelope id + expiry.** So a reply can be origin-addressed
+  and a replayed envelope is rejected (the dedup cache pairs with the plugin's rate
+  limit).
+- **Asynchronous reply routing.** Stage 1 threads replies synchronously up the call
+  chain, which caps chain length at `ttl × per-hop timeout` and holds a call open per
+  hop; once a source route exists, a reply can travel its own path.
 
 ### Stage 2 — adaptive next-hop (greedy, with the honest caveat)
 
@@ -213,17 +252,34 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
 
 - **Sybil / eclipse:** defended *structurally* by the F2F reframe — you route only
   through admitted peers, so surrounding a target costs social compromise, not keys.
-  Do not reopen this hole with open-overlay discovery.
+  Do not reopen this hole with open-overlay discovery. But F2F stops **Sybil**, not
+  the **admitted insider**: at Stage 1 a relay reads every payload it carries (see
+  Confidentiality) and can silently grayhole until Stage 2's statistics exist.
+  Stage 1's protection against a malicious admitted peer is approximately *admission
+  itself* — which is exactly why payload sealing is a near-term prerequisite, not
+  Stage 5 polish.
+- **Confidentiality:** Stage 1 payloads are **cleartext to every relay**. Sealing to
+  the destination's key is the fix and a near-term prerequisite for private payloads
+  — and it is distinct from anonymity: confidentiality hides *what* is carried,
+  anonymity hides *who* is talking.
 - **Routing attacks** (blackhole, grayhole, misdirection): mitigated by first-party
   success/RTT measurement feeding the next-hop weights (a peer that silently drops
   loses weight fast), by trust-weighting, and by keeping the "never relay toward a
-  blocked key" invariant.
-- **Loops and amplification:** the hard TTL, the carried visited-set, and reuse of
-  peerhailer's existing per-capability rate limits. Probabilistic multi-path must be
-  bounded so retries cannot fan out into a flood.
+  blocked key" invariant. Note these mitigations arrive with Stage 2's statistics —
+  a Stage 1 relay can grayhole undetected.
+- **Loops and amplification:** the hard TTL and carried visited-set (loops), the
+  receipt-clamped ttl/budget/fanout (breadth and total), and a **per-caller rate
+  limit implemented in the route plugin** — peerhailer has no framework rate limiter,
+  so each plugin (command, shell, route) rolls its own. Probabilistic multi-path must
+  stay bounded so retries cannot fan out into a flood.
+- **Replay / idempotency:** an envelope can be re-injected by any relay; harmless
+  while `deliver` is a log+ack, but an envelope id + expiry and a dedup cache must
+  close it before delivery does anything consequential.
 - **Traffic analysis:** out of scope for a strong (global-observer) threat model;
   Stage 5's position-blurring and onion layers raise the bar cheaply, and the doc is
-  honest that that is *all* they do.
+  honest that that is *all* they do — and on a tens-of-nodes friend graph,
+  intersection/timing attacks are trivial *regardless* of layering, so small-graph
+  anonymity is structurally weak.
 
 ## Statistics
 
@@ -291,7 +347,9 @@ choices **mix in a single network**. A `performance-first` node and an
 `anonymity-first` node are not two networks; they are two policies over one protocol
 (the fixed envelope), which is exactly why the protocol/policy split and the config
 families are the load-bearing decisions. Anonymity becomes a cost the nodes that want
-it pay, not a tax on everyone.
+it pay, not a tax on everyone. One caution: in a mixed network **composite anonymity
+is min, not average** — traffic that crosses from an anonymity-first cluster into a
+performance-first one takes on the weaker cluster's properties.
 
 Two named references for the mechanics: **Q-routing / AntNet** for the adaptive,
 feedback-weighted next-hop of Stage 2, and **Kleinberg's small-world result** for
