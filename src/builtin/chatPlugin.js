@@ -17,6 +17,7 @@
  */
 import { sameKey } from "../identity.js";
 import { REFUSE } from "../plugins.js";
+import { openSigned } from "../sealing.js";
 
 /** A message longer than this is a payload, not a note. */
 export const MAX_MESSAGE = 4 * 1024;
@@ -44,6 +45,7 @@ export const MAX_CONVERSATIONS = 500;
  *   maxPerPeer?: number,
  *   messageMs?: number,
  *   maxConversations?: number,
+ *   identity?: { publicKey: string, privateKey: string, sealPublicKey?: string, sealPrivateKey?: string },
  * }} [options]
  */
 export function createChatPlugin({
@@ -51,7 +53,31 @@ export function createChatPlugin({
   maxPerPeer = MAX_PER_PEER,
   messageMs = MESSAGE_MS,
   maxConversations = MAX_CONVERSATIONS,
+  identity,
 } = {}) {
+  // Replay guard for sealed messages: a sealed block is a bearer artifact, so a
+  // relay could re-deliver it. Each sealed message carries a nonce; a repeat is
+  // ignored. Bounded, time-windowed. (docs/sealing.md, consumer contract.)
+  // NOTE: this lives in the plugin instance, so an operator `/api/reload`
+  // rebuilds it empty and reopens the window for up to `messageMs`. Bounded and
+  // operator-triggered; the hail layer's freshness bounds the real exposure.
+  /** @type {Map<string, number>} nonce -> expiry */
+  const seenNonces = new Map();
+  /** @param {string} nonce a non-empty, length-bounded nonce (caller enforces) */
+  const freshNonce = (nonce) => {
+    const t = now();
+    for (const [k, exp] of seenNonces) { if (exp <= t) seenNonces.delete(k); else break; }
+    if (seenNonces.has(nonce)) return false;
+    seenNonces.set(nonce, t + messageMs);
+    // The window is bounded by count as well as time. Eviction is by insertion
+    // order, which is expiry order (every entry shares `messageMs`), so this
+    // drops the oldest — but an authenticated peer flooding >4096 distinct
+    // nonces inside the window could evict a *seen* one and replay it. Bounded,
+    // requires an admitted peer, and the replay is a duplicate line; the
+    // freshness in the sealed payload and the hail layer are the real defence.
+    while (seenNonces.size > 4096) { const oldest = seenNonces.keys().next().value; if (oldest === undefined) break; seenNonces.delete(oldest); }
+    return true;
+  };
   /**
    * Peer fingerprint -> their messages, newest last.
    *
@@ -59,13 +85,13 @@ export function createChatPlugin({
    * conversation should follow the machine, not the label. Bounded on write in
    * both directions, because this is memory that a peer can add to.
    *
-   * @type {Map<string, {from: string, text: string, at: number, mine: boolean}[]>}
+   * @type {Map<string, {from: string, text: string, at: number, mine: boolean, sealed?: boolean}[]>}
    */
   const threads = new Map();
 
   /**
    * @param {string} peerKey
-   * @param {{from: string, text: string, at: number, mine: boolean}} message
+   * @param {{from: string, text: string, at: number, mine: boolean, sealed?: boolean}} message
    */
   const append = (peerKey, message) => {
     const thread = threads.get(peerKey) ?? [];
@@ -107,7 +133,49 @@ export function createChatPlugin({
          */
         handler: ({ body, caller }) => {
           if (!caller?.publicKey) return { [REFUSE]: true, reason: "no key to attribute a message to" };
-          const text = typeof body?.text === "string" ? body.text : "";
+          let text;
+          let at = now();
+          let sealed = false;
+          if (body?.sealed) {
+            // End-to-end sealed: only this machine can read it, and it is
+            // authenticated. Consumer-contract obligations, all here: require a
+            // signature (openSigned), bind the sealed sender to the transport-
+            // authenticated caller, and dedup the nonce against replay.
+            if (!identity?.sealPrivateKey) return { [REFUSE]: true, reason: "this machine cannot open sealed messages" };
+            let opened;
+            try {
+              opened = openSigned(body.sealed, identity.sealPrivateKey);
+            } catch {
+              return { [REFUSE]: true, reason: "sealed message did not open or verify" };
+            }
+            // Bind the sealed sender to the transport-authenticated caller. NOTE
+            // for future consumers: this couples the seal's signer to the DIRECT
+            // caller, which is right for direct chat but wrong for a relayed
+            // consumer (e.g. routing) — there the caller is the last hop, not the
+            // origin, so authenticate the origin from INSIDE the sealed payload,
+            // not from `caller`. Do not copy this check into a relayed path.
+            if (!sameKey(opened.from, caller.publicKey)) return { [REFUSE]: true, reason: "sealed sender is not the caller" };
+            let payload;
+            try {
+              payload = JSON.parse(opened.plaintext.toString("utf8"));
+            } catch {
+              return { [REFUSE]: true, reason: "sealed payload is malformed" };
+            }
+            // The nonce is the replay guard's whole basis, so a sealed message
+            // without a bounded one is refused rather than waved through — the
+            // sender is always this codebase, which always sets a UUID.
+            const nonce = String(payload?.nonce ?? "");
+            if (!nonce || nonce.length > 128) return { [REFUSE]: true, reason: "sealed message needs a bounded nonce" };
+            if (!freshNonce(nonce)) return { received: true, duplicate: true };
+            text = typeof payload?.text === "string" ? payload.text : "";
+            // The timestamp is when WE received it. The sender's claimed `at` is
+            // attacker-controlled (inside the sealed payload it signed), so it is
+            // not trusted to order or date a message in our thread.
+            at = now();
+            sealed = true;
+          } else {
+            text = typeof body?.text === "string" ? body.text : "";
+          }
           if (!text.trim()) return { [REFUSE]: true, reason: "an empty message is not a message" };
           if (text.length > MAX_MESSAGE) return { [REFUSE]: true, reason: "that is longer than a note" };
 
@@ -117,8 +185,8 @@ export function createChatPlugin({
           // it and MUST NOT make it actionable — a link, a command — or this is
           // the stored-XSS plugin. The claim lives here as a requirement because
           // the renderer that has to honour it does not exist yet.
-          append(caller.publicKey, { from: caller.name, text, at: now(), mine: false });
-          return { received: true };
+          append(caller.publicKey, { from: caller.name, text, at, mine: false, sealed });
+          return { received: true, sealed };
         },
       },
     ],
@@ -145,11 +213,13 @@ export function createChatPlugin({
      *
      * @param {string} peerKey
      * @param {string} text
+     * @param {{sealed?: boolean}} [opts] whether the delivery went sealed, so
+     *   our own copy carries the 🔒 (and its absence flags a cleartext send).
      */
-    say: (peerKey, text) => {
+    say: (peerKey, text, { sealed = false } = {}) => {
       const trimmed = String(text ?? "").slice(0, MAX_MESSAGE);
       if (!trimmed.trim()) return null;
-      const message = { from: "me", text: trimmed, at: now(), mine: true };
+      const message = { from: "me", text: trimmed, at: now(), mine: true, sealed };
       append(peerKey, message);
       return message;
     },

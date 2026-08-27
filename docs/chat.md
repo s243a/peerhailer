@@ -168,3 +168,10 @@ the fabric; names resolve through the directory.
 and stored verbatim, so the page escapes every message (`esc`) and never makes it
 actionable — no link, no markup, no command. That requirement, stated in
 `chatPlugin.js` where the store lives, is now met by the code that renders it.
+
+## Sealing
+
+When the peer advertises an X25519 sealing key (`docs/sealing.md`), a chat message is
+sealed end to end — encrypted to the recipient and signed by the sender's identity, so
+a relay carries an opaque block, the recipient authenticates the sender, and a replayed
+or mismatched block is refused. Peers without a sealing key fall back to cleartext.

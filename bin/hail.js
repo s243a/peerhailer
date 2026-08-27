@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory } from "../src/directory.js";
+import { createDirectory, reconcilePersist } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -123,40 +123,39 @@ const directory = createDirectory({
     // The key is this machine's identity, so the record always carries it —
     // a peer cannot check a claim it was never given a key for.
     publicKey: identity.publicKey,
+    // The sealing key travels in the same signed record, so peers learn where to
+    // seal content for this machine, bound to its identity.
+    sealPublicKey: identity.sealPublicKey,
   },
 });
 // Profiles ride alongside the directory: they are configuration about peers,
 // and splitting them into another file would mean two things to keep in step.
+
+// The state as this process first read it. `persist()` writes back only what
+// this command actually changed *against this baseline*, taking everything else
+// from current disk — so a slow writer (a walk mid-flight) cannot revert a
+// concurrent `block`, `trust`, `name`, or `gate` change it never saw. Without
+// it, spreading a startup snapshot over disk silently rolled those back.
+const baseline = JSON.parse(JSON.stringify(stored));
+
 /**
  * Write the directory back, keeping everything else in the file.
  *
- * Two things are being protected here. Configuration this command knows nothing
- * about survives, because the file read inside the lock is spread first —
- * rebuilding from the directory alone once erased the plugin list. And the read
- * happens *inside* the lock, so a change lands on top of whatever a daemon or
- * another terminal wrote a moment ago rather than replacing it.
- *
- * The peers this process knows still win for peer data: they are what the
- * command was about. Anything else on disk is left alone.
+ * Applies this command's delta to *current* disk state (read inside the lock):
+ * each top-level key is written only if this command changed it from the
+ * startup `baseline`, and admitted peers are reconciled by per-record revision
+ * with deletions carried as tombstones. So a change lands on top of whatever a
+ * daemon or another terminal wrote a moment ago, and a stale writer neither
+ * rolls back a committed change nor resurrects a revoked peer.
  */
 const persist = () =>
   updateState(
     statePath,
-    (onDisk) => {
-      const snap = directory.snapshot();
-      // Carry the monotone target-binding signal forward across writers. This
-      // process's directory may have loaded before a running daemon learned a
-      // peer binds (passively, from a hail), and `snapshot()` wholesale-replaces
-      // `admitted`, which would drop it — making a field the whole design treats
-      // as never-lowered lowerable by an unrelated CLI command. Only this one
-      // field is merged by `max`; the rest stays "this command's peers win".
-      const priorBinding = new Map((onDisk.admitted ?? []).map((p) => [p.name, p.bindingSeen]));
-      const admitted = (snap.admitted ?? []).map((p) => {
-        const seen = Math.max(Number(p.bindingSeen) || 0, Number(priorBinding.get(p.name)) || 0);
-        return seen > 0 ? { ...p, bindingSeen: seen } : p;
-      });
-      return { ...onDisk, ...stored, ...snap, admitted };
-    },
+    // Directory-managed keys (self, blocklist, trust, admitted, candidates) come
+    // from the snapshot; everything else (gate, tunnels, plugins…) from `stored`,
+    // which the command may have mutated in place. `reconcilePersist` writes back
+    // only what changed against the startup baseline, per-record-merging peers.
+    (onDisk) => reconcilePersist(onDisk, baseline, { ...stored, ...directory.snapshot() }),
     { log: (m) => process.stderr.write(`${m}\n`) },
   );
 
@@ -439,6 +438,60 @@ switch (command) {
     break;
   }
 
+  case "seal": {
+    // The operator side of the sealing trust model. A sealing conflict (two
+    // verified keys disagree) and a `reverify` state (rotated, or rolled back)
+    // both fail sends closed rather than downgrading to cleartext; this is where
+    // a person resolves one, since a replayable re-walk deliberately cannot.
+    const [action, name] = rest;
+    if (!action || action === "status") {
+      let any = false;
+      for (const peer of directory.listAdmitted()) {
+        const state = directory.sealState(peer.name);
+        if (state === "unverified") continue;
+        any = true;
+        // Both fingerprints, so a conflict can actually be judged: a signed
+        // record is replayable, so accepting the presented key is a decision.
+        const held = peer.sealPublicKey ? ` held ${fingerprint(peer.sealPublicKey).slice(0, 14)}` : "";
+        const pending = peer.sealConflict ? ` presented ${fingerprint(peer.sealConflict).slice(0, 14)}` : "";
+        log(`${peer.name}: ${state}${held}${pending}`);
+      }
+      if (!any) log("no peer has a sealing key yet");
+      break;
+    }
+    if (action === "accept") {
+      if (!name) fail("usage: hail seal accept <name> [--seal-key-file <f>]");
+      const rec = directory.get(name);
+      if (!rec) fail(`no peer called ${name}`);
+      const state = directory.sealState(name);
+      // A named key is read from --seal-key-file / --seal-key; without one, the
+      // conflicting key the last walk presented is accepted. A `reverify` peer
+      // has no pending key, so it *requires* an explicit one — that turns the
+      // wedge into the same deliberate act as `rotate`, not a forget-and-readd
+      // (which would drop the seal-required floor and reopen cleartext).
+      let sealKey;
+      const src = typeof flags["seal-key-file"] === "string" ? "seal-key-file" : typeof flags["seal-key"] === "string" ? "seal-key" : null;
+      if (src) {
+        const raw = src === "seal-key-file" ? (() => { try { return readFileSync(String(flags[src]), "utf8"); } catch { return fail(`--${src} could not be read: ${flags[src]}`); } })() : String(flags[src]);
+        sealKey = normalizeKey(raw);
+        if (!sealKey) fail(`--${src} did not contain a usable sealing key`);
+      }
+      if (state === "verified") fail(`${name} is already sealed (state: verified); nothing to accept`);
+      if (state === "unverified") fail(`${name} has no sealing key — walk it to verify one`);
+      if (state === "reverify" && !sealKey) fail(`${name} needs re-verifying: walk it, or accept an explicit key with --seal-key-file <f>`);
+      const held = rec.sealPublicKey ? fingerprint(rec.sealPublicKey).slice(0, 14) : "(none)";
+      const presented = fingerprint(sealKey ?? rec.sealConflict).slice(0, 14);
+      log(`accepting for ${name}: held ${held} → ${presented}`);
+      const accepted = directory.acceptSealKey(name, sealKey);
+      if (!accepted?.sealPublicKey) fail(`could not accept a sealing key for ${name}`);
+      persist();
+      log(`accepted sealing key ${fingerprint(accepted.sealPublicKey).slice(0, 14)} for ${name}`);
+      break;
+    }
+    fail("usage: hail seal status | hail seal accept <name> [--seal-key-file <f>]");
+    break;
+  }
+
   case "walk": {
     const result = await walk(directory, {
       as: { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey },
@@ -509,7 +562,7 @@ switch (command) {
       ...(Object.keys(tunnels).length
         ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
         : []),
-      ...(wantsChat ? [createChatPlugin()] : []),
+      ...(wantsChat ? [createChatPlugin({ identity })] : []),
       ...(Object.keys(declaredShares).length ? [createFilesPlugin({ shares: declaredShares })] : []),
       ...(wantsRoute ? [createRoutePlugin(routeDeps())] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
@@ -598,7 +651,7 @@ switch (command) {
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
-        ...(nextChat ? [createChatPlugin()] : []),
+        ...(nextChat ? [createChatPlugin({ identity })] : []),
         ...(Object.keys(nextShares).length ? [createFilesPlugin({ shares: nextShares })] : []),
         ...(nextRoute ? [createRoutePlugin(routeDeps())] : []),
         ...(Object.keys(nextTunnels).length

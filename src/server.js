@@ -45,6 +45,7 @@ import { createComposer } from "./composer.js";
 import { callPeer } from "./hail.js";
 import { forwardTunnel } from "./tunnelClient.js";
 import { mountShare } from "./filesMount.js";
+import { seal } from "./sealing.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -810,18 +811,34 @@ export function createDaemon({
         )
       );
       const chatNames = () => new Map((directory.listAdmitted?.() ?? []).map((peer) => [peer.publicKey, peer.name]));
+      // The sealing trust for a peer, with fingerprints of the held and pending
+      // keys — so a person resolving a conflict compares two keys, not a bare
+      // button. `null` name (an unresolved conversation) is unverified.
+      const sealInfo = (/** @type {string | null | undefined} */ name) => {
+        if (!name) return { seal: "unverified" };
+        const rec = directory.get?.(name);
+        return {
+          seal: directory.sealState?.(name) ?? "unverified",
+          ...(rec?.sealPublicKey ? { sealFp: fingerprint(rec.sealPublicKey) } : {}),
+          ...(rec?.sealConflict ? { sealPendingFp: fingerprint(rec.sealConflict) } : {}),
+        };
+      };
       if (scope === "control" && url.pathname === "/api/chat/state" && request.method === "GET") {
         if (!chat) return send(response, 200, { enabled: false, self: directory.self?.name ?? null, conversations: [], peers: [] });
         const names = chatNames();
-        const conversations = chat.conversations().map((/** @type {any} */ c) => ({
-          key: c.peerKey,
-          name: names.get(c.peerKey) ?? null,
-          fp: fingerprint(c.peerKey),
-          count: c.count,
-          last: c.last,
-        }));
+        const conversations = chat.conversations().map((/** @type {any} */ c) => {
+          const peerName = names.get(c.peerKey);
+          return {
+            key: c.peerKey,
+            name: peerName ?? null,
+            fp: fingerprint(c.peerKey),
+            count: c.count,
+            last: c.last,
+            ...sealInfo(peerName),
+          };
+        });
         // Admitted peers you could start a chat with, even before any message.
-        const peers = (directory.listAdmitted?.() ?? []).map((peer) => peer.name);
+        const peers = (directory.listAdmitted?.() ?? []).map((peer) => ({ name: peer.name, ...sealInfo(peer.name) }));
         return send(response, 200, { enabled: true, self: directory.self?.name ?? null, conversations, peers });
       }
       if (scope === "control" && url.pathname === "/api/chat/thread" && request.method === "GET") {
@@ -837,10 +854,47 @@ export function createDaemon({
         const text = typeof body?.text === "string" ? body.text : "";
         if (!record) return send(response, 404, { error: "unknown peer" });
         if (!text.trim()) return send(response, 400, { error: "an empty message is not a message" });
-        const result = await callNode(record.name, "/chat/send", { text });
+        // Seal end to end when we hold a *verified* sealing key for the peer:
+        // encrypt to it, signed with our identity so the peer authenticates us.
+        // `sealKeyFor` returns a key only once a walk bound it from the peer's
+        // signed record — a key that merely rode in on gossip is not trusted, so
+        // it cannot silently redirect our ciphertext to an introducer's key.
+        // Falls back to cleartext only for a peer we have never verified a
+        // sealing key for (an older build); once verified, `sealSeen` is sticky
+        // and the send stays sealed, so there is no silent downgrade after that.
+        // Fail closed rather than ever downgrading a peer we know can seal. Two
+        // states forbid a send: `conflict` (two verified keys disagree — a
+        // rotation or an attack) and `reverify` (the peer has been sealed to
+        // before but the key is currently absent — a rotation, or a stale writer
+        // rolled it back). Only a peer we have *never* sealed to falls back to
+        // cleartext. A person resolves a conflict with `hail seal accept`.
+        const trust = directory.sealState?.(record.name) ?? "unverified";
+        if (trust === "conflict" || trust === "reverify") {
+          return send(response, 409, {
+            error: trust === "conflict"
+              ? "this peer's sealing key is in conflict — resolve it with `hail seal accept` before sending"
+              : "this peer's sealing key needs re-verifying (walk it) before sending — not downgrading to cleartext",
+            sealState: trust,
+          });
+        }
+        const sealKey = directory.sealKeyFor?.(record.name) ?? null;
+        let payload;
+        let sealed = false;
+        if (sealKey) {
+          const signer = { publicKey: identity.publicKey, privateKey: identity.privateKey };
+          const inner = JSON.stringify({ text, at: Date.now(), nonce: randomUUID() });
+          payload = { sealed: seal(inner, sealKey, { signer }) };
+          sealed = true;
+        } else {
+          payload = { text };
+        }
+        const result = await callNode(record.name, "/chat/send", payload);
         if (!result?.ok) return send(response, 502, { error: result?.error ?? "the peer did not accept the message" });
-        const message = chat.say(record.publicKey, text);
-        return send(response, 200, { ok: true, message });
+        // Record on our own copy whether it went sealed, so the sender's UI can
+        // show the 🔒 — and, by its absence, a cleartext send to a peer with no
+        // verified sealing key.
+        const message = chat.say(record.publicKey, text, { sealed });
+        return send(response, 200, { ok: true, message, sealed });
       }
       if (scope === "control" && url.pathname === "/api/chat/clear" && request.method === "POST") {
         if (!chat) return send(response, 200, { cleared: false });
@@ -967,6 +1021,24 @@ export function createDaemon({
         const name = url.searchParams.get("name");
         const forgotten = name ? change((peers) => peers.forget(name)) : false;
         return send(response, 200, { forgotten });
+      }
+
+      // Resolve a sealing conflict deliberately — the operator act a replayable
+      // re-walk is not allowed to perform. Routed through `change`, so it applies
+      // to current disk state and cannot be rolled back by a stale writer.
+      if (scope === "control" && url.pathname === "/api/seal/accept" && request.method === "POST") {
+        const body = JSON.parse((await readBody(request)) || "{}");
+        const name = typeof body?.peer === "string" ? body.peer : "";
+        const sealKey = typeof body?.sealKey === "string" && body.sealKey.trim() ? body.sealKey : undefined;
+        if (!name || !directory.get?.(name)) return send(response, 404, { error: "unknown peer" });
+        const state = directory.sealState?.(name);
+        // Accept the presented key for a conflict, or an explicit key to lift a
+        // reverify wedge. Never for a verified/unverified peer.
+        if (state !== "conflict" && !(state === "reverify" && sealKey)) {
+          return send(response, 409, { error: "nothing to accept — resolve a conflict, or pass a key for a reverify", sealState: state });
+        }
+        const accepted = change((peers) => peers.acceptSealKey(name, sealKey));
+        return send(response, 200, { accepted: Boolean(accepted?.sealPublicKey), sealState: directory.sealState?.(name) });
       }
 
       // The session composer: one-click launch of a local T3 instance whose model
