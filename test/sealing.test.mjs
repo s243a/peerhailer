@@ -61,6 +61,9 @@ test("tampering any bound field (suite, epk, nonce) is caught", () => {
   const n = Buffer.from(sealed.nonce, "base64");
   n[0] ^= 0x01;
   assert.throws(() => open({ ...sealed, nonce: n.toString("base64") }, bob.privateKey), /./, "a changed nonce fails");
+  const salt = Buffer.from(sealed.salt, "base64");
+  salt[0] ^= 0x01;
+  assert.throws(() => open({ ...sealed, salt: salt.toString("base64") }, bob.privateKey), /./, "a changed salt fails");
 });
 
 test("a signed block verifies BEFORE it decrypts — a bad signature is rejected", () => {

@@ -59,11 +59,13 @@ function deriveKey(/** @type {import("node:crypto").KeyObject} */ privateKey, /*
 }
 
 /** Associated data bound into the AEAD (and covered by the signature). */
-function associatedData(/** @type {string} */ epkPem, /** @type {Buffer} */ nonce, /** @type {string | undefined} */ from) {
+function associatedData(/** @type {string} */ epkPem, /** @type {Buffer} */ salt, /** @type {Buffer} */ nonce, /** @type {string | undefined} */ from) {
   return Buffer.concat([
     Buffer.from(SUITE),
     Buffer.from("\0"),
     Buffer.from(epkPem),
+    Buffer.from("\0"),
+    salt,
     Buffer.from("\0"),
     nonce,
     Buffer.from("\0"),
@@ -94,7 +96,7 @@ export function seal(plaintext, recipientPublicKeyPem, { signer } = {}) {
   const key = deriveKey(eph.privateKey, recipient, salt);
 
   const from = signer?.publicKey;
-  const ad = associatedData(epkPem, nonce, from);
+  const ad = associatedData(epkPem, salt, nonce, from);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
   cipher.setAAD(ad);
   const body = Buffer.concat([cipher.update(pt), cipher.final()]);
@@ -135,7 +137,7 @@ export function open(sealed, recipientPrivateKeyPem) {
   const nonce = Buffer.from(sealed.nonce, "base64");
   const ct = Buffer.from(sealed.ct, "base64");
   const salt = Buffer.from(sealed.salt, "base64");
-  const ad = associatedData(sealed.epk, nonce, sealed.from);
+  const ad = associatedData(sealed.epk, salt, nonce, sealed.from);
 
   // Verify the signature before decrypting — reject forged/substituted blocks
   // without spending decryption on attacker-chosen bytes.
