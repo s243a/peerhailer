@@ -811,6 +811,18 @@ export function createDaemon({
         )
       );
       const chatNames = () => new Map((directory.listAdmitted?.() ?? []).map((peer) => [peer.publicKey, peer.name]));
+      // The sealing trust for a peer, with fingerprints of the held and pending
+      // keys — so a person resolving a conflict compares two keys, not a bare
+      // button. `null` name (an unresolved conversation) is unverified.
+      const sealInfo = (/** @type {string | null | undefined} */ name) => {
+        if (!name) return { seal: "unverified" };
+        const rec = directory.get?.(name);
+        return {
+          seal: directory.sealState?.(name) ?? "unverified",
+          ...(rec?.sealPublicKey ? { sealFp: fingerprint(rec.sealPublicKey) } : {}),
+          ...(rec?.sealConflict ? { sealPendingFp: fingerprint(rec.sealConflict) } : {}),
+        };
+      };
       if (scope === "control" && url.pathname === "/api/chat/state" && request.method === "GET") {
         if (!chat) return send(response, 200, { enabled: false, self: directory.self?.name ?? null, conversations: [], peers: [] });
         const names = chatNames();
@@ -822,12 +834,11 @@ export function createDaemon({
             fp: fingerprint(c.peerKey),
             count: c.count,
             last: c.last,
-            // So the UI can show a 🔒/conflict badge and offer to resolve one.
-            seal: peerName ? (directory.sealState?.(peerName) ?? "unverified") : "unverified",
+            ...sealInfo(peerName),
           };
         });
         // Admitted peers you could start a chat with, even before any message.
-        const peers = (directory.listAdmitted?.() ?? []).map((peer) => ({ name: peer.name, seal: directory.sealState?.(peer.name) ?? "unverified" }));
+        const peers = (directory.listAdmitted?.() ?? []).map((peer) => ({ name: peer.name, ...sealInfo(peer.name) }));
         return send(response, 200, { enabled: true, self: directory.self?.name ?? null, conversations, peers });
       }
       if (scope === "control" && url.pathname === "/api/chat/thread" && request.method === "GET") {
@@ -1018,9 +1029,15 @@ export function createDaemon({
       if (scope === "control" && url.pathname === "/api/seal/accept" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         const name = typeof body?.peer === "string" ? body.peer : "";
+        const sealKey = typeof body?.sealKey === "string" && body.sealKey.trim() ? body.sealKey : undefined;
         if (!name || !directory.get?.(name)) return send(response, 404, { error: "unknown peer" });
-        if (directory.sealState?.(name) !== "conflict") return send(response, 409, { error: "no sealing conflict to accept", sealState: directory.sealState?.(name) });
-        const accepted = change((peers) => peers.acceptSealKey(name));
+        const state = directory.sealState?.(name);
+        // Accept the presented key for a conflict, or an explicit key to lift a
+        // reverify wedge. Never for a verified/unverified peer.
+        if (state !== "conflict" && !(state === "reverify" && sealKey)) {
+          return send(response, 409, { error: "nothing to accept — resolve a conflict, or pass a key for a reverify", sealState: state });
+        }
+        const accepted = change((peers) => peers.acceptSealKey(name, sealKey));
         return send(response, 200, { accepted: Boolean(accepted?.sealPublicKey), sealState: directory.sealState?.(name) });
       }
 

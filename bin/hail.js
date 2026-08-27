@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory, mergeByRevision } from "../src/directory.js";
+import { createDirectory, reconcilePersist } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -130,33 +130,32 @@ const directory = createDirectory({
 });
 // Profiles ride alongside the directory: they are configuration about peers,
 // and splitting them into another file would mean two things to keep in step.
+
+// The state as this process first read it. `persist()` writes back only what
+// this command actually changed *against this baseline*, taking everything else
+// from current disk — so a slow writer (a walk mid-flight) cannot revert a
+// concurrent `block`, `trust`, `name`, or `gate` change it never saw. Without
+// it, spreading a startup snapshot over disk silently rolled those back.
+const baseline = JSON.parse(JSON.stringify(stored));
+
 /**
  * Write the directory back, keeping everything else in the file.
  *
- * Two things are being protected here. Configuration this command knows nothing
- * about survives, because the file read inside the lock is spread first —
- * rebuilding from the directory alone once erased the plugin list. And the read
- * happens *inside* the lock, so a change lands on top of whatever a daemon or
- * another terminal wrote a moment ago rather than replacing it.
- *
- * The peers this process knows still win for peer data: they are what the
- * command was about. Anything else on disk is left alone.
+ * Applies this command's delta to *current* disk state (read inside the lock):
+ * each top-level key is written only if this command changed it from the
+ * startup `baseline`, and admitted peers are reconciled by per-record revision
+ * with deletions carried as tombstones. So a change lands on top of whatever a
+ * daemon or another terminal wrote a moment ago, and a stale writer neither
+ * rolls back a committed change nor resurrects a revoked peer.
  */
 const persist = () =>
   updateState(
     statePath,
-    (onDisk) => {
-      const snap = directory.snapshot();
-      // Merge this process's snapshot against current disk by per-record
-      // revision, so a writer that loaded stale state — a slow walk, an unrelated
-      // CLI command — cannot roll a peer back over a rotation or a fresh sealing
-      // bind another writer already committed. Monotone floors (target-binding
-      // support, seal-required) never regress in the merge. Replaces the old
-      // per-field reconcile, which could not tell a stale snapshot from a
-      // deliberate change and so rolled newer trust back (see the sealing review).
-      const admitted = mergeByRevision(onDisk.admitted ?? [], snap.admitted ?? []);
-      return { ...onDisk, ...stored, ...snap, admitted };
-    },
+    // Directory-managed keys (self, blocklist, trust, admitted, candidates) come
+    // from the snapshot; everything else (gate, tunnels, plugins…) from `stored`,
+    // which the command may have mutated in place. `reconcilePersist` writes back
+    // only what changed against the startup baseline, per-record-merging peers.
+    (onDisk) => reconcilePersist(onDisk, baseline, { ...stored, ...directory.snapshot() }),
     { log: (m) => process.stderr.write(`${m}\n`) },
   );
 
@@ -451,23 +450,45 @@ switch (command) {
         const state = directory.sealState(peer.name);
         if (state === "unverified") continue;
         any = true;
-        const pending = peer.sealConflict ? ` (pending ${fingerprint(peer.sealConflict).slice(0, 14)})` : "";
-        log(`${peer.name}: ${state}${pending}`);
+        // Both fingerprints, so a conflict can actually be judged: a signed
+        // record is replayable, so accepting the presented key is a decision.
+        const held = peer.sealPublicKey ? ` held ${fingerprint(peer.sealPublicKey).slice(0, 14)}` : "";
+        const pending = peer.sealConflict ? ` presented ${fingerprint(peer.sealConflict).slice(0, 14)}` : "";
+        log(`${peer.name}: ${state}${held}${pending}`);
       }
       if (!any) log("no peer has a sealing key yet");
       break;
     }
     if (action === "accept") {
-      if (!name) fail("usage: hail seal accept <name>   (accepts the key the last walk presented)");
-      if (!directory.get(name)) fail(`no peer called ${name}`);
-      if (directory.sealState(name) !== "conflict") fail(`${name} has no sealing conflict to accept (state: ${directory.sealState(name)})`);
-      const accepted = directory.acceptSealKey(name);
+      if (!name) fail("usage: hail seal accept <name> [--seal-key-file <f>]");
+      const rec = directory.get(name);
+      if (!rec) fail(`no peer called ${name}`);
+      const state = directory.sealState(name);
+      // A named key is read from --seal-key-file / --seal-key; without one, the
+      // conflicting key the last walk presented is accepted. A `reverify` peer
+      // has no pending key, so it *requires* an explicit one — that turns the
+      // wedge into the same deliberate act as `rotate`, not a forget-and-readd
+      // (which would drop the seal-required floor and reopen cleartext).
+      let sealKey;
+      const src = typeof flags["seal-key-file"] === "string" ? "seal-key-file" : typeof flags["seal-key"] === "string" ? "seal-key" : null;
+      if (src) {
+        const raw = src === "seal-key-file" ? (() => { try { return readFileSync(String(flags[src]), "utf8"); } catch { return fail(`--${src} could not be read: ${flags[src]}`); } })() : String(flags[src]);
+        sealKey = normalizeKey(raw);
+        if (!sealKey) fail(`--${src} did not contain a usable sealing key`);
+      }
+      if (state === "verified") fail(`${name} is already sealed (state: verified); nothing to accept`);
+      if (state === "unverified") fail(`${name} has no sealing key — walk it to verify one`);
+      if (state === "reverify" && !sealKey) fail(`${name} needs re-verifying: walk it, or accept an explicit key with --seal-key-file <f>`);
+      const held = rec.sealPublicKey ? fingerprint(rec.sealPublicKey).slice(0, 14) : "(none)";
+      const presented = fingerprint(sealKey ?? rec.sealConflict).slice(0, 14);
+      log(`accepting for ${name}: held ${held} → ${presented}`);
+      const accepted = directory.acceptSealKey(name, sealKey);
       if (!accepted?.sealPublicKey) fail(`could not accept a sealing key for ${name}`);
       persist();
       log(`accepted sealing key ${fingerprint(accepted.sealPublicKey).slice(0, 14)} for ${name}`);
       break;
     }
-    fail("usage: hail seal status | hail seal accept <name>");
+    fail("usage: hail seal status | hail seal accept <name> [--seal-key-file <f>]");
     break;
   }
 

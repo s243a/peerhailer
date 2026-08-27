@@ -693,9 +693,9 @@ fxLoadMounts();
 let chPeer = null, chTimer = null, chEnabled = false, chSeal = {};
 // How each sealing state reads to the operator. conflict/reverify block a
 // send (fail closed, never cleartext); the accept button shows only for a conflict.
-const SEAL_BADGE = {
+const SEAL_LABEL = {
   verified: "🔒 sealed",
-  conflict: "⚠ sealing conflict — the peer presents a different key",
+  conflict: "⚠ sealing conflict",
   reverify: "⚠ needs re-verify — walk this peer before sending",
   unverified: "",
 };
@@ -707,16 +707,23 @@ async function chLoad() {
     const named = new Set();
     const opts = [];
     chSeal = {};
-    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); chSeal[c.name] = c.seal; opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
-    for (const p of (st.peers || [])) if (!named.has(p.name)) { chSeal[p.name] = p.seal; opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>"); }
+    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); chSeal[c.name] = c; opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
+    for (const p of (st.peers || [])) if (!named.has(p.name)) { chSeal[p.name] = p; opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>"); }
     $("ch-peer").innerHTML = opts.length ? opts.join("") : '<option value="">(no admitted peers)</option>';
     if (chPeer && [...$("ch-peer").options].some((o) => o.value === chPeer)) $("ch-peer").value = chPeer;
     await chOpen();
   } catch (e) { $("ch-status").textContent = "could not load chat: " + (e.message ?? e); }
 }
 function chSealBadge() {
-  const state = chSeal[$("ch-peer").value] || "unverified";
-  $("ch-seal").textContent = SEAL_BADGE[state] || "";
+  const info = chSeal[$("ch-peer").value] || {};
+  const state = info.seal || "unverified";
+  let label = SEAL_LABEL[state] || "";
+  // A conflict is a decision between two keys — show both fingerprints, never a
+  // bare "there's a conflict". The held key is the one still in use.
+  if (state === "conflict" && info.sealFp && info.sealPendingFp) {
+    label += " — held " + info.sealFp.slice(0, 12) + " vs presented " + info.sealPendingFp.slice(0, 12);
+  }
+  $("ch-seal").textContent = label;
   $("ch-accept").style.display = state === "conflict" ? "" : "none";
 }
 function chRender(messages) {
@@ -747,6 +754,12 @@ async function chSend() {
 async function chAccept() {
   const peer = $("ch-peer").value;
   if (!peer) return;
+  const info = chSeal[peer] || {};
+  // Confirm the exact key change, fingerprints shown — a signed record is
+  // replayable, so accepting the presented key is a deliberate trust decision.
+  const held = info.sealFp ? info.sealFp.slice(0, 20) : "(none)";
+  const pending = info.sealPendingFp ? info.sealPendingFp.slice(0, 20) : "(none)";
+  if (!window.confirm("Seal to " + peer + "'s new key?\n\nheld:      " + held + "\npresented: " + pending + "\n\nOnly accept if you recognise the presented key.")) return;
   $("ch-accept").disabled = true;
   try { await cxPost("/api/seal/accept", { peer: peer }); await chLoad(); }
   catch (e) { $("ch-status").textContent = "could not accept key: " + (e.message ?? e); }

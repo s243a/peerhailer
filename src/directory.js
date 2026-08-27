@@ -48,40 +48,82 @@ function asRecord(custom) {
 }
 
 /**
+ * Reconcile a CLI writer's mutated state against current disk, writing back only
+ * what *this* command changed from the state it first read (`baseline`).
+ *
+ * A CLI process reads state at startup, mutates a long-lived directory (and some
+ * stored keys in place), then writes. Spreading its whole snapshot over disk
+ * would silently revert whatever a daemon or another terminal committed since —
+ * a `block`, a `trust` change, a `gate` rotation the slow writer never saw. So
+ * each top-level key is taken from disk unless this command changed it from the
+ * baseline, and admitted peers are revision-merged with deletions as tombstones.
+ *
+ * Pure and exported for testing.
+ *
+ * @param {any} onDisk state read inside the write lock (current truth)
+ * @param {any} baseline state this process read at startup
+ * @param {any} current this process's state now (stored keys + directory snapshot)
+ * @returns {any} the state to write
+ */
+export function reconcilePersist(onDisk, baseline, current) {
+  /** @type {any} */
+  const result = { ...onDisk };
+  const sameJson = (/** @type {any} */ a, /** @type {any} */ b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  for (const key of new Set([...Object.keys(baseline ?? {}), ...Object.keys(current ?? {})])) {
+    if (key === "admitted") continue; // reconciled below, not diffed wholesale
+    if (!sameJson(current?.[key], baseline?.[key])) result[key] = current?.[key];
+  }
+  const baselineNames = new Set((baseline?.admitted ?? []).map((/** @type {any} */ p) => p.name));
+  const currentNames = new Set((current?.admitted ?? []).map((/** @type {any} */ p) => p.name));
+  const forgotten = new Set([...baselineNames].filter((n) => !currentNames.has(n)));
+  result.admitted = mergeByRevision(onDisk?.admitted ?? [], current?.admitted ?? [], { forgotten, baselineNames });
+  return result;
+}
+
+/**
  * Merge two views of the admitted set by per-record revision.
  *
- * A writer snapshots the directory it loaded at startup and wholesale-replaces
- * `admitted` on disk — so a slow one (a walk doing network I/O) could roll a
- * peer back over a rotation or a fresh bind another writer committed while it
- * ran. Every mutation bumps a monotone `rev` (see `commit`), so here the higher
- * `rev` wins per peer, and a stale snapshot cannot overwrite newer state. A peer
- * present in only one view is kept — a writer neither invents peers nor drops
- * ones it never loaded.
+ * Every mutation bumps a monotone `rev` (see `commit`), so the higher `rev` wins
+ * per peer and a stale snapshot cannot overwrite newer state. `bindingSeen`
+ * (max) and `sealRequired` (or) are monotone floors that never regress even if a
+ * concurrent edit wins the revision; the sealing key and any conflict follow
+ * `rev`, so a deliberate rotation or `acceptSealKey` (both higher-rev) can change
+ * them. A revision tie resolves to disk — the merging process is the staler
+ * reader, so it does not overwrite a concurrent committed edit it happens to
+ * match. Fails closed for sealing (back to the floor), never open.
  *
- * Two fields are monotone safety floors that must not regress even if a
- * concurrent edit to *other* fields wins the revision: `bindingSeen` (target-
- * binding support) is carried by `max`, and `sealRequired` (this peer must be
- * sealed to) by `or`. The sealing *key* and any *conflict* are not floored —
- * they follow `rev`, because a deliberate rotation or an `acceptSealKey` (both
- * higher-rev) must be able to change them.
+ * Deletion is a *tombstone*, not absence: a one-sided peer is kept by default
+ * (so a stale writer cannot drop a peer another added), which would otherwise
+ * refuse every revocation. `forgotten` is the peers this writer deleted (in its
+ * baseline, gone from its snapshot) — removed even though on disk. `baselineNames`
+ * is what it saw at startup, so a snapshot-only peer is kept when this writer
+ * *added* it but dropped when another writer *forgot* it while this one ran
+ * (otherwise a slow walk resurrects a just-revoked peer).
  *
  * Pure and exported for direct testing.
  *
  * @param {any[]} onDisk current on-disk admitted records
  * @param {any[]} snap this writer's admitted snapshot
+ * @param {{forgotten?: Set<string>, baselineNames?: Set<string>}} [intent]
  * @returns {any[]} the reconciled admitted set
  */
-export function mergeByRevision(onDisk, snap) {
+export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineNames = new Set() } = {}) {
   /** @type {Map<string, any>} */
   const byName = new Map();
-  for (const p of onDisk ?? []) byName.set(p.name, p);
+  for (const p of onDisk ?? []) {
+    if (forgotten.has(p.name)) continue; // this writer revoked it — a tombstone, not a drop
+    byName.set(p.name, p);
+  }
   for (const p of snap ?? []) {
     const was = byName.get(p.name);
     if (!was) {
-      byName.set(p.name, p);
+      // In the snapshot but not (or no longer) on disk. Kept only if this writer
+      // added it; a peer it saw at startup that is now gone from disk was
+      // forgotten by someone else while this writer ran — do not resurrect it.
+      if (!baselineNames.has(p.name)) byName.set(p.name, p);
       continue;
     }
-    const winner = (Number(p.rev) || 0) >= (Number(was.rev) || 0) ? p : was;
+    const winner = (Number(p.rev) || 0) > (Number(was.rev) || 0) ? p : was;
     const loser = winner === p ? was : p;
     const bindingSeen = Math.max(Number(winner.bindingSeen) || 0, Number(loser.bindingSeen) || 0);
     const sealRequired = Boolean(winner.sealRequired || loser.sealRequired);
@@ -461,7 +503,10 @@ export function createDirectory(state = {}) {
       if (!expected || !record.publicKey || !sameKey(record.publicKey, expected)) return record;
     }
     if (record.sealSeen && record.sealPublicKey && !sameKey(record.sealPublicKey, key)) {
-      if (record.sealConflict && sameKey(record.sealConflict, key)) return record;
+      // Keep the first disagreeing key as the pending one. A later, *different*
+      // disagreeing key does not replace it — an attacker alternating two
+      // replayed old keys must not be able to flip what an operator would accept.
+      if (record.sealConflict) return record;
       return commit(name, { ...record, sealConflict: key });
     }
     if (record.sealSeen && sameKey(record.sealPublicKey, key)) return record;

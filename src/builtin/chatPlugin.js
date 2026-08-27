@@ -58,6 +58,9 @@ export function createChatPlugin({
   // Replay guard for sealed messages: a sealed block is a bearer artifact, so a
   // relay could re-deliver it. Each sealed message carries a nonce; a repeat is
   // ignored. Bounded, time-windowed. (docs/sealing.md, consumer contract.)
+  // NOTE: this lives in the plugin instance, so an operator `/api/reload`
+  // rebuilds it empty and reopens the window for up to `messageMs`. Bounded and
+  // operator-triggered; the hail layer's freshness bounds the real exposure.
   /** @type {Map<string, number>} nonce -> expiry */
   const seenNonces = new Map();
   /** @param {string} nonce a non-empty, length-bounded nonce (caller enforces) */

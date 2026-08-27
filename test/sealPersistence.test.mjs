@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createDirectory, mergeByRevision } from "../src/directory.js";
+import { createDirectory, mergeByRevision, reconcilePersist } from "../src/directory.js";
 import { generateIdentity, sameKey } from "../src/identity.js";
 import { walk } from "../src/hail.js";
 import { makePeerRecord, signRecord } from "../src/peerRecord.js";
@@ -46,6 +46,40 @@ test("mergeByRevision: a peer present on only one side is kept, not dropped", ()
   assert.deepEqual(names, ["bob", "carol"], "neither the on-disk-only nor the snapshot-only peer is lost");
 });
 
+test("reconcilePersist: `forget` actually deletes through the write path (tombstone, not absence)", () => {
+  const baseline = { admitted: [{ name: "bob", publicKey: bob.publicKey, rev: 3 }], blocklist: { names: [], keys: [] } };
+  const onDisk = { admitted: [{ name: "bob", publicKey: bob.publicKey, rev: 3 }], blocklist: { names: [], keys: [] } };
+  const current = { admitted: [], blocklist: { names: [], keys: [] } }; // this command forgot bob
+  assert.deepEqual(reconcilePersist(onDisk, baseline, current).admitted, [], "forget is honoured against current disk");
+});
+
+test("reconcilePersist: a slow writer does not resurrect a peer another writer forgot", () => {
+  const baseline = { admitted: [{ name: "bob", publicKey: bob.publicKey, rev: 3 }] };
+  const current = { admitted: [{ name: "bob", publicKey: bob.publicKey, rev: 3 }] }; // this walk still has bob
+  const onDisk = { admitted: [] }; // someone forgot bob meanwhile
+  assert.deepEqual(reconcilePersist(onDisk, baseline, current).admitted, [], "the forgotten peer stays gone");
+});
+
+test("reconcilePersist: a stale writer does not revert a concurrent block it never saw", () => {
+  const baseline = { admitted: [], blocklist: { names: [], keys: [] } };
+  const current = { admitted: [], blocklist: { names: [], keys: [] } }; // this command touched neither
+  const onDisk = { admitted: [], blocklist: { names: ["mallory"], keys: [] } }; // a concurrent `block`
+  assert.deepEqual(reconcilePersist(onDisk, baseline, current).blocklist.names, ["mallory"], "concurrent block preserved");
+});
+
+test("reconcilePersist: this command's own config change IS written", () => {
+  const baseline = { admitted: [], blocklist: { names: [], keys: [] } };
+  const current = { admitted: [], blocklist: { names: ["spammer"], keys: [] } }; // THIS command blocked
+  const onDisk = { admitted: [], blocklist: { names: [], keys: [] } };
+  assert.deepEqual(reconcilePersist(onDisk, baseline, current).blocklist.names, ["spammer"], "the command's block lands");
+});
+
+test("mergeByRevision: a revision tie resolves to disk (a stale writer does not overwrite)", () => {
+  const disk = { name: "bob", publicKey: bob.publicKey, note: "committed", rev: 4 };
+  const snap = { name: "bob", publicKey: bob.publicKey, note: "stale", rev: 4 };
+  assert.equal(mergeByRevision([disk], [snap])[0].note, "committed", "tie goes to disk");
+});
+
 test("four-state gate: unverified → verified → conflict, sealKeyFor/sealState agree", () => {
   const dir = withVerifiedBob();
   assert.equal(dir.sealState("bob"), "verified");
@@ -81,6 +115,25 @@ test("rotateKey drops the key but keeps sealRequired → reverify, which fails s
   // Re-verifying against the new identity restores sealing.
   dir.bindSealKey("bob", bob2.sealPublicKey, bob2.publicKey);
   assert.equal(dir.sealState("bob"), "verified");
+});
+
+test("a reverify wedge is liftable by accepting an explicit key (not only by re-walking)", () => {
+  const dir = withVerifiedBob();
+  dir.rotateKey("bob", bob2.publicKey); // reverify, no pending key to default to
+  assert.equal(dir.sealState("bob"), "reverify");
+  dir.acceptSealKey("bob", bob2.sealPublicKey); // operator provides the new key explicitly
+  assert.equal(dir.sealState("bob"), "verified");
+  assert.ok(sameKey(dir.sealKeyFor("bob"), bob2.sealPublicKey));
+});
+
+test("a conflict keeps the first-seen pending key; a later different key cannot flip it", () => {
+  const dir = withVerifiedBob();
+  const first = generateIdentity();
+  const second = generateIdentity();
+  dir.bindSealKey("bob", first.sealPublicKey, bob.publicKey); // conflict, pending = first
+  dir.bindSealKey("bob", second.sealPublicKey, bob.publicKey); // attacker alternates
+  dir.acceptSealKey("bob"); // accepts the pending (first-seen) key
+  assert.ok(sameKey(dir.sealKeyFor("bob"), first.sealPublicKey), "the first disagreeing key is what gets accepted, not a later swap");
 });
 
 test("bindSealKey refuses when the identity changed under it (walk TOCTOU), including to keyless", () => {

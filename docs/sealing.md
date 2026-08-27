@@ -251,14 +251,20 @@ first consumer does not rediscover them.
 
    Two signals make this hold across processes. `sealRequired` is a monotone floor — once
    a peer is sealed to it is never silently downgraded, and it is OR-merged across writers.
-   Every record carries a monotone `rev`, and the write path (`mergeByRevision`) keeps the
-   higher-`rev` record per peer, so a slow writer (a walk doing network I/O) cannot roll a
-   peer back over a rotation or a fresh bind another writer committed — the earlier
-   snapshot-reconcile could not tell a stale write from a deliberate one and so rolled newer
-   trust back. The bind is identity-guarded (a proof verified against one identity, or a
-   null current identity, will not bind onto a record a concurrent rotation changed), and
-   `rotateKey` drops the key but keeps `sealRequired` (→ `reverify`, fail closed), so the
-   rotation window is never cleartext.
+   Every record carries a monotone `rev`, and the CLI write path (`reconcilePersist` →
+   `mergeByRevision`) keeps the higher-`rev` record per peer and writes back only what a
+   command changed against the state it first read — so a slow writer (a walk doing network
+   I/O) cannot roll a peer back over a rotation, resurrect a peer another terminal forgot
+   (deletions travel as tombstones, not absence), or revert a concurrent `block`/`trust`
+   change it never saw. A revision tie resolves to disk. The bind is identity-guarded (a
+   proof verified against one identity, or a null current identity, will not bind onto a
+   record a concurrent rotation changed), and `rotateKey` drops the key but keeps
+   `sealRequired` (→ `reverify`, fail closed), so the rotation window is never cleartext.
+
+   A conflict/reverify is resolved deliberately — `hail seal accept <peer>` (or the page's
+   *Accept new key*, which shows the held and presented fingerprints, since a signed record
+   is replayable), and `hail seal accept <peer> --seal-key-file <f>` / a `sealKey` in the
+   API to lift a `reverify` without a forget-and-re-add (which would drop the floor).
 
    **Deferred, tracked for follow-up:**
    - *Receiver-side downgrade refusal.* The receiver still accepts a cleartext message
