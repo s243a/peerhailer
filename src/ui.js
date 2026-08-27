@@ -708,7 +708,7 @@ function chRender(messages) {
   // Text is attacker-chosen — esc() is mandatory here (see chatPlugin.js).
   box.innerHTML = (messages || []).map((m) =>
     '<div class="ch-msg ' + (m.mine ? "ch-mine" : "ch-theirs") + '">' + esc(m.text) +
-    '<div class="ch-meta">' + esc(m.mine ? "me" : (m.from || "them")) + " · " + esc(new Date(m.at).toLocaleTimeString()) + "</div></div>"
+    '<div class="ch-meta">' + (m.sealed ? "🔒 " : "") + esc(m.mine ? "me" : (m.from || "them")) + " · " + esc(new Date(m.at).toLocaleTimeString()) + "</div></div>"
   ).join("");
   box.scrollTop = box.scrollHeight;
 }

@@ -512,7 +512,7 @@ switch (command) {
       ...(Object.keys(tunnels).length
         ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
         : []),
-      ...(wantsChat ? [createChatPlugin()] : []),
+      ...(wantsChat ? [createChatPlugin({ identity })] : []),
       ...(Object.keys(declaredShares).length ? [createFilesPlugin({ shares: declaredShares })] : []),
       ...(wantsRoute ? [createRoutePlugin(routeDeps())] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
@@ -601,7 +601,7 @@ switch (command) {
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
-        ...(nextChat ? [createChatPlugin()] : []),
+        ...(nextChat ? [createChatPlugin({ identity })] : []),
         ...(Object.keys(nextShares).length ? [createFilesPlugin({ shares: nextShares })] : []),
         ...(nextRoute ? [createRoutePlugin(routeDeps())] : []),
         ...(Object.keys(nextTunnels).length

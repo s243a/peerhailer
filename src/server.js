@@ -45,6 +45,7 @@ import { createComposer } from "./composer.js";
 import { callPeer } from "./hail.js";
 import { forwardTunnel } from "./tunnelClient.js";
 import { mountShare } from "./filesMount.js";
+import { seal } from "./sealing.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -837,7 +838,18 @@ export function createDaemon({
         const text = typeof body?.text === "string" ? body.text : "";
         if (!record) return send(response, 404, { error: "unknown peer" });
         if (!text.trim()) return send(response, 400, { error: "an empty message is not a message" });
-        const result = await callNode(record.name, "/chat/send", { text });
+        // Seal end to end when the peer has advertised a sealing key: encrypt to it,
+        // signed with our identity so the peer authenticates us. Falls back to
+        // cleartext for a peer without a sealing key (an older build).
+        let payload;
+        if (record.sealPublicKey) {
+          const signer = { publicKey: identity.publicKey, privateKey: identity.privateKey };
+          const inner = JSON.stringify({ text, at: Date.now(), nonce: randomUUID() });
+          payload = { sealed: seal(inner, record.sealPublicKey, { signer }) };
+        } else {
+          payload = { text };
+        }
+        const result = await callNode(record.name, "/chat/send", payload);
         if (!result?.ok) return send(response, 502, { error: result?.error ?? "the peer did not accept the message" });
         const message = chat.say(record.publicKey, text);
         return send(response, 200, { ok: true, message });

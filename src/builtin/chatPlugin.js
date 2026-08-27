@@ -17,6 +17,7 @@
  */
 import { sameKey } from "../identity.js";
 import { REFUSE } from "../plugins.js";
+import { openSigned } from "../sealing.js";
 
 /** A message longer than this is a payload, not a note. */
 export const MAX_MESSAGE = 4 * 1024;
@@ -44,6 +45,7 @@ export const MAX_CONVERSATIONS = 500;
  *   maxPerPeer?: number,
  *   messageMs?: number,
  *   maxConversations?: number,
+ *   identity?: { publicKey: string, privateKey: string, sealPublicKey?: string, sealPrivateKey?: string },
  * }} [options]
  */
 export function createChatPlugin({
@@ -51,7 +53,23 @@ export function createChatPlugin({
   maxPerPeer = MAX_PER_PEER,
   messageMs = MESSAGE_MS,
   maxConversations = MAX_CONVERSATIONS,
+  identity,
 } = {}) {
+  // Replay guard for sealed messages: a sealed block is a bearer artifact, so a
+  // relay could re-deliver it. Each sealed message carries a nonce; a repeat is
+  // ignored. Bounded, time-windowed. (docs/sealing.md, consumer contract.)
+  /** @type {Map<string, number>} nonce -> expiry */
+  const seenNonces = new Map();
+  /** @param {string} nonce */
+  const freshNonce = (nonce) => {
+    if (!nonce) return true;
+    const t = now();
+    for (const [k, exp] of seenNonces) { if (exp <= t) seenNonces.delete(k); else break; }
+    if (seenNonces.has(nonce)) return false;
+    seenNonces.set(nonce, t + messageMs);
+    while (seenNonces.size > 4096) { const oldest = seenNonces.keys().next().value; if (oldest === undefined) break; seenNonces.delete(oldest); }
+    return true;
+  };
   /**
    * Peer fingerprint -> their messages, newest last.
    *
@@ -59,13 +77,13 @@ export function createChatPlugin({
    * conversation should follow the machine, not the label. Bounded on write in
    * both directions, because this is memory that a peer can add to.
    *
-   * @type {Map<string, {from: string, text: string, at: number, mine: boolean}[]>}
+   * @type {Map<string, {from: string, text: string, at: number, mine: boolean, sealed?: boolean}[]>}
    */
   const threads = new Map();
 
   /**
    * @param {string} peerKey
-   * @param {{from: string, text: string, at: number, mine: boolean}} message
+   * @param {{from: string, text: string, at: number, mine: boolean, sealed?: boolean}} message
    */
   const append = (peerKey, message) => {
     const thread = threads.get(peerKey) ?? [];
@@ -107,7 +125,35 @@ export function createChatPlugin({
          */
         handler: ({ body, caller }) => {
           if (!caller?.publicKey) return { [REFUSE]: true, reason: "no key to attribute a message to" };
-          const text = typeof body?.text === "string" ? body.text : "";
+          let text;
+          let at = now();
+          let sealed = false;
+          if (body?.sealed) {
+            // End-to-end sealed: only this machine can read it, and it is
+            // authenticated. Consumer-contract obligations, all here: require a
+            // signature (openSigned), bind the sealed sender to the transport-
+            // authenticated caller, and dedup the nonce against replay.
+            if (!identity?.sealPrivateKey) return { [REFUSE]: true, reason: "this machine cannot open sealed messages" };
+            let opened;
+            try {
+              opened = openSigned(body.sealed, identity.sealPrivateKey);
+            } catch {
+              return { [REFUSE]: true, reason: "sealed message did not open or verify" };
+            }
+            if (!sameKey(opened.from, caller.publicKey)) return { [REFUSE]: true, reason: "sealed sender is not the caller" };
+            let payload;
+            try {
+              payload = JSON.parse(opened.plaintext.toString("utf8"));
+            } catch {
+              return { [REFUSE]: true, reason: "sealed payload is malformed" };
+            }
+            if (!freshNonce(String(payload?.nonce ?? ""))) return { received: true, duplicate: true };
+            text = typeof payload?.text === "string" ? payload.text : "";
+            at = Number.isFinite(payload?.at) ? payload.at : now();
+            sealed = true;
+          } else {
+            text = typeof body?.text === "string" ? body.text : "";
+          }
           if (!text.trim()) return { [REFUSE]: true, reason: "an empty message is not a message" };
           if (text.length > MAX_MESSAGE) return { [REFUSE]: true, reason: "that is longer than a note" };
 
@@ -117,8 +163,8 @@ export function createChatPlugin({
           // it and MUST NOT make it actionable — a link, a command — or this is
           // the stored-XSS plugin. The claim lives here as a requirement because
           // the renderer that has to honour it does not exist yet.
-          append(caller.publicKey, { from: caller.name, text, at: now(), mine: false });
-          return { received: true };
+          append(caller.publicKey, { from: caller.name, text, at, mine: false, sealed });
+          return { received: true, sealed };
         },
       },
     ],
