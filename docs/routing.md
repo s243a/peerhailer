@@ -156,16 +156,38 @@ discussion is one mechanism, not a separate discovery phase:
   working path (which is cached) *and* delivers real data — no separate no-payload
   scout, no wasted probe traffic. Blocks 2…N then source-route down the cached path.
   Exploration cost is bounded to **one block**, not the whole payload, whatever its
-  size. It degrades perfectly: a message smaller than a block is a single sealed block
-  that is at once probe and data, so the common small-message case pays nothing extra.
-- **Optimistic reuse, with re-discovery on a miss.** A path that carried block 1 can
-  still fail on block 5 (a relay drops, congests, or loses the capability), so "block 1
-  arrived" is a *probability*, not a guarantee. Cache and reuse the path; when a later
-  block fails, re-run the search for that block and update the cache. (Freenet reuses
-  paths this way.)
-- **Sequence numbers, for reassembly.** Each block carries an index so the destination
-  reassembles in order and can detect and re-request a missing one — needed once blocks
-  can take different paths or arrive out of order.
+  size — but that is *per (sender, destination, message)*, not globally. A first block
+  runs the search, so it is the costly one and is rate-limited at least as strictly as a
+  cached-path block; and because routing is **F2F — only admitted peers relay** — the
+  "cheap Sybil identities spraying probes" concern that bites open overlays is bounded
+  by admission here. It degrades perfectly: a message smaller than a block is a single sealed block
+  that is at once probe and data, so the common small-message case pays **no chunking
+  overhead**. It still pays the ordinary route-*discovery* cost each time — unless a
+  persistent per-destination path cache (above) lets it reuse a known route.
+- **Optimistic reuse, with *bounded* re-discovery on a miss.** A path that carried
+  block 1 can still fail on block 5 (a relay drops, congests, or loses the capability),
+  so "block 1 arrived" is a *probability*, not a guarantee. Cache and reuse the path;
+  when a later block fails, re-run the search for that block and update the cache. But
+  re-discovery is **controlled degradation with a ceiling, not a free fallback**: an
+  accept-then-grayhole relay (accept block 1 to get itself cached, then drop the rest)
+  or a hop that keeps failing would otherwise turn one cheap drop into repeated
+  expensive searches — an amplification lever. So a **hard per-message re-discovery cap**
+  (e.g. 2, then fail the whole message) is protocol, and the offending relay is what
+  Stage 2's first-party statistics down-weight.
+- **The cache is stale trust, so it expires.** A cached path is a snapshot of the graph
+  at a moment; a hop can revoke its capability or go offline after caching. So the cache
+  carries a **TTL and is invalidated on any hop failure** — a cached path is only as
+  trustworthy as its most recently validated hop, and reusing it is a performance /
+  freshness trade, not a free optimization. A **persistent per-destination path cache**
+  (across messages) is what lets *small* messages skip re-discovery too.
+- **Sequence numbers *and reassembly quotas*.** Each block carries an index so the
+  destination reassembles in order and can detect and re-request a missing one. But the
+  block stream is attacker-controlled, so reassembly is a resource-exhaustion surface
+  and needs hard bounds, not just an index: the claimed **total-block count is capped
+  and verified from block 1 before any buffer is committed** (else a claimed 2^32 blocks
+  is a memory bomb), a bounded **receive window** (blocks outside it dropped), a
+  **timeout** that frees a partial message, **dedup by `(message-id, seqno)`**, and
+  **per-sender and global in-flight reassembly caps**.
 - **Seal end to end, per block.** Encryption is between the two endpoints — *not*
   decrypted and re-encrypted at each hop; a relay carries an opaque block it cannot
   read. (Per-hop TLS still protects the wire and hides metadata; the end-to-end seal is
@@ -422,4 +444,8 @@ framing, fanout as protocol (clamped on receipt) rather than policy, the per-cal
 rate limit (peerhailer has no framework limiter), the admitted-insider-vs-Sybil
 distinction, and replay/idempotency as a named gap. Two items were deferred, not
 resolved: implementing the envelope-id dedup (harmless while `deliver` is a log+ack),
-and the exact stage and mechanism for payload sealing.
+and the exact stage and mechanism for payload sealing. (The dedup has since
+shipped; the Stage 1.5 mechanism is the chunked, sealed relay above.) A later review
+(round I) firmed up Stage 1.5 with hard bounds — a per-message re-discovery cap,
+reassembly quotas verified before allocation, and a cache TTL/invalidation — since
+mechanisms without ceilings are DoS levers.

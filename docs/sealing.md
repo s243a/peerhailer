@@ -21,11 +21,18 @@ destination:
 - **Tunnel exits and chat to a non-peer**: same shape.
 
 So sealing is a **fabric-level primitive** — "encrypt a blob so only peer *X* can open
-it" — that routing, chat, and tunnels all *call*. It is written here, once, rather than
-reinvented in each. Per-hop TLS stays (it protects the wire and hides size/timing from a
-passive network observer); the seal is what protects the *content* from the relays
-themselves. It is **distinct from anonymity** (`docs/routing.md`, Stage 5): sealing hides
-*what* is carried; anonymity hides *who* is talking.
+it" — that routing, chat, and tunnels all *call*. To be precise about what is unified: the
+**crypto core is shared** (the X25519 key, the ECDH → HKDF → AES-GCM construction, and the
+seal-then-sign binding), while the **framing differs per consumer** — routing seals
+*per block* because it is store-and-forward and blocks take different paths; a live tunnel
+would seal *per frame over a stream* because both ends are online. Same primitive, same
+keys, different envelope — so the claim is "one audited crypto core, consumer-specific
+framing," not "one wire format everywhere." It is written here once rather than reinvented,
+and each consumer doc (`docs/chat.md`, `docs/acp-tunnel.md`, `docs/routing.md`) should say
+which framing it uses. Per-hop TLS stays (it protects the wire and hides size/timing from a
+passive observer); the seal protects the *content* from the relays themselves. It is
+**distinct from anonymity** (`docs/routing.md`, Stage 5): sealing hides *what* is carried;
+anonymity hides *who* is talking.
 
 ## The gap
 
@@ -48,8 +55,11 @@ exchange learns both.
 - **Standard and well-trodden.** This is the "sealed box" / `crypto_box` shape; `node:crypto`
   supports `generateKeyPairSync('x25519')` + `diffieHellman()` + HKDF + AES-GCM directly. No
   hand-rolled curve math — which matters most in exactly this kind of code.
-- **One key, one job.** The signing key signs; the sealing key seals. No key is asked to do
-  two cryptographic jobs, so there is no cross-protocol interaction to reason about.
+- **One key, one job (defence in depth).** The signing key signs; the sealing key seals.
+  This is a *defence-in-depth* preference, not a load-bearing requirement — production
+  systems (Signal's XEdDSA) safely share one key for both with careful **domain
+  separation**, which is the property actually doing the work. A avoids having to make
+  that argument at all.
 - **Forward secrecy is available.** Sealing with an *ephemeral* sender key against the
   recipient's static key gives per-message forward secrecy for free.
 - **Rotatable independently.** A compromised sealing key can be rotated without touching the
@@ -75,48 +85,99 @@ related; libsodium exposes this as `crypto_sign_ed25519_pk_to_curve25519`).
 - **Smaller identity and directory.** One key per peer, as today.
 
 **Cons**
-- **`node:crypto` does not expose the conversion.** There is no built-in Ed25519→X25519 map,
-  so Option B means **hand-rolling curve field arithmetic** in a security fabric — precisely
-  the "don't hand-roll crypto" line the project holds everywhere else. A subtle bug here is a
-  silent confidentiality failure, the hardest kind to notice.
-- **One key doing two jobs.** Using the same key material for signatures *and* key agreement
-  is generally discouraged: a signing oracle and a decryption oracle over one key are a
-  cross-protocol interaction that has to be argued safe for the specific constructions, not
-  assumed. Production systems that do share a key (Signal's XEdDSA) use a carefully audited
-  scheme — not an ad-hoc conversion.
+- **`node:crypto` has no conversion, and we are zero-dependency.** To be fair to B: the
+  Ed25519→X25519 map is *not* exotic — it is a published, audited construction
+  (libsodium's `crypto_sign_ed25519_pk_to_curve25519`, Signal's X3DH) used in production
+  at scale. The problem is specific to *this* project: peerhailer uses **only
+  `node:crypto`, which does not provide the map**, so B here means either **hand-rolling
+  curve field arithmetic** (the "don't hand-roll crypto" line we hold everywhere) *or*
+  **adding a crypto dependency** (breaking the zero-dependency rule). So B is dismissed
+  not because the conversion is unsafe — it isn't — but because neither way of getting it
+  here is acceptable. If we ever accepted a vetted crypto dependency, B would be back on
+  the table.
+- **One key doing two jobs.** Sharing key material for signatures *and* key agreement is
+  a *defence-in-depth* concern, not automatically unsafe — with proper domain separation
+  it is fine (Signal does it). It is one more thing to argue rather than avoid.
 - **Rotation is coupled.** Rotating the signing key rotates the sealing key and vice versa;
   you cannot retire one without the other.
 
 ## Recommendation
 
-**Option A.** The decisive factors are the two the project already weights most: it keeps us
-from **hand-rolling curve math**, and it keeps **one key to one job**. The cost — a second
-key in the identity and directory — is ordinary protocol work with a clear migration path,
-and it is the kind of cost that is paid once. Option B trades that one-time protocol cost for
-a permanent, hard-to-audit cryptographic risk, which is the wrong trade for a fabric whose
-value is being auditable.
+**Option A — but on honest grounds.** The decisive factor is the **zero-dependency
+constraint**, not any claim that B's conversion is unsafe (it is production-proven). Under
+zero-dep-on-`node:crypto`, B forces a choice between hand-rolling curve math and adding a
+crypto dependency, and A avoids that choice with only standard `node:crypto` calls. The cost
+of A — a second key in the identity and directory — is ordinary, one-time protocol work with
+a clear migration path. If the project ever accepts a vetted crypto dependency that ships the
+Ed25519→X25519 map, **B becomes a legitimate, smaller-footprint alternative** and this
+recommendation should be revisited.
+
+## Forward secrecy and the offline recipient
+
+Use **ephemeral-static ECDH**, and it works even when the recipient is offline. The sender
+generates a throwaway X25519 key per message, does ECDH against the recipient's *static*
+sealing key, derives the AEAD key, and carries the **ephemeral public key inside the block**;
+the recipient decrypts later, when it comes online (this is exactly how PGP and Signal
+pre-keys handle an absent recipient). This gives per-message forward secrecy on the *sender's*
+side — the ephemeral key is discarded — so a relay that stored the block cannot later
+decrypt it even if it compromises the sender. **Static-static ECDH is never the right
+default**: it adds no forward secrecy and buys nothing here.
+
+The residual, stated plainly: forward secrecy is one-sided. If the *recipient's* static
+sealing key is later compromised, blocks stored for it are decryptable. The mitigation is
+recipient-side key freshness — rotating the sealing key periodically, or publishing one-time
+**pre-keys** — which bounds the window a single key exposes. That is a Stage-later refinement,
+not a Stage 1.5 blocker.
 
 ## What sealing does *not* do (scope)
 
-- **It hides content, not metadata.** A relay still sees the destination it is asked to reach,
-  the block sizes, and the timing. Hiding *those* is the anonymity work (`docs/routing.md`,
-  Stage 5), and against a global observer it is a much larger project this does not promise.
-- **It is not authentication.** The seal proves confidentiality to the recipient; the existing
-  Ed25519 signature is still what proves *who sent it*. A sealed block should also be signed (or
-  the AEAD keyed so only the intended sender could have produced it) so a relay cannot swap
-  content undetected.
+- **It hides content, not metadata — here is exactly what still leaks.** "End-to-end sealed"
+  is not "private"; a relay on the path learns a great deal that the seal does not touch:
+
+  | Sees it | A relay on the path | The directory | A passive network observer |
+  | --- | --- | --- | --- |
+  | Payload content | — (sealed) | — | — |
+  | Destination key it is asked to reach | ✅ | — | — |
+  | Its previous / next hop | ✅ | — | — (sees the two endpoints of each hop) |
+  | Block size and count | ✅ | — | ✅ |
+  | Timing / traffic pattern | ✅ | — | ✅ |
+  | That a peer *has* a sealing key | ✅ | ✅ | — |
+
+  Hiding *who* and *when* is the anonymity work (`docs/routing.md`, Stage 5) — onion layering
+  for the hops, and padding / fixed-size blocks / cover traffic for size and timing — and
+  against a global observer it is a far larger project this primitive does not promise.
+  Fixed-size blocks (Stage 1.5's chunking) already blunt the size channel a little.
+- **It is not authentication — and the order matters.** The seal proves confidentiality;
+  the Ed25519 signature still proves *who sent it*, and a block must carry one so a relay
+  cannot substitute content undetected. Use **seal-then-sign** (sign the ciphertext) or bind
+  the signature/MAC as the AEAD's **associated data** — *not* sign-then-seal. Signing the
+  ciphertext lets a relay verify the outer routing envelope **without decrypting**, and
+  avoids the decryption-DoS of sign-then-seal (which forces the recipient to decrypt
+  attacker-chosen bytes before it can reject them). This is the Noise/WireGuard pattern.
 
 ## Questions for review
 
 1. Is the directory/hello cost of carrying a second key (Option A) acceptable, or is the
    single-key footprint of Option B worth revisiting with a *well-audited* conversion (not a
    hand-rolled one)?
-2. Static-static ECDH (simplest, no forward secrecy) vs ephemeral-static (per-message forward
-   secrecy, an ephemeral key in each block) — which is the Stage 1.5 default?
+2. Static-static vs ephemeral-static ECDH — *resolved above*: ephemeral-static, which works
+   for offline recipients and gives sender-side forward secrecy; static-static is never the
+   default. Open: recipient-side pre-keys/rotation cadence.
 3. Should the seal bind the sender identity (sign-then-seal, or an AEAD associated-data field
    carrying the signed origin) so a relay cannot substitute a block?
-4. Does this subsume the "sealed relay" designs in `docs/chat.md` / `docs/acp-tunnel.md`, or
-   are they a different layer that sits on top of this primitive?
+4. Does this subsume the "sealed relay" designs in `docs/chat.md` / `docs/acp-tunnel.md`?
+   *Leaning*: same crypto core, different framing (per-block vs per-stream) — those docs should
+   adopt this core and declare their framing, rather than roll their own.
 5. Block-level sealing (each block independently decryptable) vs message-level (seal once,
    then chunk) — the routing Stage 1.5 assumes per-block; is that the right default for
    everyone, or routing-specific?
+
+## Provenance
+
+Reviewed (round I). The review sharpened the honest grounds for Option A — it wins on the
+**zero-dependency** constraint, not because B's Ed25519→X25519 conversion is unsafe (it is
+production-proven) — reframed "one key, one job" as defence-in-depth resting on domain
+separation, replaced sign-then-seal with **seal-then-sign / AEAD-AD**, corrected the
+forward-secrecy analysis (**ephemeral-static works for offline recipients**), added the
+explicit metadata-leakage table, and made the fabric-unification claim precise (shared crypto
+core, consumer-specific framing).
