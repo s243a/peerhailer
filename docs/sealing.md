@@ -109,8 +109,45 @@ zero-dep-on-`node:crypto`, B forces a choice between hand-rolling curve math and
 crypto dependency, and A avoids that choice with only standard `node:crypto` calls. The cost
 of A — a second key in the identity and directory — is ordinary, one-time protocol work with
 a clear migration path. If the project ever accepts a vetted crypto dependency that ships the
-Ed25519→X25519 map, **B becomes a legitimate, smaller-footprint alternative** and this
-recommendation should be revisited.
+Ed25519→X25519 map, **B becomes a legitimate, smaller-footprint alternative**. And it
+need not be an all-or-nothing choice: the resolution below makes **A the mandatory
+default** and lets B (or any dependency-bearing suite) ride an **opt-in plugin**, so the
+dependency question is each operator's, not the project's.
+
+## The resolution: negotiate suites; A is the mandatory floor
+
+The choice is not really A *or* B for the whole network — it is a **per-node policy,
+negotiated**, the way SSH negotiates ciphers. Each identity advertises the sealing
+**suites** it supports and prefers; a sender picks the best suite it shares with the
+recipient and tags the block with that suite's id. This turns "which key" from a
+one-time global decision into **crypto agility** — suites can be added (a
+post-quantum one, later) and retired without a flag day, and each operator sets their
+own floor and preference while the default stays auditable and dependency-free.
+
+- **Suite A (X25519 sealed-box) is mandatory.** Every node supports it, so there is
+  always a common suite and no "no shared suite" failure. It is the zero-dependency
+  default, in the core with only `node:crypto`.
+- **Other suites are opt-in plugins, not build flags.** B (the Ed25519-derived key),
+  and later a post-quantum suite, ship as a **separate plugin package** that registers
+  a suite through peerhailer's existing plugin loader (`hail plugins add`). This is
+  deliberately *not* a build flag: a flag flips on code already in `node_modules`, so
+  the supply-chain cost is paid whether or not it is set, whereas a separately installed
+  plugin is a genuine opt-in and `hail plugins` shows exactly what a node added (the
+  same reasoning as `docs/file-backends.md`). A node that adds no plugin runs pure
+  zero-dep A.
+- **Offline recipients ⇒ advertise-and-select, not a live handshake.** Sealing is
+  store-and-forward; you cannot run an interactive SSH-style exchange with an offline
+  peer. So the recipient's suites are published in its **signed identity/directory
+  record**, the sender selects from them, and the chosen suite id is **bound into the
+  seal** (AEAD associated data, or covered by the signature). A live consumer (a tunnel)
+  *can* negotiate interactively, but advertise-and-bind serves both, so it is the one
+  mechanism.
+- **Close the downgrade attack.** Negotiation's classic failure is an active party
+  forcing the weakest mutually-allowed suite. Two defenses, both required: a **hard
+  per-node floor** — a node refuses a suite it deems too weak, so "allowed" is a floor,
+  not merely a preference — and **binding the suite id into the authenticated part of
+  the seal**, so a relay cannot rewrite the tag to a weaker suite without breaking the
+  signature. (This is why seal-then-sign / AEAD-AD, above, is load-bearing here too.)
 
 ## Forward secrecy and the offline recipient
 
@@ -157,9 +194,10 @@ not a Stage 1.5 blocker.
 
 ## Questions for review
 
-1. Is the directory/hello cost of carrying a second key (Option A) acceptable, or is the
-   single-key footprint of Option B worth revisiting with a *well-audited* conversion (not a
-   hand-rolled one)?
+1. Is the directory/hello cost of carrying a second key (Option A) acceptable? *Largely
+   resolved above*: A is the mandatory zero-dep default and B rides an opt-in plugin, so the
+   footprint is A's second key plus whatever a node opts into. Open: the exact suite-id
+   registry and how a node advertises its floor/preference in the signed record.
 2. Static-static vs ephemeral-static ECDH — *resolved above*: ephemeral-static, which works
    for offline recipients and gives sender-side forward secrecy; static-static is never the
    default. Open: recipient-side pre-keys/rotation cadence.
@@ -180,4 +218,6 @@ production-proven) — reframed "one key, one job" as defence-in-depth resting o
 separation, replaced sign-then-seal with **seal-then-sign / AEAD-AD**, corrected the
 forward-secrecy analysis (**ephemeral-static works for offline recipients**), added the
 explicit metadata-leakage table, and made the fabric-unification claim precise (shared crypto
-core, consumer-specific framing).
+core, consumer-specific framing). The A-vs-B decision was then resolved by **negotiated
+suites** (SSH-style): A mandatory and zero-dep, other suites as opt-in plugins, selection
+advertised in the signed record and bound into the seal against downgrade.
