@@ -857,6 +857,20 @@ export function createDirectory(state = {}) {
     },
     blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
     trust: () => ({ ...trust }),
+    /**
+     * Change the trust policy through the directory, so a `snapshot()` reflects
+     * it. A caller that mutated a stored copy instead would have the change
+     * diffed away at persist time — the snapshot, being authoritative for
+     * directory state, would overwrite it.
+     *
+     * @param {{model?: string, settings?: Record<string, unknown>, unknownProfile?: string}} patch
+     */
+    setTrust: (patch) => {
+      if (typeof patch?.model === "string") trust.model = patch.model;
+      if (patch?.settings) trust.settings = patch.settings;
+      if (typeof patch?.unknownProfile === "string") trust.unknownProfile = patch.unknownProfile;
+      return { ...trust };
+    },
     listAdmitted: () => [...admitted.values()],
     listCandidates: () =>
       [...candidates.entries()].map(([name, entry]) => ({ ...entry.record, name, heardFrom: entry.heardFrom })),

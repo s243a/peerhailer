@@ -397,12 +397,14 @@ switch (command) {
       break;
     }
     if (!TRUST_MODELS[model]) fail(`unknown trust model: ${model}`);
-    stored.trust = {
-      ...(stored.trust ?? {}),
+    // Through the directory, not a stored copy: `persist()` diffs the directory
+    // snapshot, so a change made only to `stored.trust` would be overwritten by
+    // the snapshot's unchanged trust and silently lost.
+    directory.setTrust({
       model,
       ...(typeof flags.vouches === "string" ? { settings: { vouchesRequired: Number(flags.vouches) } } : {}),
       ...(typeof flags.unknown === "string" ? { unknownProfile: flags.unknown } : {}),
-    };
+    });
     persist();
     log(`trust model is now ${model}`);
     break;
