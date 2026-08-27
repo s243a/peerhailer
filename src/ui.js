@@ -499,6 +499,9 @@ function cxPollSeat() {
     if (!cxRes || cxRes.launchId !== lid) { clearInterval(cxSeatTimer); return; }
     try {
       const seat = await api("/api/compose/seat?launchId=" + encodeURIComponent(lid));
+      // The launch may have been stopped or replaced during the await; if so this
+      // reply is for a session that is gone, and must not repaint its status.
+      if (!cxRes || cxRes.launchId !== lid) { clearInterval(cxSeatTimer); return; }
       cxRender(seat);
       if (seat.seatUrl) clearInterval(cxSeatTimer);
     } catch (ignore) {}
@@ -540,15 +543,25 @@ async function cxLaunchNow() {
   }
 }
 async function cxStopNow() {
-  if (cxSeatTimer) clearInterval(cxSeatTimer);
   const lid = cxRes && cxRes.launchId;
-  cxRes = null;
-  $("cx-launch").disabled = false; $("cx-stop").disabled = true;
+  if (!lid) { cxRes = null; if (cxSeatTimer) clearInterval(cxSeatTimer); $("cx-launch").disabled = false; $("cx-stop").disabled = true; return; }
+  // Keep the session and hold both actions while the stop is in flight: the
+  // launch id is only discarded once the teardown actually succeeds, so a failed
+  // stop leaves a live seat that Stop can still retry, not an orphan with no
+  // handle. The seat poll keeps running until then.
+  $("cx-launch").disabled = true; $("cx-stop").disabled = true;
   $("cx-status").textContent = "stopping…";
-  // Report what actually happened: a failed stop must not read as "stopped",
-  // or a live session looks torn down when it is still running.
-  try { if (lid) await cxPost("/api/compose/stop", { launchId: lid }); $("cx-status").textContent = "stopped"; }
-  catch (e) { $("cx-status").textContent = "stop failed: " + (e.message ?? e); }
+  try {
+    await cxPost("/api/compose/stop", { launchId: lid });
+    if (cxSeatTimer) clearInterval(cxSeatTimer);
+    cxRes = null;
+    $("cx-status").textContent = "stopped";
+    $("cx-launch").disabled = false; $("cx-stop").disabled = true;
+  } catch (e) {
+    // Still running — keep the session, re-enable Stop to retry, leave Launch off.
+    $("cx-status").textContent = "stop failed: " + (e.message ?? e);
+    $("cx-stop").disabled = false;
+  }
 }
 // --- remote control: drive a remote T3 from a local T3 client ---
 let cxRc = null;
@@ -599,7 +612,7 @@ $("cx-rc-stop").addEventListener("click", cxRcStop);
 $("cx-node").addEventListener("change", cxRefreshAgents);
 $("cx-agent").addEventListener("change", cxUpdateSupervision);
 // --- files explorer: browse and transfer with a peer's share ---
-let fxPath = "";
+let fxPath = "", fxGen = 0;
 async function fxLoadPeers() {
   try {
     const p = await api("/api/peers");
@@ -623,27 +636,34 @@ async function fxOpen(path) {
   if (!$("fx-peer").value || !share) { $("fx-status").textContent = "pick a peer and a share"; return; }
   if (path !== undefined) fxPath = path;
   const ctx = fxCtx();
+  const gen = ++fxGen;
   $("fx-status").textContent = "loading…";
   try {
     const r = await fxBrowse("list", null, ctx);
-    if (fxStale(ctx)) return; // the target changed while loading — drop this listing
+    // A newer browse (or a target change, which bumps the generation via fxClear)
+    // has superseded this one — its listing and status are stale, so drop them.
+    if (gen !== fxGen) return;
     if (r.error) { $("fx-status").textContent = r.error; return; }
     fxRender(r.entries || [], r.truncated, ctx);
     $("fx-path").textContent = ctx.share + ":/" + ctx.path;
     $("fx-status").textContent = "";
     $("fx-upload").disabled = false;
-  } catch (e) { $("fx-status").textContent = "open failed: " + (e.message ?? e); }
+  } catch (e) { if (gen === fxGen) $("fx-status").textContent = "open failed: " + (e.message ?? e); }
 }
 function fxClear() {
+  fxGen++; // invalidate any browse in flight, so its late listing is dropped
   $("fx-list").innerHTML = ""; $("fx-path").textContent = ""; $("fx-status").textContent = "";
   $("fx-upload").disabled = true; fxPath = "";
 }
 function fxRender(entries, truncated, ctx) {
+  // Rows are built from the path the listing was for (ctx.path), not the global
+  // fxPath, which a newer browse may already have moved — so a navigate or a
+  // download from a row always targets the directory the row actually came from.
   const rows = [];
-  if (fxPath) rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxParent(fxPath)) + '">../</span></div>');
+  if (ctx.path) rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxParent(ctx.path)) + '">../</span></div>');
   for (const e of entries) {
-    if (e.type === "dir") rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxJoin(fxPath, e.name)) + '">' + esc(e.name) + "/</span></div>");
-    else rows.push('<div class="fx-row"><span class="fx-name">' + esc(e.name) + '</span><span class="fx-size">' + esc(String(e.size == null ? "" : e.size)) + '</span><button data-get="' + esc(fxJoin(fxPath, e.name)) + '">download</button></div>');
+    if (e.type === "dir") rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxJoin(ctx.path, e.name)) + '">' + esc(e.name) + "/</span></div>");
+    else rows.push('<div class="fx-row"><span class="fx-name">' + esc(e.name) + '</span><span class="fx-size">' + esc(String(e.size == null ? "" : e.size)) + '</span><button data-get="' + esc(fxJoin(ctx.path, e.name)) + '">download</button></div>');
   }
   if (truncated) rows.push('<div class="muted" style="padding:.3rem">… (list truncated)</div>');
   const box = $("fx-list");
@@ -681,8 +701,10 @@ async function fxUpload() {
     if (fxStale(ctx)) { $("fx-status").textContent = "uploaded to " + ctx.peer + ":" + ctx.share + " (target since changed)"; return; }
     if (r.error) $("fx-status").textContent = "upload refused: " + r.error;
     else { $("fx-status").textContent = "uploaded " + f.name + " (" + (r.written == null ? "?" : r.written) + " bytes)"; await fxOpen(); }
-  } catch (e) { $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
-  finally { $("fx-upload").disabled = false; }
+  } catch (e) { if (!fxStale(ctx)) $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
+  // Only re-enable Upload if the target is still the one uploaded to; if it
+  // changed mid-flight, fxClear disabled it deliberately and it must stay off.
+  finally { if (!fxStale(ctx)) $("fx-upload").disabled = false; }
 }
 async function fxMount() {
   const peer = $("fx-peer").value, share = $("fx-share").value.trim();
@@ -719,7 +741,7 @@ $("fx-share").addEventListener("input", fxClear);
 fxLoadPeers();
 fxLoadMounts();
 // --- chat: short messages to/from admitted peers (memory only) ---
-let chPeer = null, chTimer = null, chEnabled = false, chSeal = {};
+let chPeer = null, chTimer = null, chEnabled = false, chSeal = {}, chGen = 0;
 // How each sealing state reads to the operator. conflict/reverify block a
 // send (fail closed, never cleartext); the accept button shows only for a conflict.
 const SEAL_LABEL = {
@@ -764,24 +786,36 @@ function chRender(messages) {
   ).join("");
   box.scrollTop = box.scrollHeight;
 }
-async function chOpen() {
+// switched is a real peer change (clear the old thread at once); the 4s poll
+// calls it without, so a refresh does not flash empty. chGen orders responses:
+// only the newest open paints, so a slow one, a reordered poll, or an A→B→A
+// bounce cannot roll the display back or paint one peer's thread under another.
+async function chOpen(switched) {
   const peer = $("ch-peer").value;
   chPeer = peer || null;
   chSealBadge();
+  if (switched) { chRender([]); $("ch-status").textContent = ""; }
   if (!peer) { chRender([]); return; }
+  const gen = ++chGen;
   try {
     const t = await api("/api/chat/thread?peer=" + encodeURIComponent(peer));
-    if ($("ch-peer").value !== peer) return; // switched peers while loading — do not paint A's thread under B
+    if (gen !== chGen || $("ch-peer").value !== peer) return; // superseded, or peer changed
     chRender(t.messages);
     $("ch-status").textContent = "";
-  } catch (e) { if ($("ch-peer").value === peer) $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
+  } catch (e) { if (gen === chGen && $("ch-peer").value === peer) $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
 }
 async function chSend() {
   const peer = $("ch-peer").value, text = $("ch-text").value;
   if (!peer || !text.trim()) return;
   $("ch-send").disabled = true;
-  try { await cxPost("/api/chat/send", { peer: peer, text: text }); $("ch-text").value = ""; await chLoad(); }
-  catch (e) { $("ch-status").textContent = "send failed: " + (e.message ?? e); }
+  try {
+    await cxPost("/api/chat/send", { peer: peer, text: text });
+    // Clear the composer only if it still holds this message for this peer — the
+    // user may have switched peers or started a new draft while the send was in
+    // flight, and that draft must not be erased.
+    if ($("ch-peer").value === peer && $("ch-text").value === text) $("ch-text").value = "";
+    await chLoad();
+  } catch (e) { if ($("ch-peer").value === peer) $("ch-status").textContent = "send failed: " + (e.message ?? e); }
   finally { $("ch-send").disabled = false; }
 }
 async function chAccept() {
@@ -803,7 +837,7 @@ async function chClear() {
   if (!peer) return;
   try { await cxPost("/api/chat/clear", { peer: peer }); await chLoad(); } catch (ignore) {}
 }
-$("ch-peer").addEventListener("change", chOpen);
+$("ch-peer").addEventListener("change", () => chOpen(true));
 $("ch-accept").addEventListener("click", chAccept);
 $("ch-send").addEventListener("click", chSend);
 $("ch-text").addEventListener("keydown", (e) => { if (e.key === "Enter") chSend(); });
