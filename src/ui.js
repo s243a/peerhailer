@@ -545,8 +545,10 @@ async function cxStopNow() {
   cxRes = null;
   $("cx-launch").disabled = false; $("cx-stop").disabled = true;
   $("cx-status").textContent = "stopping…";
-  try { if (lid) await cxPost("/api/compose/stop", { launchId: lid }); } catch (ignore) {}
-  $("cx-status").textContent = "stopped";
+  // Report what actually happened: a failed stop must not read as "stopped",
+  // or a live session looks torn down when it is still running.
+  try { if (lid) await cxPost("/api/compose/stop", { launchId: lid }); $("cx-status").textContent = "stopped"; }
+  catch (e) { $("cx-status").textContent = "stop failed: " + (e.message ?? e); }
 }
 // --- remote control: drive a remote T3 from a local T3 client ---
 let cxRc = null;
@@ -605,8 +607,14 @@ async function fxLoadPeers() {
     $("fx-peer").innerHTML = names.length ? names.map((n) => "<option>" + esc(n) + "</option>").join("") : '<option value="">(no peers)</option>';
   } catch (ignore) {}
 }
-function fxBrowse(op, extra) {
-  return cxPost("/api/files/browse", Object.assign({ peer: $("fx-peer").value, share: $("fx-share").value.trim(), op: op, path: fxPath }, extra || {}));
+// The peer+share+path an operation was started against. Every browse binds to
+// one, so a request that lands after the user has switched peer, share, or
+// directory is neither rendered nor acted on under the wrong target.
+function fxCtx() { return { peer: $("fx-peer").value, share: $("fx-share").value.trim(), path: fxPath }; }
+function fxStale(ctx) { return $("fx-peer").value !== ctx.peer || $("fx-share").value.trim() !== ctx.share; }
+function fxBrowse(op, extra, ctx) {
+  const c = ctx || fxCtx();
+  return cxPost("/api/files/browse", Object.assign({ peer: c.peer, share: c.share, op: op, path: c.path }, extra || {}));
 }
 function fxJoin(a, b) { return a ? (a.replace(/\/+$/, "") + "/" + b) : b; }
 function fxParent(p) { const i = p.replace(/\/+$/, "").lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); }
@@ -614,17 +622,23 @@ async function fxOpen(path) {
   const share = $("fx-share").value.trim();
   if (!$("fx-peer").value || !share) { $("fx-status").textContent = "pick a peer and a share"; return; }
   if (path !== undefined) fxPath = path;
+  const ctx = fxCtx();
   $("fx-status").textContent = "loading…";
   try {
-    const r = await fxBrowse("list");
+    const r = await fxBrowse("list", null, ctx);
+    if (fxStale(ctx)) return; // the target changed while loading — drop this listing
     if (r.error) { $("fx-status").textContent = r.error; return; }
-    fxRender(r.entries || [], r.truncated);
-    $("fx-path").textContent = share + ":/" + fxPath;
+    fxRender(r.entries || [], r.truncated, ctx);
+    $("fx-path").textContent = ctx.share + ":/" + ctx.path;
     $("fx-status").textContent = "";
     $("fx-upload").disabled = false;
   } catch (e) { $("fx-status").textContent = "open failed: " + (e.message ?? e); }
 }
-function fxRender(entries, truncated) {
+function fxClear() {
+  $("fx-list").innerHTML = ""; $("fx-path").textContent = ""; $("fx-status").textContent = "";
+  $("fx-upload").disabled = true; fxPath = "";
+}
+function fxRender(entries, truncated, ctx) {
   const rows = [];
   if (fxPath) rows.push('<div class="fx-row"><span class="fx-name dir" data-nav="' + esc(fxParent(fxPath)) + '">../</span></div>');
   for (const e of entries) {
@@ -635,12 +649,14 @@ function fxRender(entries, truncated) {
   const box = $("fx-list");
   box.innerHTML = rows.join("") || '<div class="muted" style="padding:.3rem">(empty)</div>';
   box.querySelectorAll("[data-nav]").forEach((el) => el.addEventListener("click", () => fxOpen(el.dataset.nav)));
-  box.querySelectorAll("[data-get]").forEach((el) => el.addEventListener("click", () => fxDownload(el.dataset.get)));
+  // Download against the target the row was rendered for, not whatever the peer
+  // and share boxes happen to say now.
+  box.querySelectorAll("[data-get]").forEach((el) => el.addEventListener("click", () => fxDownload(el.dataset.get, ctx)));
 }
-async function fxDownload(path) {
+async function fxDownload(path, ctx) {
   $("fx-status").textContent = "downloading " + path + "…";
   try {
-    const r = await fxBrowse("get", { path: path });
+    const r = await fxBrowse("get", { path: path }, ctx);
     if (r.error || !r.data) { $("fx-status").textContent = r.error || "no data"; return; }
     const bytes = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
     const a = document.createElement("a");
@@ -654,13 +670,15 @@ async function fxDownload(path) {
 async function fxUpload() {
   const f = $("fx-file").files[0];
   if (!f) { $("fx-status").textContent = "choose a file first"; return; }
+  const ctx = fxCtx();
   $("fx-upload").disabled = true;
   $("fx-status").textContent = "uploading " + f.name + "…";
   try {
     const buf = new Uint8Array(await f.arrayBuffer());
     let bin = "";
     for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-    const r = await fxBrowse("put", { path: fxJoin(fxPath, f.name), data: btoa(bin) });
+    const r = await fxBrowse("put", { path: fxJoin(ctx.path, f.name), data: btoa(bin) }, ctx);
+    if (fxStale(ctx)) { $("fx-status").textContent = "uploaded to " + ctx.peer + ":" + ctx.share + " (target since changed)"; return; }
     if (r.error) $("fx-status").textContent = "upload refused: " + r.error;
     else { $("fx-status").textContent = "uploaded " + f.name + " (" + (r.written == null ? "?" : r.written) + " bytes)"; await fxOpen(); }
   } catch (e) { $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
@@ -694,6 +712,10 @@ async function fxLoadMounts() {
 $("fx-open").addEventListener("click", () => fxOpen(""));
 $("fx-upload").addEventListener("click", fxUpload);
 $("fx-mount").addEventListener("click", fxMount);
+// Changing the target abandons the current listing, so no stale row can be
+// clicked to act on a peer/share it was never from.
+$("fx-peer").addEventListener("change", fxClear);
+$("fx-share").addEventListener("input", fxClear);
 fxLoadPeers();
 fxLoadMounts();
 // --- chat: short messages to/from admitted peers (memory only) ---
@@ -747,8 +769,12 @@ async function chOpen() {
   chPeer = peer || null;
   chSealBadge();
   if (!peer) { chRender([]); return; }
-  try { const t = await api("/api/chat/thread?peer=" + encodeURIComponent(peer)); chRender(t.messages); $("ch-status").textContent = ""; }
-  catch (e) { $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
+  try {
+    const t = await api("/api/chat/thread?peer=" + encodeURIComponent(peer));
+    if ($("ch-peer").value !== peer) return; // switched peers while loading — do not paint A's thread under B
+    chRender(t.messages);
+    $("ch-status").textContent = "";
+  } catch (e) { if ($("ch-peer").value === peer) $("ch-status").textContent = "could not open thread: " + (e.message ?? e); }
 }
 async function chSend() {
   const peer = $("ch-peer").value, text = $("ch-text").value;
