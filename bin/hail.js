@@ -30,6 +30,9 @@ import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
 import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
 import { createChatPlugin } from "../src/builtin/chatPlugin.js";
 import { createFilesPlugin } from "../src/builtin/filesPlugin.js";
+import { createRoutePlugin } from "../src/builtin/routePlugin.js";
+import { greedyPolicy, xorDistanceOver } from "../src/routing.js";
+import { createHash } from "node:crypto";
 import { listFiles, getFile, putFile } from "../src/filesClient.js";
 import { createServicePlugin } from "../src/builtin/servicePlugin.js";
 import { createOffersPlugin } from "../src/builtin/offersPlugin.js";
@@ -475,6 +478,31 @@ switch (command) {
     // An inbox is opt-in: someone running a headless relay should not inherit
     // one, same principle as the page.
     const wantsChat = flags.chat === true || stored.chat === true;
+    const wantsRoute = flags.route === true || stored.routing === true;
+    // The routing plugin's deps read the *live* directory and identity, not stored
+    // config, so one builder serves both the start and reload plugin arrays.
+    const routeDeps = () => ({
+      self: identity.publicKey,
+      normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
+      neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
+      isBlocked: (/** @type {string} */ key) => {
+        const nk = normalizeKey(key) ?? key;
+        return (directory.blocklist?.().keys ?? []).some((k) => (normalizeKey(k) ?? k) === nk);
+      },
+      forward: async (/** @type {string} */ peerKey, /** @type {any} */ env) => {
+        const nk = normalizeKey(peerKey) ?? peerKey;
+        const rec = directory.listAdmitted().find((peer) => (normalizeKey(peer.publicKey) ?? peer.publicKey) === nk);
+        if (!rec) return { delivered: false, reason: "unknown peer", spent: 0 };
+        const as = { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey };
+        const r = await callPeer(rec, "/route/relay", env, { as });
+        return r.ok ? r.response : { delivered: false, reason: r.error, spent: 0 };
+      },
+      deliver: (/** @type {any} */ _payload, /** @type {any} */ meta) => {
+        log(`[route] delivered from ${fingerprint(meta.origin)} via ${Math.max(0, (meta.via?.length ?? 1) - 1)} hop(s)`);
+        return { received: true, at: fingerprint(identity.publicKey) };
+      },
+      policy: greedyPolicy({ distance: xorDistanceOver((/** @type {string} */ k) => createHash("sha256").update(k).digest("hex")) }),
+    });
     const plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
@@ -483,6 +511,7 @@ switch (command) {
         : []),
       ...(wantsChat ? [createChatPlugin()] : []),
       ...(Object.keys(declaredShares).length ? [createFilesPlugin({ shares: declaredShares })] : []),
+      ...(wantsRoute ? [createRoutePlugin(routeDeps())] : []),
       ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
       ...(hasLaunchableOffer(declaredServices, tunnels) || hasControllerOffer(declaredCommands, tunnels)
         ? [createOffersPlugin({ services: declaredServices, tunnels, commands: declaredCommands })]
@@ -522,6 +551,7 @@ switch (command) {
       log(`[share] ${name} (needs files:${name}) — ${kind}, ${rw}; encrypted arrival only`);
     }
     if (wantsChat) log(`[chat] on (needs chat)`);
+    if (wantsRoute) log(`[route] on (needs route) — multi-hop relay across admitted peers`);
     // Profiles a plugin suggests have to be known before anyone is asked
     // whether they hold one — bundled plugins included, which is where the
     // `operator` profile comes from.
@@ -564,11 +594,13 @@ switch (command) {
       const nextShells = fresh.shells ?? {};
       const nextShares = fresh.shares ?? {};
       const nextChat = flags.chat === true || fresh.chat === true;
+      const nextRoute = flags.route === true || fresh.routing === true;
       const nextPlugins = [
         hailPlugin,
         createDiagnosticsPlugin(diagnostics),
         ...(nextChat ? [createChatPlugin()] : []),
         ...(Object.keys(nextShares).length ? [createFilesPlugin({ shares: nextShares })] : []),
+        ...(nextRoute ? [createRoutePlugin(routeDeps())] : []),
         ...(Object.keys(nextTunnels).length
           ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
           : []),
@@ -1379,6 +1411,7 @@ switch (command) {
         "  hail shells [add|remove]     an interactive shell a peer may open (remote shell access)",
         "  hail shares [add|remove]     a directory (or http store) a peer may list/get/put, by name",
         "  hail files <peer> <share> <list|get|put> [path] [localfile]   drive a peer's share",
+        "  hail daemon --route          relay multi-hop messages across admitted peers (needs `route`)",
         "  hail gate set-password       gate a local web app behind a password, for a browser",
         "  hail gate serve --target U   serve that app over TLS at --port N (a bastion for e.g. T3)",
         "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
