@@ -22,7 +22,7 @@ import { hostname } from "node:os";
 
 import { createDirectory, reconcilePersist } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
-import { listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
+import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
@@ -344,6 +344,13 @@ switch (command) {
     const until = "until" in flags ? untilFromFlag(flags.until) : null;
     if ("until" in flags && until === null) fail("--until wants a date, or a duration like 7d or 2h");
     if (until && typeof flags.profile !== "string") fail("--until raises a profile: say which with --profile");
+    // Catch a typo'd or unknown profile at the door: an unrecognised name now
+    // grants nothing (fail-closed), so admitting to it silently would strand the
+    // peer. `blocked` is refused with a pointer, since assigning it is not blocking.
+    if (typeof flags.profile === "string" && !isAssignableProfile(flags.profile, stored.profiles)) {
+      if (flags.profile === "blocked") fail("`blocked` is not an assignable profile — use `hail block`");
+      fail(`no profile called ${flags.profile}. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+    }
 
     const admitted = directory.admit(
       {
@@ -397,6 +404,12 @@ switch (command) {
       break;
     }
     if (!TRUST_MODELS[model]) fail(`unknown trust model: ${model}`);
+    // The stranger-default is a profile name resolved at hail time, and a typo
+    // here is worse than a per-peer one: it sets what every unproven caller gets.
+    // Since an unknown name now fails closed, validate it at set time too.
+    if (typeof flags.unknown === "string" && !isAssignableProfile(flags.unknown, stored.profiles)) {
+      fail(`no profile called ${flags.unknown}. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+    }
     // Through the directory, not a stored copy: `persist()` diffs the directory
     // snapshot, so a change made only to `stored.trust` would be overwritten by
     // the snapshot's unchanged trust and silently lost.
@@ -1411,7 +1424,9 @@ switch (command) {
       if (!target) fail("usage: hail profiles remove <name>");
       stored.profiles = removeProfile(stored.profiles ?? {}, target);
       persist();
-      log(`profile ${target} removed; peers holding it fall back to the default`);
+      // Not "fall back to the default": an unresolved name now fails closed, so
+      // holders are granted nothing until reassigned (and are shown parked).
+      log(`profile ${target} removed; peers holding it are now granted nothing until reassigned`);
       break;
     }
     if (action === "reject") {

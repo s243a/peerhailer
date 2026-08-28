@@ -35,6 +35,7 @@ import {
   DIRECTORY,
   DIAGNOSTICS,
   HAIL,
+  isAssignableProfile,
   listProfiles,
   rejectionFor,
 } from "./profiles.js";
@@ -1015,6 +1016,13 @@ export function createDaemon({
 
       if (scope === "control" && url.pathname === "/api/peers" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
+        // An unrecognised profile now fails closed (grants nothing), so admitting
+        // to one silently would strand the peer — reject it at the door instead.
+        if (typeof body?.profile === "string" && !isAssignableProfile(body.profile, profiles)) {
+          return send(response, 400, {
+            error: body.profile === "blocked" ? "`blocked` is not assignable — use the block control" : `no profile called ${body.profile}`,
+          });
+        }
         const admitted = change((peers) =>
           peers.admit(body, ...(typeof body?.profile === "string" ? [{ profile: body.profile }] : [])),
         );
