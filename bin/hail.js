@@ -281,6 +281,27 @@ const describe = (peer) => {
 };
 
 /**
+ * The custom profiles a *running daemon* resolves against but a bare CLI directory
+ * does not: those an **external** plugin suggests. A plain CLI directory knows
+ * built-ins + stored custom, so a peer assigned an external plugin's profile
+ * falsely reads as `⚠ parked` and its `--reassign` is falsely refused — which
+ * trains the operator to ignore the marker. Bundled plugins add only built-in
+ * profiles (folded in everywhere by `listProfiles`/`isAssignableProfile`/
+ * `useProfiles`), so only the configured external plugins need loading — done the
+ * same way `hail plugins` reports them. Memoised; `loadPlugins([])` is instant, so
+ * a config with no external plugins pays nothing.
+ *
+ * @returns {Promise<Record<string, any>>}
+ */
+let resolvableProfilesMemo = null;
+async function resolvableProfiles() {
+  if (resolvableProfilesMemo) return resolvableProfilesMemo;
+  const external = await loadPlugins(stored.plugins ?? [], { log: () => {} });
+  resolvableProfilesMemo = { ...collectProfiles(external), ...(stored.profiles ?? {}) };
+  return resolvableProfilesMemo;
+}
+
+/**
  * Read a password without it landing in argv or shell history. In order of
  * preference: a `--password-file`, then piped stdin, then a hidden interactive
  * prompt. Never a command-line flag — an argument is visible in `ps` and saved
@@ -336,6 +357,9 @@ switch (command) {
   }
 
   case "peers": {
+    // Resolve against the same profiles a running daemon would, so a peer on an
+    // external plugin's suggested profile is not falsely shown as parked.
+    directory.useProfiles(await resolvableProfiles());
     const admitted = directory.listAdmitted();
     log(admitted.length ? "admitted:" : "admitted: none");
     for (const peer of admitted) log(`  ${describe(peer)}`);
@@ -365,9 +389,15 @@ switch (command) {
     // Catch a typo'd or unknown profile at the door: an unrecognised name now
     // grants nothing (fail-closed), so admitting to it silently would strand the
     // peer. `blocked` is refused with a pointer, since assigning it is not blocking.
-    if (typeof flags.profile === "string" && !isAssignableProfile(flags.profile, stored.profiles)) {
-      if (flags.profile === "blocked") fail("`blocked` is not an assignable profile — use `hail block`");
-      fail(`no profile called ${flags.profile}. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+    if (typeof flags.profile === "string") {
+      const resolvable = await resolvableProfiles(); // includes external plugin profiles
+      if (!isAssignableProfile(flags.profile, resolvable)) {
+        if (flags.profile === "blocked") fail("`blocked` is not an assignable profile — use `hail block`");
+        fail(`no profile called ${flags.profile}. Known: ${listProfiles(resolvable).map((p) => p.name).join(", ")}`);
+      }
+      // So the admitted-peer line below resolves an external plugin's profile
+      // rather than falsely reporting it parked.
+      directory.useProfiles(resolvable);
     }
 
     const admitted = directory.admit(
@@ -431,8 +461,8 @@ switch (command) {
     // The stranger-default is a profile name resolved at hail time, and a typo
     // here is worse than a per-peer one: it sets what every unproven caller gets.
     // Since an unknown name now fails closed, validate it at set time too.
-    if (typeof flags.unknown === "string" && !isAssignableProfile(flags.unknown, stored.profiles)) {
-      fail(`no profile called ${flags.unknown}. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+    if (typeof flags.unknown === "string" && !isAssignableProfile(flags.unknown, await resolvableProfiles())) {
+      fail(`no profile called ${flags.unknown}. Known: ${listProfiles(await resolvableProfiles()).map((p) => p.name).join(", ")}`);
     }
     // Through the directory, not a stored copy: `persist()` diffs the directory
     // snapshot, so a change made only to `stored.trust` would be overwritten by
@@ -1443,8 +1473,9 @@ switch (command) {
         fail(`${target} is still assigned to: ${holders.map(label).join(", ")} — reassign them with --reassign <profile>, or --force to leave them granted nothing`);
       }
       if (reassign) {
-        if (!isAssignableProfile(reassign, stored.profiles)) {
-          fail(`no profile called ${reassign} to reassign to. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+        const resolvable = await resolvableProfiles(); // so reassigning to an external plugin profile is not falsely refused
+        if (!isAssignableProfile(reassign, resolvable)) {
+          fail(`no profile called ${reassign} to reassign to. Known: ${listProfiles(resolvable).map((p) => p.name).join(", ")}`);
         }
         for (const h of holders) directory.admit({ name: h.name }, { profile: reassign });
       }

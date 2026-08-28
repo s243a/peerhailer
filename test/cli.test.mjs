@@ -133,3 +133,33 @@ test("a daemon boots with a tunnel declared — the port-in-TDZ crash stays fixe
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a peer on an external plugin's profile is neither falsely parked nor falsely refused", async () => {
+  // The bare CLI knows built-ins + stored custom, but not what an external plugin
+  // suggests. Without loading the configured plugin, a peer assigned its profile
+  // reads as parked and its assignment is refused — a false marker that trains the
+  // operator to ignore real ones. `resolvableProfiles()` loads the plugin like the
+  // daemon does, so the CLI resolves the same set.
+  const dir = mkdtempSync(join(tmpdir(), "peerhailer-extprof-"));
+  const state = join(dir, "directory.json");
+  const plugin = new URL("./fixtures/profilePlugin.mjs", import.meta.url).href; // suggests `fieldtech`
+  try {
+    await hail(state, ["name", "host"]);
+    assert.equal((await hail(state, ["plugins", "add", plugin])).code, 0);
+
+    // Assigning the plugin's profile succeeds (was: "no profile called fieldtech").
+    const added = await hail(state, ["add", "sensor", "10.0.0.9:7645", "--profile", "fieldtech"]);
+    assert.equal(added.code, 0, added.out);
+    assert.doesNotMatch(added.out, /parked/, "the add output does not falsely park a plugin profile");
+
+    // And it is not shown parked in `hail peers`.
+    const peers = await hail(state, ["peers"]);
+    assert.match(peers.out, /sensor.*\[fieldtech\]/);
+    assert.doesNotMatch(peers.out, /sensor.*parked/, "a plugin-profile peer is not falsely parked");
+
+    // Fail-closed is intact: a genuinely-unknown profile is still refused.
+    assert.notEqual((await hail(state, ["add", "z", "10.0.0.1:1", "--profile", "nope"])).code, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
