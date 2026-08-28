@@ -1204,6 +1204,12 @@ export function createDaemon({
       }
       if (state) directory.adopt(state);
       log(`[daemon] reloaded: ${pluginRoutes.size} routes, ${Object.keys(profiles).length} profiles`);
+      // A reload rebuilds plugin instances, so their in-memory state is reset —
+      // most notably the chat replay-guard nonce cache and the command-history
+      // buffer. Say so, since a security control resetting unremarked is the kind
+      // of thing this project treats as the worst kind. (A later change can keep
+      // instances whose config is unchanged; until then a reload is a reset.)
+      if (Array.isArray(nextPlugins)) log(`[daemon]          plugin in-memory state reset (chat replay guard, command history)`);
       return { routes: pluginRoutes.size, profiles: Object.keys(profiles).length };
     },
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */

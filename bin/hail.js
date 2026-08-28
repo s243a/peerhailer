@@ -24,35 +24,15 @@ import { createDirectory, reconcilePersist } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
-import { createDiagnosticsPlugin } from "../src/builtin/diagnosticsPlugin.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
-import { createTunnelPlugin } from "../src/builtin/tunnelPlugin.js";
-import { createCommandPlugin } from "../src/builtin/commandPlugin.js";
-import { createChatPlugin } from "../src/builtin/chatPlugin.js";
-import { createFilesPlugin } from "../src/builtin/filesPlugin.js";
-import { createRoutePlugin } from "../src/builtin/routePlugin.js";
 import { greedyPolicy, xorDistanceOver } from "../src/routing.js";
 import { createHash } from "node:crypto";
 import { listFiles, getFile, putFile } from "../src/filesClient.js";
-import { createServicePlugin } from "../src/builtin/servicePlugin.js";
-import { createOffersPlugin } from "../src/builtin/offersPlugin.js";
 
-/** True when any declared service is a launchable offer with a matching tunnel. */
-function hasLaunchableOffer(services, tunnels) {
-  return Object.entries(services ?? {}).some(
-    ([name, decl]) =>
-      decl && typeof decl === "object" && (decl.agent || decl.role) && (tunnels ?? {})[decl.tunnel ?? name] !== undefined,
-  );
-}
-
-/** A T3-to-T3 controller offer: a `pair` command and a `t3` tunnel, by convention. */
-function hasControllerOffer(commands, tunnels) {
-  return Boolean((commands ?? {}).pair && (tunnels ?? {}).t3);
-}
-import { createShellPlugin } from "../src/builtin/shellPlugin.js";
 import { openShell, sendShell, pollShell, closeShell, execShell } from "../src/shellClient.js";
 import { openTunnel, sendTunnel, pollTunnel, closeTunnel, pipeTunnel, forwardTunnel } from "../src/tunnelClient.js";
-import { collectProfiles, collectRoutes, loadPlugins } from "../src/plugins.js";
+import { collectProfiles, collectRoutes, loadPlugins, mergeProfiles } from "../src/plugins.js";
+import { buildRuntime } from "../src/runtime.js";
 import { TRUST_MODELS } from "../src/trust.js";
 import { walk, callPeer } from "../src/hail.js";
 import { createGate, hashPassword, newSecret } from "../src/gate.js";
@@ -575,38 +555,16 @@ switch (command) {
       },
       policy: greedyPolicy({ distance: xorDistanceOver((/** @type {string} */ k) => createHash("sha256").update(k).digest("hex")) }),
     });
-    // Rebound by `rebuild()` on reload, so `applyChange`'s profile merge uses the
-    // current plugin set rather than the one from startup — otherwise a reload
-    // that changed the plugins would leave applyChange collecting stale
-    // plugin-suggested profiles into the live directory.
-    let plugins = [
-      hailPlugin,
-      createDiagnosticsPlugin(diagnostics),
-      ...(Object.keys(tunnels).length
-        ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
-        : []),
-      ...(wantsChat ? [createChatPlugin({ identity })] : []),
-      ...(Object.keys(declaredShares).length ? [createFilesPlugin({ shares: declaredShares })] : []),
-      ...(wantsRoute ? [createRoutePlugin(routeDeps())] : []),
-      ...(Object.keys(declaredServices).length ? [createServicePlugin({ services: declaredServices })] : []),
-      ...(hasLaunchableOffer(declaredServices, tunnels) || hasControllerOffer(declaredCommands, tunnels)
-        ? [createOffersPlugin({ services: declaredServices, tunnels, commands: declaredCommands })]
-        : []),
-      ...(Object.keys(declaredShells).length ? [createShellPlugin({ shells: declaredShells })] : []),
-      ...(Object.keys(declaredCommands).length
-        ? [
-            createCommandPlugin({
-              commands: declaredCommands,
-              // How much to remember, and for how long. In memory, so both are
-              // bounded — and settings, because how much you want to know
-              // afterwards is not this project's decision.
-              ...(Number.isFinite(stored.history?.max) ? { maxHistory: stored.history.max } : {}),
-              ...(Number.isFinite(stored.history?.ageMs) ? { historyMs: stored.history.ageMs } : {}),
-            }),
-          ]
-        : []),
-      ...(await loadPlugins(stored.plugins ?? [], { log })),
-    ];
+    // Process flags that can turn a feature on, captured once. `buildRuntime`
+    // ORs them with the current state (a flag can only enable), so a `--chat`
+    // cold start keeps chat across a reload the state file never recorded.
+    const runtimeFlags = Object.freeze({ chat: flags.chat === true, route: flags.route === true });
+    // One builder for the whole runtime (plugins + profiles), from state. `let`
+    // because `rebuild()` advances it after a reload commits, so `applyChange`'s
+    // profile merge uses the plugin set actually in force.
+    const runtimeDeps = { identity, diagnostics, port, routeDeps, flags: runtimeFlags, log };
+    const active = await buildRuntime(stored, runtimeDeps);
+    let plugins = active.plugins;
     for (const [name, value] of Object.entries(tunnels)) {
       const addr = typeof value === "string" ? value : value.address;
       const gated = typeof value === "string" || !value.exitToken ? "" : " (exit token-gated)";
@@ -631,8 +589,7 @@ switch (command) {
     // Profiles a plugin suggests have to be known before anyone is asked
     // whether they hold one — bundled plugins included, which is where the
     // `operator` profile comes from.
-    const profiles = { ...collectProfiles(plugins), ...(stored.profiles ?? {}) };
-    directory.useProfiles(profiles);
+    directory.useProfiles(active.profiles);
     // A window opened at launch still closes itself. `--debug` is for starting
     // a daemon you are about to debug, not for leaving one open.
     if (flags.debug) {
@@ -657,55 +614,21 @@ switch (command) {
     if (allowedOrigins.length) log(`[api] also answering ${allowedOrigins.join(", ")}`);
 
     /**
-     * Rebuild what the daemon serves from the state file as it is now.
-     *
-     * The daemon cannot do this itself: only here knows that `stored.tunnels`
-     * becomes a tunnel plugin and `stored.commands` becomes a command plugin.
+     * Build a candidate runtime from the state file as it is now. Pure: it
+     * constructs plugins and never touches the live daemon — `onReload` commits
+     * the result (advancing the closure `plugins`) only after `daemon.reload`
+     * accepts it, so a failed build or reload leaves the old runtime serving.
      */
     const rebuild = async () => {
       const fresh = loadState(statePath);
-      const nextTunnels = fresh.tunnels ?? {};
-      const nextCommands = fresh.commands ?? {};
-      const nextServices = fresh.services ?? {};
-      const nextShells = fresh.shells ?? {};
-      const nextShares = fresh.shares ?? {};
-      const nextChat = flags.chat === true || fresh.chat === true;
-      const nextRoute = flags.route === true || fresh.routing === true;
-      const nextPlugins = [
-        hailPlugin,
-        createDiagnosticsPlugin(diagnostics),
-        ...(nextChat ? [createChatPlugin({ identity })] : []),
-        ...(Object.keys(nextShares).length ? [createFilesPlugin({ shares: nextShares })] : []),
-        ...(nextRoute ? [createRoutePlugin(routeDeps())] : []),
-        ...(Object.keys(nextTunnels).length
-          ? [createTunnelPlugin({ endpoints: nextTunnels, ownPorts: [Number.isFinite(port) ? port : 8787] })]
-          : []),
-        ...(Object.keys(nextServices).length ? [createServicePlugin({ services: nextServices })] : []),
-        ...(hasLaunchableOffer(nextServices, nextTunnels) || hasControllerOffer(nextCommands, nextTunnels)
-          ? [createOffersPlugin({ services: nextServices, tunnels: nextTunnels, commands: nextCommands })]
-          : []),
-        ...(Object.keys(nextShells).length ? [createShellPlugin({ shells: nextShells })] : []),
-        ...(Object.keys(nextCommands).length ? [createCommandPlugin({ commands: nextCommands })] : []),
-        // The externally-loaded ones too. Dropping them silently on reload
-        // vanishes the profiles they declare, so a peer holding a capability one
-        // of them contributed is refused with nothing said — an operator adding
-        // a tunnel and watching their T3 integration stop answering.
-        ...(await loadPlugins(fresh.plugins ?? [], { log })),
-      ];
-      // Keep the closure's plugin list current, so `applyChange` (which runs
-      // between reloads) merges profiles from the set actually in force.
-      plugins = nextPlugins;
-      return {
-        plugins: nextPlugins,
-        profiles: { ...collectProfiles(nextPlugins), ...(fresh.profiles ?? {}) },
-        state: fresh,
-      };
+      const { plugins: nextPlugins } = await buildRuntime(fresh, runtimeDeps);
+      return { plugins: nextPlugins };
     };
 
     const daemon = createDaemon({
       directory,
       identity,
-      profiles,
+      profiles: active.profiles,
       diagnostics,
       plugins,
       // The fully-closed target-binding state: refuse every hail that does not
@@ -730,7 +653,19 @@ switch (command) {
         command: process.execPath,
         args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
       }),
-      onReload: async () => daemon.reload(await rebuild()),
+      onReload: async () => {
+        // Build (async, unlocked) then commit (synchronous). Re-read state at
+        // commit so a profile change that landed during the build is reflected —
+        // deriving profiles from the build-time state would resurrect a just-
+        // removed one (fail open). Advance the closure `plugins` only after
+        // `daemon.reload` accepts, in the same call stack, so a throw leaves it
+        // on the old set and no handler observes a half-swapped runtime.
+        const { plugins: nextPlugins } = await rebuild();
+        const freshState = loadState(statePath);
+        const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, freshState), state: freshState });
+        plugins = nextPlugins;
+        return result;
+      },
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
       // so a change made at a terminal is not discarded by the next save here.
@@ -740,7 +675,7 @@ switch (command) {
           statePath,
           (onDisk) => {
             const fresh = createDirectory({ ...onDisk, profiles: onDisk.profiles ?? {} });
-            fresh.useProfiles({ ...collectProfiles(plugins), ...(onDisk.profiles ?? {}) });
+            fresh.useProfiles(mergeProfiles(plugins, onDisk));
             result = mutate(fresh);
             return { ...onDisk, ...fresh.snapshot() };
           },
@@ -752,8 +687,8 @@ switch (command) {
         // knowable here, where the plugins are. Without this a profile removed or
         // renamed at another terminal never reaches this running daemon: it keeps
         // resolving the stale name (granting), and the parked surface stays blank,
-        // until a restart. Same merge as startup and `rebuild`.
-        directory.useProfiles({ ...collectProfiles(plugins), ...(next.profiles ?? {}) });
+        // until a restart. Same `mergeProfiles` recipe as startup and reload.
+        directory.useProfiles(mergeProfiles(plugins, next));
         return result;
       },
       log,

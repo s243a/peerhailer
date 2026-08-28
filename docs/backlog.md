@@ -88,9 +88,9 @@ roadmap is shared, not scattered across PR threads.
   pointing at the old object — **mutate the existing `self` in place, or use an internal `let` + an
   API getter.** Adopt name/address changes, but **runtime identity stamping (signing + sealing public
   keys) must win** over the persisted `state.self` copies. `directory.js`.
-- **TODO** — `[fable]` **Reload rebuilds the command plugin without its history settings.** One-line
-  fix now; subsumed by the `buildRuntime` extraction later. Its own concern — **do not bundle with
-  `adopt(self)`** (different cause and invariants). `bin/hail.js`.
+- **DONE (#29, via buildRuntime)** — `[fable]` Reload rebuilt the command plugin without its
+  history settings. `buildRuntime` now reads `maxHistory`/`historyMs` from the supplied
+  `state.history`, so a reload preserves the operator's audit limits.
 - **TODO** — `[sol, split from #12]` **Atomic validate-before-adopt.** `adopt()` clears live maps
   before validating the incoming shape — normalise into temporaries and swap only once valid. (The
   general immutable-read-views part is Phase 4.) `directory.js`.
@@ -113,8 +113,17 @@ roadmap is shared, not scattered across PR threads.
 
 ## Phase 4 — structural refactors (larger; each its own PR)
 
-- **TODO** — `[sol]` **One `buildRuntime(state)`** for startup and reload (subsumes the reload-history
-  fix). `bin/hail.js`, `server.js`.
+- **DONE (#29)** — `[sol, extended by kimi]` **One `buildRuntime(state)`** for startup and reload.
+  Extracted to `src/runtime.js` (testable): builds `{plugins, profiles}` from state, one canonical
+  plugin order, command-history from `state.history`, `mergeProfiles` shared with `applyChange`.
+  `rebuild()` is pure; `onReload` commits after `daemon.reload` accepts and **re-derives profiles
+  from a fresh state read at commit** (closes a fail-open race Kimi found where a profile removed
+  during the async build would resurrect). Removes the plugin-order + history + profile-copy drift.
+  Follow-ups: (a) **fingerprint-keep** — reload preserves plugin instances whose config is unchanged,
+  so a `tunnels add` reload doesn't wipe the chat replay-guard nonce cache or command history
+  (Kimi's Q5; the reload now *logs* that reset in the meantime); (b) the CLI's profile set still
+  lacks *external* plugin suggestions (bundled ones are all built-ins, so no false parked marker
+  today) — the deferred CLI-visibility item.
 - **TODO** — `[sol]` **Typed request errors — scope-sensitive.** A shared `readJson(request)` throws
   typed errors; map them **by scope**: control API → 400 malformed / 413 oversize / 500 unexpected;
   hail/plugin routes **preserve** the existing 404/drop concealment (they deliberately conceal route
@@ -159,6 +168,16 @@ roadmap is shared, not scattered across PR threads.
 - `[fable, from #27 review]` `composer.closeAll` does `void stop(id)` on async teardown; the one
   unguarded call inside (`entry.gate?.close()`, `composer.js:294`) could surface as an unhandled
   rejection (process-fatal under default Node) on shutdown. Guard it. Marginal.
+- `[fable, from #29 review]` `loadState` returns `{}` on a read failure (never throws), so a
+  transiently-unreadable state file at a reload's commit degrades to a near-empty runtime and
+  `adopt({})` clears the admitted peers — fail-closed and near-unreachable (atomic-rename writes +
+  lock), but "failed read keeps the old runtime" isn't literally true. Guard the reload commit
+  against an empty re-read. Related: the `try/catch` around `loadState` in `gateConfig`
+  (`bin/hail.js`) is dead code (loadState can't throw). Both pre-existing.
+- `[kimi #26 / fable #29]` The CLI builds its profile set from `stored.profiles` + built-ins only
+  (no plugin suggestions), so a profile suggested *only by an external plugin* is unassignable via
+  the CLI while the daemon/page accept it. Fail-closed (refuses, never grants) and bundled profiles
+  are all built-ins, so no false parked marker today. The deferred CLI-visibility item.
 
 ## Test gaps to pin
 
