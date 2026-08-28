@@ -189,8 +189,10 @@ roadmap is shared, not scattered across PR threads.
   also deeply frozen, so a stray mutation is *loud* (throws in strict mode) rather than silently lost.
   `deepFreeze` only ever touches a fresh clone — never a live record, which `commit` still mutates.
   `mergeByRevision` is pure, so a frozen snapshot flows through the persist path untouched; the whole
-  suite passed unchanged, confirming no consumer mutated a read view. Test in `test/directory.test.mjs`.
-  (Mutator returns like `admit`'s are out of scope — the item is read getters.) `directory.js`.
+  suite passed unchanged, confirming no consumer mutated a read view. `trust()`/`setTrust()` (a Fable
+  follow-up — their `{...trust}` left `settings` live) now return read views too. Test in
+  `test/directory.test.mjs`. (Mutator returns like `admit`'s are out of scope — the item is read
+  getters.) `directory.js`.
 
 ## Phase 5 — deferred feature work
 

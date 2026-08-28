@@ -341,4 +341,10 @@ test("read views are immutable — mutating what a getter returns cannot corrupt
   // currentProfiles is a frozen view too — a caller can't rewrite the live set.
   const profs = dir.currentProfiles();
   assert.throws(() => { profs.ops.allows.push("directory"); }, TypeError);
+
+  // trust() is a frozen view too — its nested settings object can't be rewritten.
+  dir.setTrust({ settings: { vouchesRequired: 2 } });
+  const t = dir.trust();
+  assert.throws(() => { t.settings.vouchesRequired = 99; }, TypeError);
+  assert.equal(dir.trust().settings.vouchesRequired, 2, "the live trust settings are untouched");
 });

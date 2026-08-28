@@ -975,8 +975,9 @@ export function createDirectory(state = {}) {
       // actually holds *this process*; a persisted `self` copy must never override
       // them, or a stale/wrong key in the file would have us advertise a key we
       // cannot sign or seal for. `self` is mutated in place, not reassigned: it is
-      // handed out by reference through `api.self` and `snapshot().self`, so a new
-      // object would leave every existing reader pointing at the old name.
+      // handed out by reference through `api.self`, so a new object would leave
+      // every existing reader pointing at the old name. (`snapshot().self` is a
+      // frozen read-view clone, so it never carried this live-reference contract.)
       if (incomingSelf) {
         const { publicKey, sealPublicKey } = self;
         Object.assign(self, incomingSelf);
@@ -1142,7 +1143,7 @@ export function createDirectory(state = {}) {
       };
     },
     blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
-    trust: () => ({ ...trust }),
+    trust: () => readView({ ...trust }),
     /**
      * Change the trust policy through the directory, so a `snapshot()` reflects
      * it. A caller that mutated a stored copy instead would have the change
@@ -1155,7 +1156,7 @@ export function createDirectory(state = {}) {
       if (typeof patch?.model === "string") trust.model = patch.model;
       if (patch?.settings) trust.settings = patch.settings;
       if (typeof patch?.unknownProfile === "string") trust.unknownProfile = patch.unknownProfile;
-      return { ...trust };
+      return readView({ ...trust });
     },
     listAdmitted: () => readView([...admitted.values()]),
     listCandidates: () =>
