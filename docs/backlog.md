@@ -38,14 +38,14 @@ roadmap is shared, not scattered across PR threads.
   - Note: this **reverses a documented availability choice** — missing profiles used to preserve
     connectivity; they now revoke capabilities, visibly.
   Ships as one trust-semantics PR (validation + resolution + removal + migration + tests).
-- **TODO** — `[kimi, from #26 review]` **A profile removal/rename never reaches a running
-  daemon.** `adopt()` refreshes admitted/candidates/blocklist/trust but **not** `profileSet`
-  (`useProfiles` runs once at startup), so after `profiles remove X` the daemon keeps
-  resolving `X` and `/api/peers` reports `parked: null` until restart — the fail-closed core
-  (#24) and the parked surface (#26) both go stale. Fix: re-apply the **merged** (stored +
-  plugin-suggested) profile set in `adopt`/`applyChange` — not just `useProfiles(state.profiles)`,
-  which would drop plugin profiles. Overlaps the `buildRuntime` extraction. **Should land
-  before profile management is used against long-running daemons.** `directory.js`, wiring.
+- **DONE (#28)** — `[kimi, from #26 review]` **A profile removal/rename never reached a running
+  daemon.** `adopt()` refreshed admitted/candidates/blocklist/trust but not `profileSet`, so
+  after `profiles remove X` the daemon kept resolving `X` (granting) and `/api/peers` reported
+  `parked: null` until restart. Fixed: `applyChange` re-applies the **merged** (built-ins +
+  plugin-suggested + stored) set via `useProfiles` after `adopt` — so a mutation at another
+  terminal reaches this daemon on its next change (the `/api/reload` path already applied the
+  merged set through `reload`). `adopt`'s doc now states it deliberately leaves `profileSet`
+  alone because the plugin half is only known to the host. Contract test added.
 - **TODO** — `[kimi, from #26 review]` **CLI parked markers are false for plugin-suggested
   profiles.** The CLI never loads plugins, so its `profileSet` = built-ins + stored custom; a
   peer on a plugin-suggested profile shows `⚠ parked` in `hail peers` and its `--reassign` is

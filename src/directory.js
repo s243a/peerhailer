@@ -851,6 +851,11 @@ export function createDirectory(state = {}) {
      * it the page would keep showing what was true before the change it just
      * made.
      *
+     * Deliberately does *not* touch the profile set: the resolvable profiles are
+     * built-ins + plugin-suggested + stored, and the plugin half is only known to
+     * the host, not here. The caller (`applyChange`/`reload`) re-applies the
+     * merged set via `useProfiles` after adopting — see the note there.
+     *
      * @param {any} state
      */
     adopt: (state) => {

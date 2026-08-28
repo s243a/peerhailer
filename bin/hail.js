@@ -740,6 +740,13 @@ switch (command) {
           { log },
         );
         directory.adopt(next);
+        // Re-apply the profile set too — `adopt` deliberately leaves it alone
+        // because the merged (built-ins + plugin-suggested + stored) set is only
+        // knowable here, where the plugins are. Without this a profile removed or
+        // renamed at another terminal never reaches this running daemon: it keeps
+        // resolving the stale name (granting), and the parked surface stays blank,
+        // until a restart. Same merge as startup and `rebuild`.
+        directory.useProfiles({ ...collectProfiles(plugins), ...(next.profiles ?? {}) });
         return result;
       },
       log,
