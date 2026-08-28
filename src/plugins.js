@@ -264,3 +264,17 @@ export function collectProfiles(plugins) {
   }
   return profiles;
 }
+
+/**
+ * The resolvable custom profile set: what the plugins suggest, overlaid by the
+ * operator's stored profiles (operator config always wins). One recipe for this
+ * precedence, shared by every site that builds it (startup, reload commit, and
+ * the per-mutation refresh) so they cannot drift. Synchronous, so the reload
+ * commit section — which must not `await` — can call it.
+ *
+ * @param {import("./plugins.js").Plugin[]} plugins
+ * @param {{ profiles?: Record<string, any> } | undefined | null} state
+ */
+export function mergeProfiles(plugins, state) {
+  return { ...collectProfiles(plugins), ...(state?.profiles ?? {}) };
+}
