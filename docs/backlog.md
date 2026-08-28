@@ -133,8 +133,11 @@ roadmap is shared, not scattered across PR threads.
 - **TODO** — `[fable]` `refresh()` replaces `#peers` innerHTML every 5s, closing a profile `<select>`
   open mid-choice. Skip the repaint when `document.activeElement` is inside the table — the focus
   check must run **immediately before** the replacement. `ui.js`.
-- **TODO** — `[fable]` `/api/chat/send` doesn't pre-check `MAX_MESSAGE`; an oversized non-UI send
-  round-trips and returns a generic error. Check locally and say why. `server.js`.
+- **DONE** — `[fable]` `/api/chat/send` didn't pre-check `MAX_MESSAGE`; an oversized non-UI send
+  round-tripped and came back as a concealed generic 502. Fixed: the route now imports the receiver's
+  `MAX_MESSAGE` and rejects `text.length > MAX_MESSAGE` locally with a 400 naming the limit (same `>`
+  boundary as the peer, so parity is exact). Test in `test/chatSealed.test.mjs` (400-with-limit, not a
+  502 round-trip; the boundary length itself passes). `server.js`.
 
 ## Phase 4 — structural refactors (larger; each its own PR)
 
