@@ -297,10 +297,18 @@ export function createDirectory(state = {}) {
     const asName = (/** @type {any} */ value) => (typeof value === "string" ? value : undefined);
     const requestedProfile = asName(profile) ?? asName(peer?.profile);
     // What it reverts to is captured now, while we still know what it was
-    // raised from. Working it out at expiry means guessing months later.
+    // raised from. Working it out at expiry means guessing months later. When the
+    // peer is *already* elevated (a live, unlapsed raise), the base to revert to
+    // is the one it would have fallen back to — `existing.profileAfter` — not its
+    // currently-elevated profile: re-elevating or extending a raise must not turn
+    // it permanent by capturing the raised profile as the revert target.
+    const revertBase =
+      existing?.profileUntil && existing.profileUntil > now()
+        ? existing.profileAfter
+        : asOfNow(existing)?.profile;
     const elevation =
       until && requestedProfile
-        ? { profileUntil: until, profileAfter: asOfNow(existing)?.profile ?? fallback ?? DEFAULT_PROFILE }
+        ? { profileUntil: until, profileAfter: revertBase ?? fallback ?? DEFAULT_PROFILE }
         : // An explicit permanent profile (a profile with no `until`) is a
           // deliberate set, so it clears any temporary elevation — otherwise the
           // peer would later revert off a profile a person just chose for good.

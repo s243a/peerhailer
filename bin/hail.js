@@ -1439,15 +1439,17 @@ switch (command) {
       if (listProfiles(stored.profiles).find((p) => p.name === target)?.builtIn) {
         fail(`${target} is a built-in profile and cannot be removed`);
       }
+      if (!(target in (stored.profiles ?? {}))) fail(`no custom profile called ${target}`);
       const reassign = typeof flags.reassign === "string" ? flags.reassign : null;
       if (reassign === target) fail(`cannot reassign to ${target} while removing it`);
+      const forced = flags.force === true || flags.force === "true";
       // Removing a profile out from under its holders would silently park them
       // (granted nothing) — the surprise the fail-closed resolver exists to make
       // loud. Refuse while it is assigned, unless a person says how: `--reassign
       // <profile>` moves the holders, `--force` parks them knowingly. Holders
       // include peers currently elevated *away* from it (they revert to it later).
       const holders = directory.holdersOf(target);
-      if (holders.length && !reassign && flags.force !== true) {
+      if (holders.length && !reassign && !forced) {
         const label = (h) => (directory.effectiveProfile(h.name).profile === target ? h.name : `${h.name} (reverts to it on lapse)`);
         fail(`${target} is still assigned to: ${holders.map(label).join(", ")} — reassign them with --reassign <profile>, or --force to leave them granted nothing`);
       }

@@ -58,6 +58,17 @@ test("holdersOf catches a peer elevated AWAY from the profile (it would park at 
   assert.deepEqual(dir.holdersOf("lowpriv").map((p) => p.name), ["alice"], "the scheduled holder is not missed at removal time");
 });
 
+test("extending a live elevation keeps the original revert target, not the raised profile", () => {
+  const dir = withLowpriv();
+  const key = generateIdentity().publicKey;
+  dir.admit({ name: "c", publicKey: key, addresses: addr }, { profile: "trusted" }); // base
+  dir.admit({ name: "c", publicKey: key, addresses: addr }, { profile: "known", until: Date.now() + 1_000_000 }); // raise
+  assert.equal(dir.get("c").profileAfter, "trusted", "first raise reverts to the base");
+  // Extend the raise while it is still live — must NOT capture the raised profile.
+  dir.admit({ name: "c", publicKey: key, addresses: addr }, { profile: "known", until: Date.now() + 2_000_000 });
+  assert.equal(dir.get("c").profileAfter, "trusted", "extension keeps the base, so a temporary raise stays temporary");
+});
+
 test("an explicit permanent re-admit clears a live elevation (so --reassign is permanent)", () => {
   const dir = withLowpriv();
   const key = generateIdentity().publicKey;
