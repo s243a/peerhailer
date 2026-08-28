@@ -99,11 +99,13 @@ roadmap is shared, not scattered across PR threads.
 
 ## Phase 2 — correctness
 
-- **TODO** — `[fable]` **`adopt()` ignores `state.self`**, so `hail name` + reload keeps signing the
-  old name. Note the reference trap: making `self` a `let` and reassigning it leaves `api.self`
-  pointing at the old object — **mutate the existing `self` in place, or use an internal `let` + an
-  API getter.** Adopt name/address changes, but **runtime identity stamping (signing + sealing public
-  keys) must win** over the persisted `state.self` copies. `directory.js`.
+- **DONE** — `[fable]` **`adopt()` ignores `state.self`**, so `hail name` + reload kept signing the
+  old name. Fixed: `adopt` now `Object.assign(self, makePeerRecord(state.self), {publicKey, sealPublicKey})`
+  — adopting the renamed name/addresses while the running daemon's signing + sealing public keys win
+  over any persisted copy. `self` is mutated **in place** (not reassigned), avoiding the reference
+  trap: it is handed out by reference via `api.self` and `snapshot().self`, so a new object would
+  strand every existing reader on the old name. Regression tests in `test/directory.test.mjs` (rename
+  adopted, identity keys preserved, same object reference, and no-self leaves self untouched).
 - **DONE (#29, via buildRuntime)** — `[fable]` Reload rebuilt the command plugin without its
   history settings. `buildRuntime` now reads `maxHistory`/`historyMs` from the supplied
   `state.history`, so a reload preserves the operator's audit limits.

@@ -207,6 +207,29 @@ test("adopting state carries the trust defaults, not just the peers", () => {
   assert.equal(directory.trust().admitProfile, "trusted", "unset fields keep their value");
 });
 
+test("adopting a renamed self takes the new name but keeps the running identity keys", () => {
+  const directory = createDirectory({ self: { name: "olduname", publicKey: "PK", sealPublicKey: "SK" } });
+  const selfRef = directory.self; // the object handed out by reference — must stay the same object
+  assert.equal(directory.self.name, "olduname");
+
+  // A `hail name` renamed us on disk; the persisted self even carries a stale key
+  // a slow writer might have (identity keys are the daemon's, not the file's).
+  directory.adopt({ admitted: [], candidates: [], self: { name: "newuname", publicKey: "STALE", sealPublicKey: "STALE-SEAL" } });
+
+  assert.equal(directory.self.name, "newuname", "the rename is adopted (was the bug: reload kept the old name)");
+  assert.equal(directory.self.publicKey, "PK", "the running signing key wins over the persisted copy");
+  assert.equal(directory.self.sealPublicKey, "SK", "the running sealing key wins too");
+  assert.equal(directory.self, selfRef, "self is mutated in place, so every existing reader sees the new name");
+  assert.equal(directory.snapshot().self.name, "newuname", "the snapshot reflects it");
+});
+
+test("adopting state without a self leaves the running self untouched", () => {
+  const directory = createDirectory({ self: { name: "me", publicKey: "PK" } });
+  directory.adopt({ admitted: [], candidates: [] }); // no self key
+  assert.equal(directory.self.name, "me", "no self in the incoming state is not a rename to nothing");
+  assert.equal(directory.self.publicKey, "PK");
+});
+
 test("an address you can type is an address that can be dialled", () => {
   const directory = createDirectory({ self: { name: "me" } });
   // People type host:port. Stored values are used as a URL base, so without
