@@ -36,7 +36,14 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
-      - run: npm test
+      # `timeout`, not only the job-level `timeout-minutes`: a job the latter
+      # cancels keeps no log, so a hung suite stays undiagnosable. A shell timeout
+      # instead *fails* the step (exit 124) with its output retained — so the TAP
+      # progress up to the point it wedged is there to read, and a completed
+      # "# pass" with the process still not exiting (an open-handle leak) reads
+      # differently from a test stuck mid-run. The suite runs in seconds; 300s is
+      # pure hang margin, and sits under `timeout-minutes` so this trips first.
+      - run: timeout 300 npm test
       - run: npm run typecheck
 
   # Kimi's earlier review found the package shipped no usable declarations —
