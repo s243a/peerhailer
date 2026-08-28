@@ -56,16 +56,15 @@ roadmap is shared, not scattered across PR threads.
   enough until a built-in is actually renamed; the day one is, every record holding the old
   name parks at upgrade. Any release that renames a built-in must ship a one-line migration
   map applied on load. Checklist item, gated on "a built-in is renamed".
-- **TODO** — `[sol]` **Resource lifecycle.** `close()` never calls plugin `stop()`, so shutdown
-  orphans `shell`/`service`/`tunnel` child processes and tunnels; and `reload()` mutates live
-  refs before validating the replacement. Fix, precisely:
-  - `reload()`: build `nextRoutes`, `nextProfiles`, and validated directory state into **temporaries
-    first**, then **synchronously swap** every live reference, and **only afterward** stop the old
-    plugins. (Assigning `plugins = nextPlugins` before `collectRoutes()` repeats the partial-swap.)
-    Awaiting teardown *after* the synchronous swap is fine — the dangerous await is before/during it.
-    Teardown catches sync throws *and* rejections (`Promise.allSettled`).
-  - `close()`: stop listeners first, then plugins (best-effort), then composer/mounts.
-  One plugin/resource-lifecycle PR.
+- **DONE (#27)** — `[sol]` **Resource lifecycle.** `close()` never called plugin `stop()`,
+  orphaning `shell`/`service`/`tunnel` child processes and tunnels on shutdown. Fixed:
+  `close()` stops listeners first, then plugins (`Promise.allSettled`, best-effort), then
+  composer/mounts; `reload()` builds the replacement routes into a temporary, swaps
+  synchronously, then tears down the replaced plugins fire-and-forget (`allSettled`). Note
+  from implementation: `collectRoutes` degrades gracefully (logs-and-skips, never throws) and
+  `reload` is synchronous, so the reload restaging is defensive hardening — the definite bug
+  was `close()`. Tests: close stops plugins, a throwing stop() doesn't block the rest, reload
+  swaps and stops the old set.
 - **TODO** — `[fable, moved from Phase 2]` **Blocking a candidate ignores its key** — a security
   *bypass* (a gossiped-key candidate blocked by name renames back in), so Phase 1. Fix: resolve the
   admitted-or-candidate record and pass it to `directory.block()`, which is already key-first with a
