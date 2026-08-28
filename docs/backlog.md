@@ -180,7 +180,13 @@ roadmap is shared, not scattered across PR threads.
   a `content-length` pre-check so an over-declared body is refused *and answered* (413) rather than the
   socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
   `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
-- **TODO** — `[sol]` **CLI arg parsing** — `node:util.parseArgs` or a per-command schema. `bin/hail.js`.
+- **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The current
+  ad-hoc parser has one real bug (a boolean flag before a positional is misparsed — verified:
+  `hail block --include-key bob` drops the name) and soft edges (no typo rejection, no per-command
+  schema/help). Recommendation is **staged**: (1) a light-touch boolean-flag set now to close the bug,
+  no migration; (2) later, if wanted, per-command schemas over `node:util.parseArgs` (stdlib, zero-dep)
+  for typo rejection + generated help, migrated command-by-command. Awaiting a pick before code.
+  `bin/hail.js`.
 - **DONE** — `[sol, split from #12]` **Immutable read views** — `get`/`getByKey`/`listAdmitted`/
   `listCandidates`/`holdersOf`/`snapshot`/`currentProfiles` handed out live records, so a caller
   mutating one (e.g. `record.addresses.push(...)`) corrupted directory state behind `commit`'s back
