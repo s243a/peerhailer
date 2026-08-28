@@ -920,6 +920,26 @@ export function createDirectory(state = {}) {
         const record = makePeerRecord(peer);
         if (record) candidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
       }
+      // Adopt what a rename or address edit changed about us — but keep the
+      // running daemon's identity. Its signing and sealing public keys are what it
+      // actually holds *this process*; a persisted `self` copy must never override
+      // them, or a stale/wrong key in the file would have us advertise a key we
+      // cannot sign or seal for. `self` is mutated in place, not reassigned: it is
+      // handed out by reference through `api.self` and `snapshot().self`, so a new
+      // object would leave every existing reader pointing at the old name.
+      if (state?.self) {
+        const incoming = makePeerRecord(state.self);
+        if (incoming) {
+          const { publicKey, sealPublicKey } = self;
+          Object.assign(self, incoming);
+          self.publicKey = publicKey;
+          // Restore the runtime seal key, or *remove* it when the daemon holds
+          // none — matching the codebase's key-absence convention rather than
+          // leaving a `sealPublicKey: undefined` own-key an `in` check would trip.
+          if (sealPublicKey === undefined) delete self.sealPublicKey;
+          else self.sealPublicKey = sealPublicKey;
+        }
+      }
       blocklist.names = [...(state?.blocklist?.names ?? [])];
       blocklist.keys = [...(state?.blocklist?.keys ?? [])];
       // Including trust: a running daemon adopting new state was keeping its
