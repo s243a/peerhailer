@@ -170,10 +170,16 @@ roadmap is shared, not scattered across PR threads.
   (Kimi's Q5; the reload now *logs* that reset in the meantime); (b) the CLI's profile set still
   lacks *external* plugin suggestions (bundled ones are all built-ins, so no false parked marker
   today) — the deferred CLI-visibility item.
-- **TODO** — `[sol]` **Typed request errors — scope-sensitive.** A shared `readJson(request)` throws
-  typed errors; map them **by scope**: control API → 400 malformed / 413 oversize / 500 unexpected;
-  hail/plugin routes **preserve** the existing 404/drop concealment (they deliberately conceal route
-  and refusal information). Not a universal "return 400/413". `server.js`.
+- **DONE** — `[sol]` **Typed request errors — scope-sensitive.** Added `readJson(request)` throwing
+  typed `RequestTooLarge` / `MalformedRequest`, replacing the ~13 inline
+  `JSON.parse((await readBody) || "{}")` sites. Mapped **by scope** in the handler's outer catch:
+  control API → **400** malformed / **413** oversize / **500** unexpected (a loopback management
+  surface — a script/page deserves a status it can act on, not a blank 404); hail scope → concealed
+  (`nothingHere`) as before. **Plugin routes conceal on either listener** (their body-read is wrapped
+  to `nothingHere` inline), preserving the deliberate route/refusal concealment. `readBody` also gained
+  a `content-length` pre-check so an over-declared body is refused *and answered* (413) rather than the
+  socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
+  `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
 - **TODO** — `[sol]` **CLI arg parsing** — `node:util.parseArgs` or a per-command schema. `bin/hail.js`.
 - **TODO** — `[sol, split from #12]` **Immutable read views** — getters/snapshots hand out mutable
   records that bypass `commit`. Return **deeply** cloned/frozen views (a shallow spread or a top-level
