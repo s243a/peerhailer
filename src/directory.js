@@ -25,7 +25,22 @@ import {
   publicRecord,
   TARGET_BINDING_VERSION,
 } from "./peerRecord.js";
-import { normalizeKey, sameKey } from "./identity.js";
+import { fingerprint, normalizeKey, sameKey } from "./identity.js";
+
+/**
+ * What `blockPeer` did, honest about what it blocked and why — so a caller can
+ * tell the operator the truth rather than assert an unverified binding.
+ *
+ * @typedef {{
+ *   mode: "verified-key" | "name" | "candidate-name" | "candidate-name+key",
+ *   name: string,
+ *   blockedKey: string | null,
+ *   reportedKey: string | null,
+ *   fingerprint: string | null,
+ *   heardFrom: string[],
+ *   blocklist: { names: string[], keys: string[] },
+ * }} BlockOutcome
+ */
 import {
   allows,
   ADMIT_PROFILE,
@@ -904,10 +919,14 @@ export function createDirectory(state = {}) {
       profileSet = asRecord(custom);
     },
     /**
-     * Deny a peer everything, by key where we have one.
+     * The low-level block: deny exactly the record handed in, key-first.
      *
-     * Blocking by name alone is defeated by renaming, so the key is what is
-     * recorded when there is one — a peer cannot rename its way back in.
+     * For a caller that already holds a key it trusts — an admitted record, a key
+     * lifted from a grant — and wants it blocked as a stable identity. It takes the
+     * record's key on faith, so it must **not** be fed a name an operator typed:
+     * that path may resolve to a candidate's *hearsay* key, and blocking that would
+     * deny whoever really holds it. Operator/name-driven blocking goes through
+     * `blockPeer`, which decides verified-vs-hearsay before any key is touched.
      *
      * @param {{name?: string, publicKey?: string | null}} peer
      */
@@ -919,6 +938,87 @@ export function createDirectory(state = {}) {
       }
       return { names: [...blocklist.names], keys: [...blocklist.keys] };
     },
+    /**
+     * Deny a peer everything by name — by key only when the key is one we can trust.
+     *
+     * A **verified** key (an admitted peer's bound key) is blocked key-first: a
+     * stable identity a rename cannot shed. A **hearsay** key (a candidate's
+     * gossiped `name → key` binding) is *not* promoted to a key block on its own:
+     * a peer naming N→K is evidence of a claim, not that K is N, so key-blocking it
+     * could deny an innocent third party who actually holds K while leaving the
+     * real N free to rename in. So a candidate blocks by name — rename-evadable,
+     * but it lands on the intended target — unless the operator explicitly confirms
+     * the key with `{ includeKey: true }`. The mode is chosen from what we hold
+     * (admitted vs candidate), never inferred from the bare presence of a key, so
+     * an unverified key is never blocked by accident.
+     *
+     * Returns the mode actually taken plus the key involved and its provenance, so
+     * the caller can tell the operator exactly what happened rather than assert a
+     * binding nobody verified.
+     *
+     * @param {string} name
+     * @param {{ includeKey?: boolean }} [options]
+     * @returns {{
+     *   mode: "verified-key" | "name" | "candidate-name" | "candidate-name+key",
+     *   name: string,
+     *   blockedKey: string | null,
+     *   reportedKey: string | null,
+     *   fingerprint: string | null,
+     *   heardFrom: string[],
+     *   blocklist: { names: string[], keys: string[] },
+     * }}
+     */
+    blockPeer: (name, { includeKey = false } = {}) => {
+      const admittedRecord = admitted.get(name) ?? null;
+      const candidate = candidates.get(name) ?? null;
+      const pushName = () => {
+        if (name && !blocklist.names.includes(name)) blocklist.names.push(name);
+      };
+      const pushKey = (/** @type {string} */ key) => {
+        if (key && !blocklist.keys.includes(key)) blocklist.keys.push(key);
+      };
+      /**
+       * @param {"verified-key" | "name" | "candidate-name" | "candidate-name+key"} mode
+       * @param {{ blockedKey?: string | null, reportedKey?: string | null, heardFrom?: string[] }} [extra]
+       */
+      const result = (mode, { blockedKey = null, reportedKey = null, heardFrom = [] } = {}) => ({
+        mode,
+        name,
+        blockedKey,
+        reportedKey,
+        fingerprint: blockedKey || reportedKey ? fingerprint(blockedKey ?? reportedKey ?? "") : null,
+        // A copy: the source is the candidate map's own array, and a caller must
+        // not be able to mutate directory state by editing the outcome it got back.
+        heardFrom: [...heardFrom],
+        blocklist: { names: [...blocklist.names], keys: [...blocklist.keys] },
+      });
+
+      // Verified: an admitted peer's key is one we bound. Key-first, name stays
+      // reusable by a different identity later.
+      if (admittedRecord?.publicKey) {
+        pushKey(admittedRecord.publicKey);
+        return result("verified-key", { blockedKey: admittedRecord.publicKey });
+      }
+      // Candidate: the key is hearsay. Name always; the key only on explicit
+      // confirmation, and even then disclosed as unverified.
+      if (candidate?.record?.publicKey) {
+        pushName();
+        if (includeKey) {
+          pushKey(candidate.record.publicKey);
+          return result("candidate-name+key", {
+            blockedKey: candidate.record.publicKey,
+            heardFrom: candidate.heardFrom,
+          });
+        }
+        return result("candidate-name", {
+          reportedKey: candidate.record.publicKey,
+          heardFrom: candidate.heardFrom,
+        });
+      }
+      // No key anywhere — an unknown name, or a keyless record: name only.
+      pushName();
+      return result("name");
+    },
     /** @param {string} name */
     unblock: (name) => {
       const record = admitted.get(name) ?? candidates.get(name)?.record ?? null;
@@ -927,6 +1027,28 @@ export function createDirectory(state = {}) {
         blocklist.keys = blocklist.keys.filter((key) => key !== record.publicKey);
       }
       return { names: [...blocklist.names], keys: [...blocklist.keys] };
+    },
+    /**
+     * Lift a key block directly, by PEM or by fingerprint.
+     *
+     * The escape hatch for a key that outlived the record it came from: a candidate
+     * blocked by key and then forgotten (or aged out of gossip) leaves the key in
+     * the blocklist with no name to resolve it, so `unblock(name)` can no longer
+     * reach it. Matches a stored block on the normalized key *or* its fingerprint,
+     * so the operator can undo with whichever they can see.
+     *
+     * @param {string} keyOrFingerprint
+     */
+    unblockKey: (keyOrFingerprint) => {
+      const before = blocklist.keys.length;
+      blocklist.keys = blocklist.keys.filter(
+        (key) => !sameKey(key, keyOrFingerprint) && fingerprint(key) !== keyOrFingerprint,
+      );
+      return {
+        removed: before - blocklist.keys.length,
+        names: [...blocklist.names],
+        keys: [...blocklist.keys],
+      };
     },
     blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
     trust: () => ({ ...trust }),
