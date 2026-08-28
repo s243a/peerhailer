@@ -49,4 +49,8 @@ test("the peer-table refresh yields to an open <select> (focus guard survives to
     script.includes("peersEl.contains(document.activeElement)"),
     "refresh() guards the #peers repaint on document.activeElement",
   );
+  // ...but a deliberate action (whose own button holds focus in the table) must
+  // force the repaint, or the guard would mute the post-action refresh itself.
+  assert.ok(script.includes("force || !peersEl.contains"), "the guard has a force bypass");
+  assert.ok(script.includes("await refresh(true)"), "explicit action handlers force the repaint");
 });
