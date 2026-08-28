@@ -987,7 +987,9 @@ export function createDirectory(state = {}) {
         blockedKey,
         reportedKey,
         fingerprint: blockedKey || reportedKey ? fingerprint(blockedKey ?? reportedKey ?? "") : null,
-        heardFrom,
+        // A copy: the source is the candidate map's own array, and a caller must
+        // not be able to mutate directory state by editing the outcome it got back.
+        heardFrom: [...heardFrom],
         blocklist: { names: [...blocklist.names], keys: [...blocklist.keys] },
       });
 
