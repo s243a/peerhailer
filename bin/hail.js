@@ -185,6 +185,36 @@ function addressesFor(spec) {
   return iface.filter((entry) => entry.family === "IPv4" && !entry.internal).map((entry) => entry.address);
 }
 
+/**
+ * The operator-facing account of a `block`, honest about what was and wasn't
+ * blocked and why. A hearsay key is never asserted as if verified: the default
+ * candidate block says the key was left alone and how to include it; a confirmed
+ * one discloses the provenance and prints the exact undo.
+ *
+ * @param {import("../src/directory.js").BlockOutcome} outcome
+ * @returns {string[]}
+ */
+function describeBlock(outcome) {
+  const { name, fingerprint: fp, heardFrom } = outcome;
+  const from = heardFrom?.length ? ` (heard from ${heardFrom.join(", ")})` : "";
+  switch (outcome.mode) {
+    case "verified-key":
+      return [`blocked ${name} by verified key ${fp} — renaming does not evade the block`];
+    case "candidate-name+key":
+      return [
+        `blocked ${name} by name and by its reported key ${fp}${from} — unverified.`,
+        `if that report was wrong, the key may belong to another peer. undo the key with: hail unblock --key ${fp}`,
+      ];
+    case "candidate-name":
+      return [
+        `blocked ${name} by name. its reported key ${fp}${from} was NOT blocked — that binding is unverified, so a rename can still evade.`,
+        `re-run with --include-key to block that key too (it may belong to another peer).`,
+      ];
+    default:
+      return [`blocked ${name} by name — no key held for it, so a rename would evade`];
+  }
+}
+
 const publicKeyFromFlags = () => {
   // `--key` with nothing after it parses as boolean `true`, which is not a
   // string and so used to read as "no key flag given" — silently admitting on
@@ -354,23 +384,27 @@ switch (command) {
 
   case "block": {
     const [name] = rest;
-    if (!name) fail("usage: hail block <name>");
-    // Resolve admitted *or candidate*, so a gossiped key on a peer we only heard
-    // of is blocked by key — otherwise it renames its way back in.
-    const peer = directory.recordFor(name) ?? { name };
-    directory.block(peer);
+    if (!name) fail("usage: hail block <name> [--include-key]");
+    // A verified (admitted) key is blocked key-first; a candidate's *hearsay* key
+    // is only blocked when the operator explicitly confirms it with --include-key.
+    // See directory.blockPeer for why a gossiped binding must not key-block itself.
+    const outcome = directory.blockPeer(name, { includeKey: flags["include-key"] === true });
     persist();
-    log(
-      peer.publicKey
-        ? `blocked ${name} by key — renaming will not get it back in`
-        : `blocked ${name} by name (no key held for it, so a rename would)`,
-    );
+    for (const line of describeBlock(outcome)) log(line);
     break;
   }
 
   case "unblock": {
     const [name] = rest;
-    if (!name) fail("usage: hail unblock <name>");
+    // A key can outlive the record that named it (a candidate blocked by key, then
+    // forgotten); `--key` lifts it directly, by PEM or fingerprint, when no name resolves it.
+    if (typeof flags.key === "string") {
+      const { removed } = directory.unblockKey(flags.key);
+      persist();
+      log(removed ? `unblocked key ${flags.key}` : `no blocked key matched ${flags.key}`);
+      break;
+    }
+    if (!name) fail("usage: hail unblock <name> | hail unblock --key <pem|fingerprint>");
     directory.unblock(name);
     persist();
     log(`unblocked ${name}`);

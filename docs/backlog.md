@@ -70,12 +70,22 @@ roadmap is shared, not scattered across PR threads.
   `reload` is synchronous, so the reload restaging is defensive hardening — the definite bug
   was `close()`. Tests: close stops plugins, a throwing stop() doesn't block the rest, reload
   swaps and stops the old set.
-- **DONE** — `[fable, moved from Phase 2]` **Blocking a candidate ignores its key** — a security
-  *bypass* (a gossiped-key candidate blocked by name renames back in), so Phase 1. Fixed: added
-  `directory.recordFor(name)` (admitted-or-candidate, key-first) and both call sites (CLI `block`,
-  `/api/block`) now pass its record to `directory.block()`, which is already key-first with a name
-  fallback. A key is recorded *xor* a name, never both — a name-only candidate still blocks by name,
-  so a different identity can legitimately reuse a freed name later. Tests in `test/blockCandidate.test.mjs`.
+- **DONE** — `[fable, moved from Phase 2; refined by kimi + sol]` **Blocking a candidate ignores its
+  key** — a security *bypass* (a gossiped-key candidate blocked by name renames back in), so Phase 1.
+  The first cut (`recordFor` → `block`, key-first on any resolved key) was reviewed and *rejected*: a
+  candidate's key is **hearsay** (a gossiper's `name → key` claim, unverified), so key-blocking it on
+  a bare `block N` could silently deny an innocent third party who holds that key while the real peer
+  renames free — *and* the confirmation message asserted a binding nobody verified. **Revised rule
+  (supersedes the old "never dual-record"): never key-block hearsay implicitly.** New
+  `directory.blockPeer(name, {includeKey})`: an *admitted* (verified) key blocks key-first, name
+  reusable; a *candidate* blocks by **name** by default and only also blocks its reported key on an
+  explicit `--include-key` / `includeKey:true`, disclosing the fingerprint + `heardFrom` provenance;
+  an unknown name blocks by name. Returns a `BlockOutcome` the CLI and `/api/block` render honestly.
+  Low-level `directory.block(peer)` kept for callers holding a key they already trust (grants, admitted
+  records). Reversibility: added `directory.unblockKey(pemOrFingerprint)` + `hail unblock --key <..>`
+  for a key that outlived its record (candidate blocked then forgotten). Tests in
+  `test/blockCandidate.test.mjs`. Deferred follow-up: a web-UI affordance for the `--include-key`
+  confirm (the UI block button correctly does the safe name-only default today).
 - **TODO (late Phase 1)** — `[fable]` `reconcilePersist` marks `trust` as changed on the first load
   of a legacy state file (constructor materialised defaults), which could overwrite a concurrent
   trust-policy edit in that first-load window. Not "or comment": either **classify as accepted debt**

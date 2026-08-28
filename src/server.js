@@ -752,14 +752,15 @@ export function createDaemon({
       if (scope === "control" && url.pathname === "/api/block" && request.method === "POST") {
         const body = JSON.parse((await readBody(request)) || "{}");
         if (typeof body?.name !== "string") return send(response, 400, { error: "a name is required" });
-        const list = change((peers) =>
+        const result = change((peers) =>
           body.blocked === false
             ? peers.unblock(body.name)
-            : // recordFor, not get: block a candidate by its gossiped key too, so
-              // it can't rename its way back in (get resolves admitted peers only).
-              peers.block(peers.recordFor(body.name) ?? { name: body.name }),
+            : // blockPeer, not a bare block: a candidate's gossiped key is hearsay
+              // and is only key-blocked when the caller explicitly confirms it
+              // (includeKey) — otherwise it blocks by name, honestly. See directory.
+              peers.blockPeer(body.name, { includeKey: body.includeKey === true }),
         );
-        return send(response, 200, list);
+        return send(response, 200, result);
       }
 
       if (scope === "control" && url.pathname === "/api/peers" && request.method === "GET") {
