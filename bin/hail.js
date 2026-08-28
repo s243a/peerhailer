@@ -243,9 +243,13 @@ const describe = (peer) => {
     peer.profileUntil && peer.profileUntil > Date.now()
       ? ` until ${new Date(peer.profileUntil).toISOString()}`
       : "";
+  // Parked: a profile was assigned that no longer resolves (removed/renamed), so
+  // the peer is granted nothing until reassigned. Shown so the demotion is visible.
+  const status = directory.profileStatus?.(peer.name);
+  const parked = status?.parked ? ` ⚠ parked: assigned '${status.assigned}' no longer exists` : "";
   const profile = `[${effective.profile}${lapses}]`;
   const key = peer.publicKey ? fingerprint(peer.publicKey).slice(0, 14) : "no key";
-  const line = `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})`;
+  const line = `${peer.name.padEnd(16)} ${profile.padEnd(10)} ${key}  ${routes}  (last seen ${seen})${parked}`;
   // A competing key is the one thing here a person must not scroll past: the
   // key held keeps working, so nothing breaks to make them look.
   const conflicts = Array.isArray(peer.conflicts) ? peer.conflicts : [];
@@ -821,6 +825,14 @@ switch (command) {
     }
     if (!wantsUi && hosts.length === 0) {
       log("[daemon] nothing is being served: --ui for the page, --hail-on to answer peers");
+    }
+    // Warn once at startup about peers whose assigned profile no longer resolves
+    // (a removed/renamed profile, a hand-edited record): they are granted nothing
+    // until reassigned, and a fail-closed demotion should not pass unremarked.
+    const parked = directory.listAdmitted().filter((peer) => directory.profileStatus(peer.name).parked);
+    if (parked.length) {
+      log(`[daemon] ${parked.length} peer(s) parked (assigned profile no longer exists, granted nothing): ${parked.map((p) => `${p.name} → '${directory.profileStatus(p.name).assigned}'`).join(", ")}`);
+      log(`[daemon]          reassign with: hail add <name> --profile <profile>`);
     }
     // Deliberately no persist() here. Every change the daemon makes already
     // went to disk through applyChange, which writes and then re-reads, so its
@@ -1421,12 +1433,27 @@ switch (command) {
       break;
     }
     if (action === "remove") {
-      if (!target) fail("usage: hail profiles remove <name>");
+      if (!target) fail("usage: hail profiles remove <name> [--reassign <profile> | --force]");
+      // Removing a profile out from under its holders would silently park them
+      // (granted nothing) — the surprise the fail-closed resolver exists to make
+      // loud. Refuse while it is assigned, unless a person says how: `--reassign
+      // <profile>` moves the holders, `--force` parks them knowingly.
+      const holders = directory.holdersOf(target);
+      const reassign = typeof flags.reassign === "string" ? flags.reassign : null;
+      if (holders.length && !reassign && flags.force !== true) {
+        fail(`${target} is still assigned to: ${holders.map((h) => h.name).join(", ")} — reassign them with --reassign <profile>, or --force to leave them granted nothing`);
+      }
+      if (reassign) {
+        if (!isAssignableProfile(reassign, stored.profiles)) {
+          fail(`no profile called ${reassign} to reassign to. Known: ${listProfiles(stored.profiles).map((p) => p.name).join(", ")}`);
+        }
+        for (const h of holders) directory.admit({ name: h.name }, { profile: reassign });
+      }
       stored.profiles = removeProfile(stored.profiles ?? {}, target);
       persist();
-      // Not "fall back to the default": an unresolved name now fails closed, so
-      // holders are granted nothing until reassigned (and are shown parked).
-      log(`profile ${target} removed; peers holding it are now granted nothing until reassigned`);
+      if (reassign) log(`profile ${target} removed; ${holders.length} peer(s) reassigned to ${reassign}`);
+      else if (holders.length) log(`profile ${target} removed; ${holders.map((h) => h.name).join(", ")} are now parked (granted nothing) until reassigned`);
+      else log(`profile ${target} removed`);
       break;
     }
     if (action === "reject") {

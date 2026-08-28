@@ -762,6 +762,9 @@ export function createDaemon({
           admitted: directory.listAdmitted().map((peer) => ({
             ...peer,
             effective: directory.effectiveProfile(peer.name),
+            // Parked = an assigned profile that no longer resolves; surfaced so a
+            // demotion to "granted nothing" is visible rather than silent.
+            parked: directory.profileStatus?.(peer.name)?.parked ? directory.profileStatus(peer.name).assigned : null,
           })),
           candidates: directory.listCandidates(),
         });

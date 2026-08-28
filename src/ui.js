@@ -223,8 +223,11 @@ async function refresh() {
             .join("");
           return '<tr><td><strong>' + esc(peer.name) + '</strong>' +
             (peer.publicKey ? "" : ' <span class="tag">no key</span>') +
+            // Parked: an assigned profile that no longer resolves — granted
+            // nothing until reassigned. Shown so the demotion is not silent.
+            (peer.parked ? ' <span class="tag" title="assigned \'' + esc(peer.parked) + '\' no longer exists — granted nothing until reassigned">⚠ parked</span>' : "") +
             '</td><td><select data-peer="' + esc(peer.name) + '">' + chosen + '</select></td>' +
-            '<td class="muted">' + esc(peer.effective?.reason ?? "") + '</td>' +
+            '<td class="muted">' + esc(peer.parked ? "assigned '" + peer.parked + "' no longer exists" : (peer.effective?.reason ?? "")) + '</td>' +
             '<td>' + addressesOf(peer) + '</td>' +
             '<td class="row-actions">' +
               '<button data-block="' + esc(peer.name) + '" data-blocked="' + (peer.effective?.profile === "blocked") + '">' +

@@ -799,6 +799,28 @@ export function createDirectory(state = {}) {
     /** @param {string} name */
     profileFor: (name) => resolveProfile(asOfNow(admitted.get(name))?.profile, profileSet),
     /**
+     * A peer's assigned profile, and whether it still names a real one. `parked`
+     * is true when a name was assigned but no longer resolves (a removed or
+     * renamed profile, a hand-edited record) — the peer is granted nothing until
+     * reassigned, and this is what a surface renders so the demotion is visible
+     * rather than silent. `blocked` is never parked (it comes from the blocklist).
+     *
+     * @param {string} name
+     */
+    profileStatus: (name) => {
+      const assigned = asOfNow(admitted.get(name))?.profile ?? null;
+      const parked = Boolean(assigned && assigned !== BLOCKED_PROFILE && !profileSet[assigned]);
+      return { assigned, parked, effective: resolveProfile(assigned, profileSet).name };
+    },
+    /**
+     * The admitted peers whose (current) assigned profile is `name`. Used before
+     * removing a profile, so its holders are named rather than silently parked.
+     *
+     * @param {string} name
+     */
+    holdersOf: (name) =>
+      [...admitted.values()].map((record) => asOfNow(record)).filter((record) => record.profile === name),
+    /**
      * Take on state written by somebody else.
      *
      * The daemon serves from a long-lived directory while mutations are applied
