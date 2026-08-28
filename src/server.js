@@ -47,6 +47,7 @@ import { callPeer } from "./hail.js";
 import { forwardTunnel } from "./tunnelClient.js";
 import { mountShare } from "./filesMount.js";
 import { seal } from "./sealing.js";
+import { MAX_MESSAGE } from "./builtin/chatPlugin.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -876,6 +877,13 @@ export function createDaemon({
         const text = typeof body?.text === "string" ? body.text : "";
         if (!record) return send(response, 404, { error: "unknown peer" });
         if (!text.trim()) return send(response, 400, { error: "an empty message is not a message" });
+        // The same limit the receiver enforces (chatPlugin's MAX_MESSAGE). Checked
+        // here too, so an oversized send — from a script, not the UI, which has no
+        // length cap — is refused with the reason rather than round-tripping to the
+        // peer and coming back as a concealed, generic "the peer did not accept it".
+        if (text.length > MAX_MESSAGE) {
+          return send(response, 400, { error: `that message is over the ${MAX_MESSAGE}-character limit` });
+        }
         // Seal end to end when we hold a *verified* sealing key for the peer:
         // encrypt to it, signed with our identity so the peer authenticates us.
         // `sealKeyFor` returns a key only once a walk bound it from the peer's

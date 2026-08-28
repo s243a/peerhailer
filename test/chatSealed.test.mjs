@@ -12,7 +12,7 @@ import { createDaemon } from "../src/server.js";
 import { createDirectory } from "../src/directory.js";
 import { generateIdentity, sameKey } from "../src/identity.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
-import { createChatPlugin } from "../src/builtin/chatPlugin.js";
+import { createChatPlugin, MAX_MESSAGE } from "../src/builtin/chatPlugin.js";
 import { seal } from "../src/sealing.js";
 import { REFUSE } from "../src/plugins.js";
 
@@ -155,4 +155,22 @@ test("a replayed sealed block is dropped; a sealed sender that isn't the caller 
   const sealed2 = seal(inner2, bob.sealPublicKey, { signer: { publicKey: alice.publicKey, privateKey: alice.privateKey } });
   const refused = relay({ body: { sealed: sealed2 }, caller: { name: "mallory", publicKey: mallory.publicKey } });
   assert.equal(refused[REFUSE], true, "sealed sender must match the caller");
+});
+
+test("an oversized message is refused locally with the limit, not round-tripped to the peer", async (t) => {
+  const A = await node("alice");
+  const B = await node("bob", { canOpen: true });
+  t.after(async () => { await A.daemon.close(); await B.daemon.close(); });
+  A.directory.admit({ name: "bob", publicKey: B.id.publicKey, addresses: [{ value: `https://127.0.0.1:${B.hailPort}` }] }, { profile: "chatp" });
+
+  // One character over the limit the receiver enforces. The local pre-check must
+  // fire *before* callNode, so this comes back as a 400 that names the limit —
+  // not the 502 "the peer did not accept it" a round-tripped refusal would give.
+  const res = await post(A, "/api/chat/send", { peer: "bob", text: "x".repeat(MAX_MESSAGE + 1) });
+  assert.equal(res.status, 400, JSON.stringify(res.json));
+  assert.match(res.json.error, /limit/, "the reason names the limit rather than a generic refusal");
+
+  // The boundary itself is allowed through (parity with the receiver's `>` check).
+  const ok = await post(A, "/api/chat/send", { peer: "bob", text: "y".repeat(MAX_MESSAGE) });
+  assert.notEqual(ok.status, 400, "a message exactly at the limit is not rejected by the pre-check");
 });
