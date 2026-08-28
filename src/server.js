@@ -759,10 +759,16 @@ export function createDaemon({
           // The effective profile travels with each peer: what was assigned is
           // not always what applies, and the page would otherwise show a grant
           // a blocked peer does not have.
-          admitted: directory.listAdmitted().map((peer) => ({
-            ...peer,
-            effective: directory.effectiveProfile(peer.name),
-          })),
+          admitted: directory.listAdmitted().map((peer) => {
+            const status = directory.profileStatus?.(peer.name);
+            return {
+              ...peer,
+              effective: directory.effectiveProfile(peer.name),
+              // Parked = an assigned profile that no longer resolves; surfaced so
+              // a demotion to "granted nothing" is visible rather than silent.
+              parked: status?.parked ? status.assigned : null,
+            };
+          }),
           candidates: directory.listCandidates(),
         });
       }

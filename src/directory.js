@@ -262,6 +262,15 @@ export function createDirectory(state = {}) {
    * which is what makes it safer than an expiry one machine writes and another
    * believes.
    *
+   * Contract on the profile name: a name that resolves to nothing is **stored
+   * and surfaced as `parked`, not refused**. The full profile set is not known
+   * at admission time — the directory is built before plugins load, and a
+   * persisted record must load whatever plugin set is present — so refusing here
+   * would reject legitimately plugin-contributed profiles and make replay
+   * conditional on the current plugins. Validation is the operator surfaces'
+   * job (`hail add`, `POST /api/peers`, `--reassign`); the library stays
+   * permissive and the resolver fails such a name closed at read.
+   *
    * @param {any} peer
    * @param {{profile?: string, until?: number}} [options]
    * @returns {(import("./peerRecord.js").PeerRecord & {profile: string}) | null}
@@ -288,10 +297,18 @@ export function createDirectory(state = {}) {
     const asName = (/** @type {any} */ value) => (typeof value === "string" ? value : undefined);
     const requestedProfile = asName(profile) ?? asName(peer?.profile);
     // What it reverts to is captured now, while we still know what it was
-    // raised from. Working it out at expiry means guessing months later.
+    // raised from. Working it out at expiry means guessing months later. When the
+    // peer is *already* elevated (a live, unlapsed raise), the base to revert to
+    // is the one it would have fallen back to — `existing.profileAfter` — not its
+    // currently-elevated profile: re-elevating or extending a raise must not turn
+    // it permanent by capturing the raised profile as the revert target.
+    const revertBase =
+      existing?.profileUntil && existing.profileUntil > now()
+        ? existing.profileAfter
+        : asOfNow(existing)?.profile;
     const elevation =
       until && requestedProfile
-        ? { profileUntil: until, profileAfter: asOfNow(existing)?.profile ?? fallback ?? DEFAULT_PROFILE }
+        ? { profileUntil: until, profileAfter: revertBase ?? fallback ?? DEFAULT_PROFILE }
         : // An explicit permanent profile (a profile with no `until`) is a
           // deliberate set, so it clears any temporary elevation — otherwise the
           // peer would later revert off a profile a person just chose for good.
@@ -798,6 +815,34 @@ export function createDirectory(state = {}) {
     },
     /** @param {string} name */
     profileFor: (name) => resolveProfile(asOfNow(admitted.get(name))?.profile, profileSet),
+    /**
+     * A peer's assigned profile, and whether it still names a real one. `parked`
+     * is true when a name was assigned but no longer resolves (a removed or
+     * renamed profile, a hand-edited record) — the peer is granted nothing until
+     * reassigned, and this is what a surface renders so the demotion is visible
+     * rather than silent. `blocked` is never parked (it comes from the blocklist).
+     *
+     * @param {string} name
+     */
+    profileStatus: (name) => {
+      const assigned = asOfNow(admitted.get(name))?.profile ?? null;
+      const parked = Boolean(assigned && assigned !== BLOCKED_PROFILE && !profileSet[assigned]);
+      return { assigned, parked, effective: resolveProfile(assigned, profileSet).name };
+    },
+    /**
+     * The admitted peers who hold `name` now *or are scheduled to revert to it*.
+     * Used before removing a profile, so its holders are named rather than
+     * silently parked. Three clauses cover: currently effective (`asOfNow`),
+     * scheduled-to-revert (a peer elevated *away* from it, `profileAfter`), and
+     * the stored-but-lapsed remnant (`profile`). The scheduled case is the one
+     * that would otherwise escape and park at lapse.
+     *
+     * @param {string} name
+     */
+    holdersOf: (name) =>
+      [...admitted.values()].filter(
+        (record) => record.profile === name || record.profileAfter === name || asOfNow(record).profile === name,
+      ),
     /**
      * Take on state written by somebody else.
      *

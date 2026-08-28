@@ -38,6 +38,24 @@ roadmap is shared, not scattered across PR threads.
   - Note: this **reverses a documented availability choice** — missing profiles used to preserve
     connectivity; they now revoke capabilities, visibly.
   Ships as one trust-semantics PR (validation + resolution + removal + migration + tests).
+- **TODO** — `[kimi, from #26 review]` **A profile removal/rename never reaches a running
+  daemon.** `adopt()` refreshes admitted/candidates/blocklist/trust but **not** `profileSet`
+  (`useProfiles` runs once at startup), so after `profiles remove X` the daemon keeps
+  resolving `X` and `/api/peers` reports `parked: null` until restart — the fail-closed core
+  (#24) and the parked surface (#26) both go stale. Fix: re-apply the **merged** (stored +
+  plugin-suggested) profile set in `adopt`/`applyChange` — not just `useProfiles(state.profiles)`,
+  which would drop plugin profiles. Overlaps the `buildRuntime` extraction. **Should land
+  before profile management is used against long-running daemons.** `directory.js`, wiring.
+- **TODO** — `[kimi, from #26 review]` **CLI parked markers are false for plugin-suggested
+  profiles.** The CLI never loads plugins, so its `profileSet` = built-ins + stored custom; a
+  peer on a plugin-suggested profile shows `⚠ parked` in `hail peers` and its `--reassign` is
+  falsely refused. A false parked marker trains the operator to ignore the marker. Load
+  plugin-suggested profiles in the CLI like the daemon, or footnote that the set is partial.
+  `bin/hail.js`.
+- **TODO (release-gated)** — `[kimi]` **Renamed-built-in migration map.** A startup warning is
+  enough until a built-in is actually renamed; the day one is, every record holding the old
+  name parks at upgrade. Any release that renames a built-in must ship a one-line migration
+  map applied on load. Checklist item, gated on "a built-in is renamed".
 - **TODO** — `[sol]` **Resource lifecycle.** `close()` never calls plugin `stop()`, so shutdown
   orphans `shell`/`service`/`tunnel` child processes and tunnels; and `reload()` mutates live
   refs before validating the replacement. Fix, precisely:
