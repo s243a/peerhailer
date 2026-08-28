@@ -198,8 +198,12 @@ const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&a
 
 async function api(path, options) {
   const response = await fetch(path, options);
-  if (!response.ok) throw new Error(path + " -> HTTP " + response.status);
-  return response.json();
+  // Read the body either way: the server puts a human reason in the error field
+  // (a 409 sealing explanation, "a name is required"), and throwing a bare status
+  // code threw that away — the operator saw "HTTP 409" for a message meant for them.
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error ?? (path + " -> HTTP " + response.status));
+  return data;
 }
 
 function addressesOf(peer) {

@@ -27,3 +27,14 @@ test("interpolated self values still land in the page", () => {
   const html = renderPage({ name: "my-node" });
   assert.ok(html.includes("my-node"), "String.raw still interpolates ${...}");
 });
+
+test("the served fetch helpers surface the server's error message, not a bare status", () => {
+  const html = renderPage({ name: "tester" });
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  // Both api() and cxPost() must prefer the server's `error` field over "HTTP <n>",
+  // or a 409 sealing explanation / "a name is required" reaches the operator as a
+  // meaningless status code. Guards the regression at the served-page level, since
+  // this browser code (fetch + DOM) can't be unit-executed here.
+  const occurrences = script.split("data.error ?? (path").length - 1;
+  assert.ok(occurrences >= 2, "both api() and cxPost() carry the data.error fallback");
+});

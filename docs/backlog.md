@@ -125,9 +125,11 @@ roadmap is shared, not scattered across PR threads.
   `chOpen()` poll with a single state refresh that updates peer options **only when their model
   changed**, preserves the current selection, opens the selected thread once, and does **not** replace
   options while the chat selector is actively in use. `ui.js`.
-- **TODO** — `[fable]` **`api()` discards the server's error message** — the 409 sealing explanations
-  and "a name is required" are unreachable. Give `api()` `cxPost`'s `data.error ??` fallback (or merge
-  the two). `ui.js`.
+- **DONE** — `[fable]` **`api()` discards the server's error message** — the 409 sealing explanations
+  and "a name is required" were unreachable; `api()` threw a bare `HTTP <n>`. Fixed: `api()` now reads
+  the body and throws `data.error ?? "HTTP <n>"`, mirroring `cxPost` (the server sends `{error}` on 20
+  error paths). Guarded in `test/ui.test.mjs` at the served-page level (browser fetch/DOM code can't be
+  unit-executed here). `ui.js`.
 - **TODO** — `[fable]` `refresh()` replaces `#peers` innerHTML every 5s, closing a profile `<select>`
   open mid-choice. Skip the repaint when `document.activeElement` is inside the table — the focus
   check must run **immediately before** the replacement. `ui.js`.
