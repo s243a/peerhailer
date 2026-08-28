@@ -54,6 +54,38 @@ import {
 import { profileFor } from "./trust.js";
 
 /**
+ * Freeze an object graph in place. Used only on a fresh clone, never on a live
+ * record — freezing what the directory itself still mutates would break `commit`.
+ *
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function deepFreeze(value) {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const inner of Object.values(value)) deepFreeze(inner);
+  }
+  return value;
+}
+
+/**
+ * A read view of internal state: a deep clone, deeply frozen. Getters hand these
+ * out so a caller can neither corrupt the directory by mutating a record it read
+ * (which would bypass `commit` and its revision bump) nor be quietly surprised
+ * when such a mutation is lost — a frozen view makes the mistake loud. A shallow
+ * copy would not do: the nested `addresses`/`conflicts` arrays would still be the
+ * live ones. `null`/`undefined` pass through unchanged.
+ *
+ * @template T
+ * @param {T} value
+ * @returns {T}
+ */
+function readView(value) {
+  return value == null ? value : deepFreeze(structuredClone(value));
+}
+
+/**
  * Profiles by name — built-ins merged with whatever was customised.
  *
  * @param {Record<string, any>} custom
@@ -796,8 +828,7 @@ export function createDirectory(state = {}) {
     rotateKey,
     hailResponse,
     /** @param {string} name */
-    /** @param {string} name */
-    get: (name) => admitted.get(name) ?? null,
+    get: (name) => readView(admitted.get(name) ?? null),
     /**
      * Find an admitted peer by the key it signs with.
      *
@@ -807,7 +838,7 @@ export function createDirectory(state = {}) {
      * @param {string} publicKey
      */
     getByKey: (publicKey) =>
-      [...admitted.values()].find((record) => sameKey(record.publicKey, publicKey)) ?? null,
+      readView([...admitted.values()].find((record) => sameKey(record.publicKey, publicKey)) ?? null),
     /**
      * The profile a peer effectively has, and why.
      *
@@ -862,7 +893,7 @@ export function createDirectory(state = {}) {
      * never lag behind resolution after a `useProfiles` refresh. A shallow copy,
      * so a caller can't mutate the live set.
      */
-    currentProfiles: () => ({ ...profileSet }),
+    currentProfiles: () => readView({ ...profileSet }),
     /**
      * A peer's assigned profile, and whether it still names a real one. `parked`
      * is true when a name was assigned but no longer resolves (a removed or
@@ -888,8 +919,10 @@ export function createDirectory(state = {}) {
      * @param {string} name
      */
     holdersOf: (name) =>
-      [...admitted.values()].filter(
-        (record) => record.profile === name || record.profileAfter === name || asOfNow(record).profile === name,
+      readView(
+        [...admitted.values()].filter(
+          (record) => record.profile === name || record.profileAfter === name || asOfNow(record).profile === name,
+        ),
       ),
     /**
      * Take on state written by somebody else.
@@ -942,8 +975,9 @@ export function createDirectory(state = {}) {
       // actually holds *this process*; a persisted `self` copy must never override
       // them, or a stale/wrong key in the file would have us advertise a key we
       // cannot sign or seal for. `self` is mutated in place, not reassigned: it is
-      // handed out by reference through `api.self` and `snapshot().self`, so a new
-      // object would leave every existing reader pointing at the old name.
+      // handed out by reference through `api.self`, so a new object would leave
+      // every existing reader pointing at the old name. (`snapshot().self` is a
+      // frozen read-view clone, so it never carried this live-reference contract.)
       if (incomingSelf) {
         const { publicKey, sealPublicKey } = self;
         Object.assign(self, incomingSelf);
@@ -1109,7 +1143,7 @@ export function createDirectory(state = {}) {
       };
     },
     blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
-    trust: () => ({ ...trust }),
+    trust: () => readView({ ...trust }),
     /**
      * Change the trust policy through the directory, so a `snapshot()` reflects
      * it. A caller that mutated a stored copy instead would have the change
@@ -1122,23 +1156,24 @@ export function createDirectory(state = {}) {
       if (typeof patch?.model === "string") trust.model = patch.model;
       if (patch?.settings) trust.settings = patch.settings;
       if (typeof patch?.unknownProfile === "string") trust.unknownProfile = patch.unknownProfile;
-      return { ...trust };
+      return readView({ ...trust });
     },
-    listAdmitted: () => [...admitted.values()],
+    listAdmitted: () => readView([...admitted.values()]),
     listCandidates: () =>
-      [...candidates.entries()].map(([name, entry]) => ({ ...entry.record, name, heardFrom: entry.heardFrom })),
+      readView([...candidates.entries()].map(([name, entry]) => ({ ...entry.record, name, heardFrom: entry.heardFrom }))),
     /** Everything worth writing to disk, in the shape the constructor accepts. */
-    snapshot: () => ({
-      self,
-      blocklist: { names: [...blocklist.names], keys: [...blocklist.keys] },
-      trust: { ...trust },
-      admitted: [...admitted.values()],
-      candidates: [...candidates.entries()].map(([name, entry]) => ({
-        ...entry.record,
-        name,
-        heardFrom: entry.heardFrom,
-      })),
-    }),
+    snapshot: () =>
+      readView({
+        self,
+        blocklist: { names: [...blocklist.names], keys: [...blocklist.keys] },
+        trust: { ...trust },
+        admitted: [...admitted.values()],
+        candidates: [...candidates.entries()].map(([name, entry]) => ({
+          ...entry.record,
+          name,
+          heardFrom: entry.heardFrom,
+        })),
+      }),
   };
 
   // Returned after construction so a trust model can consult the directory it

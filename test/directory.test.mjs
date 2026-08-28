@@ -313,3 +313,38 @@ test("gossip cannot make a temporary raise permanent", () => {
     "while still learning the address it was told",
   );
 });
+
+test("read views are immutable — mutating what a getter returns cannot corrupt the directory", () => {
+  const dir = createDirectory({ self: { name: "me" } });
+  dir.useProfiles({ ops: { name: "ops", allows: ["hail"], description: "x" } });
+  dir.admit({ name: "bob", profile: "trusted", addresses: [{ transport: "lan", value: "10.0.0.5:7645" }] });
+  const addr0 = dir.get("bob").addresses[0].value;
+
+  // A single record: a frozen deep clone. Both a top-level and a nested mutation
+  // throw (strict mode), and neither reaches the directory.
+  const got = dir.get("bob");
+  assert.throws(() => { got.profile = "ops"; }, TypeError);
+  assert.throws(() => { got.addresses.push({ transport: "lan", value: "10.0.0.9:1" }); }, TypeError);
+  assert.equal(dir.get("bob").profile, "trusted", "the profile is untouched");
+  assert.equal(dir.get("bob").addresses.length, 1, "the addresses are untouched");
+  assert.equal(dir.get("bob").addresses[0].value, addr0);
+
+  // The list and snapshot views: the array itself and its nested records are frozen.
+  const list = dir.listAdmitted();
+  assert.throws(() => { list.push({}); }, TypeError);
+  assert.throws(() => { list[0].addresses[0].value = "evil"; }, TypeError);
+  const snap = dir.snapshot();
+  assert.throws(() => { snap.admitted[0].profile = "ops"; }, TypeError);
+  assert.throws(() => { snap.blocklist.names.push("x"); }, TypeError);
+  assert.equal(dir.get("bob").addresses[0].value, addr0, "no view mutation reached the record");
+
+  // currentProfiles is a frozen view too — a caller can't rewrite the live set.
+  const profs = dir.currentProfiles();
+  assert.throws(() => { profs.ops.allows.push("directory"); }, TypeError);
+
+  // trust() is a frozen view too — its nested settings object can't be rewritten.
+  dir.setTrust({ settings: { vouchesRequired: 2 } });
+  const t = dir.trust();
+  assert.throws(() => { t.settings.vouchesRequired = 99; }, TypeError);
+  assert.equal(dir.trust().settings.vouchesRequired, 2, "the live trust settings are untouched");
+});
