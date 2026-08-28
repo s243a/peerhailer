@@ -783,7 +783,7 @@ $("fx-share").addEventListener("input", fxClear);
 fxLoadPeers();
 fxLoadMounts();
 // --- chat: short messages to/from admitted peers (memory only) ---
-let chPeer = null, chTimer = null, chEnabled = false, chSeal = {}, chGen = 0;
+let chPeer = null, chTimer = null, chEnabled = false, chSeal = {}, chGen = 0, chLastOpts = "";
 // How each sealing state reads to the operator. conflict/reverify block a
 // send (fail closed, never cleartext); the accept button shows only for a conflict.
 const SEAL_LABEL = {
@@ -792,20 +792,49 @@ const SEAL_LABEL = {
   reverify: "⚠ needs re-verify — walk this peer before sending",
   unverified: "",
 };
+// Build the peer <option> list from chat state, and refresh the seal map as a side
+// effect. Returned as a string so a caller can tell whether the list actually
+// changed before touching the DOM.
+function chOptions(st) {
+  const named = new Set();
+  const opts = [];
+  chSeal = {};
+  for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); chSeal[c.name] = c; opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
+  for (const p of (st.peers || [])) if (!named.has(p.name)) { chSeal[p.name] = p; opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>"); }
+  return opts.length ? opts.join("") : '<option value="">(no admitted peers)</option>';
+}
+function chApplyOptions(html) {
+  const sel = $("ch-peer");
+  sel.innerHTML = html;
+  chLastOpts = html;
+  // Preserve the selection across the rebuild; a forgotten peer falls back to the
+  // first option, which is correct.
+  if (chPeer && [...sel.options].some((o) => o.value === chPeer)) sel.value = chPeer;
+}
 async function chLoad() {
   try {
     const st = await api("/api/chat/state");
     chEnabled = st.enabled;
-    if (!chEnabled) { $("ch-status").textContent = "chat is off — start the daemon with --chat"; $("ch-peer").innerHTML = '<option value="">(chat off)</option>'; return; }
-    const named = new Set();
-    const opts = [];
-    chSeal = {};
-    for (const c of (st.conversations || [])) if (c.name) { named.add(c.name); chSeal[c.name] = c; opts.push('<option value="' + esc(c.name) + '">' + esc(c.name) + " (" + c.count + ")</option>"); }
-    for (const p of (st.peers || [])) if (!named.has(p.name)) { chSeal[p.name] = p; opts.push('<option value="' + esc(p.name) + '">' + esc(p.name) + "</option>"); }
-    $("ch-peer").innerHTML = opts.length ? opts.join("") : '<option value="">(no admitted peers)</option>';
-    if (chPeer && [...$("ch-peer").options].some((o) => o.value === chPeer)) $("ch-peer").value = chPeer;
+    if (!chEnabled) { $("ch-status").textContent = "chat is off — start the daemon with --chat"; $("ch-peer").innerHTML = '<option value="">(chat off)</option>'; chLastOpts = ""; return; }
+    chApplyOptions(chOptions(st));
     await chOpen();
   } catch (e) { $("ch-status").textContent = "could not load chat: " + (e.message ?? e); }
+}
+// The 4s refresh. Rebuilds the option list so a NEW incoming conversation appears
+// in the dropdown — the old poll only refreshed the open thread, so a peer who
+// messaged first never showed up. The DOM is written only when the list actually
+// changed AND the selector is not the focused element, so an open dropdown or a
+// mid-choice selection is never yanked away (the same guard the peer table uses).
+// The open thread always refreshes.
+async function chPoll() {
+  try {
+    const st = await api("/api/chat/state");
+    chEnabled = st.enabled;
+    if (!chEnabled) return;
+    const html = chOptions(st); // also refreshes chSeal for the badge
+    if (html !== chLastOpts && document.activeElement !== $("ch-peer")) chApplyOptions(html);
+    await chOpen();
+  } catch (ignore) { /* a transient poll failure leaves the thread as-is */ }
 }
 function chSealBadge() {
   const info = chSeal[$("ch-peer").value] || {};
@@ -889,7 +918,7 @@ $("ch-text").addEventListener("keydown", (e) => { if (e.key === "Enter") chSend(
 $("ch-clear").addEventListener("click", chClear);
 chLoad();
 if (chTimer) clearInterval(chTimer);
-chTimer = setInterval(() => { if (chEnabled && chPeer) chOpen(); }, 4000);
+chTimer = setInterval(() => { if (chEnabled) chPoll(); }, 4000);
 cxLoadAll();
 
 refresh();

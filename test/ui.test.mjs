@@ -54,3 +54,18 @@ test("the peer-table refresh yields to an open <select> (focus guard survives to
   assert.ok(script.includes("force || !peersEl.contains"), "the guard has a force bypass");
   assert.ok(script.includes("await refresh(true)"), "explicit action handlers force the repaint");
 });
+
+test("the chat poll rebuilds the peer list (new conversations) without churning an open select", () => {
+  const html = renderPage({ name: "tester" });
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  // The 4s chat poll must go through chPoll (which rebuilds the option list so a
+  // new incoming conversation appears), not the old chOpen-only poll that never
+  // refreshed the dropdown. And it must only rewrite the list when it changed and
+  // the selector isn't focused. Pinned at the served-page level.
+  assert.ok(script.includes("if (chEnabled) chPoll()"), "the 4s timer drives chPoll");
+  assert.ok(script.includes("async function chPoll("), "chPoll exists");
+  assert.ok(
+    script.includes('html !== chLastOpts && document.activeElement !== $("ch-peer")'),
+    "chPoll rewrites the option list only when it changed and the select isn't focused",
+  );
+});
