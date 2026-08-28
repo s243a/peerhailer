@@ -549,18 +549,22 @@ async function cxStopNow() {
   // launch id is only discarded once the teardown actually succeeds, so a failed
   // stop leaves a live seat that Stop can still retry, not an orphan with no
   // handle. The seat poll keeps running until then.
+  // Pause seat polling while the stop is in flight, so a seat reply cannot repaint
+  // over "stopping…". It resumes if the stop fails (the session is still live).
+  if (cxSeatTimer) clearInterval(cxSeatTimer);
   $("cx-launch").disabled = true; $("cx-stop").disabled = true;
   $("cx-status").textContent = "stopping…";
   try {
     await cxPost("/api/compose/stop", { launchId: lid });
-    if (cxSeatTimer) clearInterval(cxSeatTimer);
     cxRes = null;
     $("cx-status").textContent = "stopped";
     $("cx-launch").disabled = false; $("cx-stop").disabled = true;
   } catch (e) {
-    // Still running — keep the session, re-enable Stop to retry, leave Launch off.
+    // Still running — keep the session, re-enable Stop to retry, leave Launch off,
+    // and resume watching for the seat.
     $("cx-status").textContent = "stop failed: " + (e.message ?? e);
     $("cx-stop").disabled = false;
+    cxPollSeat();
   }
 }
 // --- remote control: drive a remote T3 from a local T3 client ---
@@ -624,7 +628,6 @@ async function fxLoadPeers() {
 // one, so a request that lands after the user has switched peer, share, or
 // directory is neither rendered nor acted on under the wrong target.
 function fxCtx() { return { peer: $("fx-peer").value, share: $("fx-share").value.trim(), path: fxPath }; }
-function fxStale(ctx) { return $("fx-peer").value !== ctx.peer || $("fx-share").value.trim() !== ctx.share; }
 function fxBrowse(op, extra, ctx) {
   const c = ctx || fxCtx();
   return cxPost("/api/files/browse", Object.assign({ peer: c.peer, share: c.share, op: op, path: c.path }, extra || {}));
@@ -674,23 +677,35 @@ function fxRender(entries, truncated, ctx) {
   box.querySelectorAll("[data-get]").forEach((el) => el.addEventListener("click", () => fxDownload(el.dataset.get, ctx)));
 }
 async function fxDownload(path, ctx) {
+  // The generation the click happened at. The file itself is an explicit request
+  // fetched from its own ctx, so it is still delivered if it lands after the view
+  // moved on — but the status line belongs to the current view, so only write it
+  // (success or error) while this download is still the current one.
+  const gen = fxGen;
+  const fresh = () => gen === fxGen;
   $("fx-status").textContent = "downloading " + path + "…";
   try {
     const r = await fxBrowse("get", { path: path }, ctx);
-    if (r.error || !r.data) { $("fx-status").textContent = r.error || "no data"; return; }
+    if (r.error || !r.data) { if (fresh()) $("fx-status").textContent = r.error || "no data"; return; }
     const bytes = Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([bytes]));
     a.download = path.split("/").pop();
     a.click();
     URL.revokeObjectURL(a.href);
-    $("fx-status").textContent = "downloaded " + a.download + " (" + (r.size == null ? bytes.length : r.size) + " bytes)";
-  } catch (e) { $("fx-status").textContent = "download failed: " + (e.message ?? e); }
+    if (fresh()) $("fx-status").textContent = "downloaded " + a.download + " (" + (r.size == null ? bytes.length : r.size) + " bytes)";
+  } catch (e) { if (fresh()) $("fx-status").textContent = "download failed: " + (e.message ?? e); }
 }
 async function fxUpload() {
   const f = $("fx-file").files[0];
   if (!f) { $("fx-status").textContent = "choose a file first"; return; }
   const ctx = fxCtx();
+  // The generation the upload started at. A generation check, not a peer/share
+  // value check, so an A→(clear)→A bounce into a different directory does not read
+  // as "unchanged": any intervening open or clear bumps fxGen and marks this
+  // upload's result stale — it targeted the directory it captured, not this one.
+  const gen = fxGen;
+  const fresh = () => gen === fxGen;
   $("fx-upload").disabled = true;
   $("fx-status").textContent = "uploading " + f.name + "…";
   try {
@@ -698,13 +713,14 @@ async function fxUpload() {
     let bin = "";
     for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     const r = await fxBrowse("put", { path: fxJoin(ctx.path, f.name), data: btoa(bin) }, ctx);
-    if (fxStale(ctx)) { $("fx-status").textContent = "uploaded to " + ctx.peer + ":" + ctx.share + " (target since changed)"; return; }
+    if (!fresh()) { $("fx-status").textContent = "uploaded to " + ctx.peer + ":" + ctx.share + " (view since changed)"; return; }
     if (r.error) $("fx-status").textContent = "upload refused: " + r.error;
     else { $("fx-status").textContent = "uploaded " + f.name + " (" + (r.written == null ? "?" : r.written) + " bytes)"; await fxOpen(); }
-  } catch (e) { if (!fxStale(ctx)) $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
-  // Only re-enable Upload if the target is still the one uploaded to; if it
-  // changed mid-flight, fxClear disabled it deliberately and it must stay off.
-  finally { if (!fxStale(ctx)) $("fx-upload").disabled = false; }
+  } catch (e) { if (fresh()) $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
+  // Re-enable Upload only if the view is still the one uploaded to; if it changed
+  // mid-flight, fxClear disabled it deliberately and it must stay off. (On the
+  // success path fxOpen has already re-enabled it and bumped the generation.)
+  finally { if (fresh()) $("fx-upload").disabled = false; }
 }
 async function fxMount() {
   const peer = $("fx-peer").value, share = $("fx-share").value.trim();
@@ -807,16 +823,19 @@ async function chOpen(switched) {
 async function chSend() {
   const peer = $("ch-peer").value, text = $("ch-text").value;
   if (!peer || !text.trim()) return;
+  // Clear the composer up front, before any await. This is what makes a later
+  // draft safe: a value-equality check after the send would erase an A→B→A draft
+  // that happened to retype the same text. On failure the message is restored
+  // only if the box is still empty (no new draft was started) and still on peer.
+  $("ch-text").value = "";
   $("ch-send").disabled = true;
   try {
     await cxPost("/api/chat/send", { peer: peer, text: text });
-    // Clear the composer only if it still holds this message for this peer — the
-    // user may have switched peers or started a new draft while the send was in
-    // flight, and that draft must not be erased.
-    if ($("ch-peer").value === peer && $("ch-text").value === text) $("ch-text").value = "";
     await chLoad();
-  } catch (e) { if ($("ch-peer").value === peer) $("ch-status").textContent = "send failed: " + (e.message ?? e); }
-  finally { $("ch-send").disabled = false; }
+  } catch (e) {
+    if ($("ch-peer").value === peer && $("ch-text").value === "") $("ch-text").value = text;
+    if ($("ch-peer").value === peer) $("ch-status").textContent = "send failed: " + (e.message ?? e);
+  } finally { $("ch-send").disabled = false; }
 }
 async function chAccept() {
   const peer = $("ch-peer").value;
