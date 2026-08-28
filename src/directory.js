@@ -907,19 +907,36 @@ export function createDirectory(state = {}) {
      * @param {any} state
      */
     adopt: (state) => {
-      admitted.clear();
-      candidates.clear();
+      // Normalise everything into locals *first*, then swap it in as a unit. A
+      // malformed incoming state (a non-iterable `admitted`, a record that won't
+      // build) throws here, before the live directory is touched — a bad reload
+      // must never leave the daemon serving an emptied or half-updated directory,
+      // which clearing the live maps up front used to do.
+      const nextAdmitted = new Map();
       for (const peer of state?.admitted ?? []) {
         const record = makePeerRecord(peer);
         // The whole stored record as `previous`, so keepOurs decides what is ours.
         // Enumerating fields at each call site meant every new one had to be added
         // in several places, and an elevation was dropped on load.
-        if (record) admitted.set(record.name, keepOurs(record, { ...peer, profile: peer.profile ?? DEFAULT_PROFILE }));
+        if (record) nextAdmitted.set(record.name, keepOurs(record, { ...peer, profile: peer.profile ?? DEFAULT_PROFILE }));
       }
+      const nextCandidates = new Map();
       for (const peer of state?.candidates ?? []) {
         const record = makePeerRecord(peer);
-        if (record) candidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
+        if (record) nextCandidates.set(record.name, { record, heardFrom: peer.heardFrom ?? [] });
       }
+      const nextNames = [...(state?.blocklist?.names ?? [])];
+      const nextKeys = [...(state?.blocklist?.keys ?? [])];
+      const incomingSelf = state?.self ? makePeerRecord(state.self) : null;
+
+      // Everything normalised without throwing — apply it. Nothing below can throw,
+      // so the directory moves from one consistent state to the next atomically.
+      admitted.clear();
+      for (const [name, record] of nextAdmitted) admitted.set(name, record);
+      candidates.clear();
+      for (const [name, entry] of nextCandidates) candidates.set(name, entry);
+      blocklist.names = nextNames;
+      blocklist.keys = nextKeys;
       // Adopt what a rename or address edit changed about us — but keep the
       // running daemon's identity. Its signing and sealing public keys are what it
       // actually holds *this process*; a persisted `self` copy must never override
@@ -927,21 +944,16 @@ export function createDirectory(state = {}) {
       // cannot sign or seal for. `self` is mutated in place, not reassigned: it is
       // handed out by reference through `api.self` and `snapshot().self`, so a new
       // object would leave every existing reader pointing at the old name.
-      if (state?.self) {
-        const incoming = makePeerRecord(state.self);
-        if (incoming) {
-          const { publicKey, sealPublicKey } = self;
-          Object.assign(self, incoming);
-          self.publicKey = publicKey;
-          // Restore the runtime seal key, or *remove* it when the daemon holds
-          // none — matching the codebase's key-absence convention rather than
-          // leaving a `sealPublicKey: undefined` own-key an `in` check would trip.
-          if (sealPublicKey === undefined) delete self.sealPublicKey;
-          else self.sealPublicKey = sealPublicKey;
-        }
+      if (incomingSelf) {
+        const { publicKey, sealPublicKey } = self;
+        Object.assign(self, incomingSelf);
+        self.publicKey = publicKey;
+        // Restore the runtime seal key, or *remove* it when the daemon holds
+        // none — matching the codebase's key-absence convention rather than
+        // leaving a `sealPublicKey: undefined` own-key an `in` check would trip.
+        if (sealPublicKey === undefined) delete self.sealPublicKey;
+        else self.sealPublicKey = sealPublicKey;
       }
-      blocklist.names = [...(state?.blocklist?.names ?? [])];
-      blocklist.keys = [...(state?.blocklist?.keys ?? [])];
       // Including trust: a running daemon adopting new state was keeping its
       // old defaults, so changing where admitted peers land had no effect
       // until restart.

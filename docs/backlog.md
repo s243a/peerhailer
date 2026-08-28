@@ -109,9 +109,14 @@ roadmap is shared, not scattered across PR threads.
 - **DONE (#29, via buildRuntime)** — `[fable]` Reload rebuilt the command plugin without its
   history settings. `buildRuntime` now reads `maxHistory`/`historyMs` from the supplied
   `state.history`, so a reload preserves the operator's audit limits.
-- **TODO** — `[sol, split from #12]` **Atomic validate-before-adopt.** `adopt()` clears live maps
-  before validating the incoming shape — normalise into temporaries and swap only once valid. (The
-  general immutable-read-views part is Phase 4.) `directory.js`.
+- **DONE** — `[sol, split from #12]` **Atomic validate-before-adopt.** `adopt()` cleared the live
+  `admitted`/`candidates` maps *before* building the incoming records, so a malformed reload (a
+  non-iterable `admitted`, a record that won't build) left the daemon serving an emptied directory.
+  Fixed: normalise everything (admitted, candidates, blocklist, self) into locals first — the throw
+  now happens before anything live is touched — then apply in a tail section that cannot throw, so the
+  directory moves between consistent states atomically. Regression test in `test/directory.test.mjs`
+  (a malformed adopt leaves admitted peers, the blocklist, and self intact). (The general
+  immutable-read-views part remains Phase 4.)
 
 ## Phase 3 — UX (separate concerns — not one "UI batch")
 

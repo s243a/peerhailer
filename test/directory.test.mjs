@@ -237,6 +237,22 @@ test("a daemon with no seal key does not inherit one from persisted state (absen
   assert.equal("sealPublicKey" in directory.self, false, "the key is absent, not a stale/undefined own-key");
 });
 
+test("adopting a malformed state leaves the live directory intact (validate before swap)", () => {
+  const directory = createDirectory({ self: { name: "me", publicKey: "PK" } });
+  directory.admit({ name: "sol", profile: "trusted", addresses: [{ transport: "lan", value: "10.0.0.9:7645" }] });
+  directory.block({ name: "mallory", publicKey: "BADKEY" });
+  const before = { admitted: directory.listAdmitted().length, blocked: directory.blocklist().keys.length };
+
+  // A non-iterable `admitted` makes the normalise loop throw. Before the fix the
+  // live maps were already cleared by then; now the throw happens before any swap.
+  assert.throws(() => directory.adopt({ admitted: 5, candidates: [] }));
+
+  assert.equal(directory.listAdmitted().length, before.admitted, "admitted peers survive a failed adopt");
+  assert.equal(directory.get("sol")?.name, "sol", "the specific peer is still there");
+  assert.equal(directory.blocklist().keys.length, before.blocked, "the blocklist survives too");
+  assert.equal(directory.self.name, "me", "self is untouched by a failed adopt");
+});
+
 test("an address you can type is an address that can be dialled", () => {
   const directory = createDirectory({ self: { name: "me" } });
   // People type host:port. Stored values are used as a URL base, so without
