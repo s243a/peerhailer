@@ -634,9 +634,14 @@ export function createDaemon({
    * @returns {import("node:http").RequestListener}
    */
   const handlerFor = (scope, { encryptedArrival = false, requireClientCert = false, arrivalMutual = false } = {}) => async (request, response) => {
-    const url = new URL(request.url ?? "/", "http://localhost");
-
+    /** @type {URL | undefined} */
+    let url;
     try {
+      // Inside the try: Node's HTTP parser accepts request-targets that `new URL`
+      // rejects (e.g. `GET //[ HTTP/1.1`), and a throw here on the arrival door is
+      // an unhandled rejection that takes the whole daemon down — an unauthenticated
+      // remote crash. The catch answers it like any other unmatched request.
+      url = new URL(request.url ?? "/", "http://localhost");
       const pluginRoute = pluginRoutes.get(`${request.method} ${url.pathname}`);
       if (pluginRoute) {
         // Evaluated per request: the control door's answer depends on the host
@@ -1086,7 +1091,9 @@ export function createDaemon({
 
       return nothingHere(response);
     } catch (cause) {
-      log(`[daemon] ${url.pathname} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      // `url` may be undefined if it was the thing that threw — fall back to the
+      // raw target so the log never throws a second time inside the catch.
+      log(`[daemon] ${url?.pathname ?? request.url} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       return nothingHere(response);
     }
   };
