@@ -38,3 +38,15 @@ test("the served fetch helpers surface the server's error message, not a bare st
   const occurrences = script.split("data.error ?? (path").length - 1;
   assert.ok(occurrences >= 2, "both api() and cxPost() carry the data.error fallback");
 });
+
+test("the peer-table refresh yields to an open <select> (focus guard survives to the page)", () => {
+  const html = renderPage({ name: "tester" });
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1];
+  // The 5s refresh must not repaint #peers while focus is inside it, or an open
+  // profile <select> snaps shut mid-choice. Pins the guard at the served-page
+  // level, since the DOM behavior can't be exercised in the node suite.
+  assert.ok(
+    script.includes("peersEl.contains(document.activeElement)"),
+    "refresh() guards the #peers repaint on document.activeElement",
+  );
+});

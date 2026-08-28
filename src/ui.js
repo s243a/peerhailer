@@ -219,7 +219,13 @@ async function refresh() {
     $("clock").textContent = new Date().toLocaleTimeString();
 
     const options = profiles.map((p) => p.name);
-    $("peers").innerHTML = state.admitted.length
+    // Don't repaint the peer table out from under an open profile <select>: the
+    // 5s refresh replacing innerHTML would snap it shut mid-choice and drop the
+    // half-made selection. The focus check runs right before the write, so focus
+    // cannot slip into the table between the check and the replacement.
+    const peersEl = $("peers");
+    if (!peersEl.contains(document.activeElement))
+      peersEl.innerHTML = state.admitted.length
       ? '<table><tr><th>Peer</th><th>Profile</th><th>Why</th><th>Reachable at</th><th></th></tr>' +
         state.admitted.map((peer) => {
           const chosen = options

@@ -130,9 +130,11 @@ roadmap is shared, not scattered across PR threads.
   the body and throws `data.error ?? "HTTP <n>"`, mirroring `cxPost` (the server sends `{error}` on 20
   error paths). Guarded in `test/ui.test.mjs` at the served-page level (browser fetch/DOM code can't be
   unit-executed here). `ui.js`.
-- **TODO** — `[fable]` `refresh()` replaces `#peers` innerHTML every 5s, closing a profile `<select>`
-  open mid-choice. Skip the repaint when `document.activeElement` is inside the table — the focus
-  check must run **immediately before** the replacement. `ui.js`.
+- **DONE** — `[fable]` `refresh()` replaced `#peers` innerHTML every 5s, closing a profile `<select>`
+  open mid-choice. Fixed: guard the `#peers` repaint with `!peersEl.contains(document.activeElement)`,
+  evaluated immediately before the write (after the async fetch), so the 5s refresh yields to an
+  in-progress interaction. Clock, candidates, and error still update. Served-page guard in
+  `test/ui.test.mjs`; visual pass deferred. `ui.js`.
 - **DONE** — `[fable]` `/api/chat/send` didn't pre-check `MAX_MESSAGE`; an oversized non-UI send
   round-tripped and came back as a concealed generic 502. Fixed: the route now imports the receiver's
   `MAX_MESSAGE` and rejects `text.length > MAX_MESSAGE` locally with a 400 naming the limit (same `>`
