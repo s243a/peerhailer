@@ -252,7 +252,12 @@ export function listProfiles(custom = {}) {
       ...(profile.onReject ?? base?.onReject
         ? { onReject: profile.onReject ?? base?.onReject ?? DEFAULT_REJECTION }
         : {}),
-      ...(profile.pinned ?? base?.pinned ?? false ? { pinned: true } : {}),
+      // Explicit boolean, not "present-only-when-true": omitting the key on an
+      // override (`pinned: false` on a pinned built-in) loses the override when
+      // this set is re-merged — as it now is when a caller reads the already-merged
+      // set back through here — because the second pass fills the built-in default
+      // back in. Emitting `false` makes listProfiles idempotent over its output.
+      pinned: Boolean(profile.pinned ?? base?.pinned),
       ...(base?.builtIn ? { builtIn: true } : {}),
     };
   }

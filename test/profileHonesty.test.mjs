@@ -48,6 +48,21 @@ test("reassigning holders (what `profiles remove --reassign` does) un-parks them
   assert.equal(dir.profileStatus("phone").effective, "known");
 });
 
+test("adopt leaves the profile set alone; a useProfiles refresh is what applies a removal", () => {
+  // The contract behind the applyChange/reload fix: adopt(state) does not touch
+  // profileSet (the plugin-merged set is only known to the host), so a removal
+  // reaches a running daemon only once the host re-applies the merged set.
+  const dir = withLowpriv();
+  dir.admit({ name: "phone", publicKey: generateIdentity().publicKey, addresses: addr }, { profile: "lowpriv" });
+  assert.equal(dir.profileStatus("phone").parked, false);
+  // Adopt state in which the profile is gone — adopt must NOT change resolution.
+  dir.adopt({ admitted: dir.snapshot().admitted, profiles: {} });
+  assert.equal(dir.profileStatus("phone").parked, false, "adopt leaves profileSet alone");
+  // The host (applyChange/reload) then re-applies the merged set, and it bites.
+  dir.useProfiles({});
+  assert.equal(dir.profileStatus("phone").parked, true, "the removal takes effect on the refresh");
+});
+
 test("holdersOf catches a peer elevated AWAY from the profile (it would park at lapse)", () => {
   const dir = withLowpriv();
   const key = generateIdentity().publicKey;

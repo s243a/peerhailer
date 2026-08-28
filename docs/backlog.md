@@ -38,14 +38,19 @@ roadmap is shared, not scattered across PR threads.
   - Note: this **reverses a documented availability choice** — missing profiles used to preserve
     connectivity; they now revoke capabilities, visibly.
   Ships as one trust-semantics PR (validation + resolution + removal + migration + tests).
-- **TODO** — `[kimi, from #26 review]` **A profile removal/rename never reaches a running
-  daemon.** `adopt()` refreshes admitted/candidates/blocklist/trust but **not** `profileSet`
-  (`useProfiles` runs once at startup), so after `profiles remove X` the daemon keeps
-  resolving `X` and `/api/peers` reports `parked: null` until restart — the fail-closed core
-  (#24) and the parked surface (#26) both go stale. Fix: re-apply the **merged** (stored +
-  plugin-suggested) profile set in `adopt`/`applyChange` — not just `useProfiles(state.profiles)`,
-  which would drop plugin profiles. Overlaps the `buildRuntime` extraction. **Should land
-  before profile management is used against long-running daemons.** `directory.js`, wiring.
+- **DONE (#28)** — `[kimi, from #26 review; extended per fable]` **A profile removal/rename
+  never reached a running daemon.** `adopt()` refreshed admitted/candidates/blocklist/trust but
+  not `profileSet`. Fixed: `applyChange` re-applies the **merged** (built-ins + plugin-suggested
+  + stored) set via `useProfiles` after `adopt`. A Fable confirm caught two divergences the
+  one-liner left, both closed here: (A) `applyChange` collected from the *startup* plugin list
+  while `rebuild` used a fresh one — the closure's plugin list is now a `let` rebound on reload,
+  so the merge uses the current set; (B) the server kept a *separate* `profiles` copy feeding
+  `/api/profiles` and page assignment-validation, which lagged resolution — the server now reads
+  the profile set from the directory (single source, `directory.currentProfiles()`), so the
+  page's offered/accepted set tracks resolution. Note: this is a down-payment on the
+  `buildRuntime` extraction (Phase 4), which should absorb the whole plugin+profile build so the
+  three sites can't diverge again. Tests: adopt-leaves-profileSet contract, and page
+  listing/validation track the live set.
 - **TODO** — `[kimi, from #26 review]` **CLI parked markers are false for plugin-suggested
   profiles.** The CLI never loads plugins, so its `profileSet` = built-ins + stored custom; a
   peer on a plugin-suggested profile shows `⚠ parked` in `hail peers` and its `--reassign` is

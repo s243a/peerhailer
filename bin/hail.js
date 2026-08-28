@@ -575,7 +575,11 @@ switch (command) {
       },
       policy: greedyPolicy({ distance: xorDistanceOver((/** @type {string} */ k) => createHash("sha256").update(k).digest("hex")) }),
     });
-    const plugins = [
+    // Rebound by `rebuild()` on reload, so `applyChange`'s profile merge uses the
+    // current plugin set rather than the one from startup — otherwise a reload
+    // that changed the plugins would leave applyChange collecting stale
+    // plugin-suggested profiles into the live directory.
+    let plugins = [
       hailPlugin,
       createDiagnosticsPlugin(diagnostics),
       ...(Object.keys(tunnels).length
@@ -688,6 +692,9 @@ switch (command) {
         // a tunnel and watching their T3 integration stop answering.
         ...(await loadPlugins(fresh.plugins ?? [], { log })),
       ];
+      // Keep the closure's plugin list current, so `applyChange` (which runs
+      // between reloads) merges profiles from the set actually in force.
+      plugins = nextPlugins;
       return {
         plugins: nextPlugins,
         profiles: { ...collectProfiles(nextPlugins), ...(fresh.profiles ?? {}) },
@@ -740,6 +747,13 @@ switch (command) {
           { log },
         );
         directory.adopt(next);
+        // Re-apply the profile set too — `adopt` deliberately leaves it alone
+        // because the merged (built-ins + plugin-suggested + stored) set is only
+        // knowable here, where the plugins are. Without this a profile removed or
+        // renamed at another terminal never reaches this running daemon: it keeps
+        // resolving the stale name (granting), and the parked surface stays blank,
+        // until a restart. Same merge as startup and `rebuild`.
+        directory.useProfiles({ ...collectProfiles(plugins), ...(next.profiles ?? {}) });
         return result;
       },
       log,

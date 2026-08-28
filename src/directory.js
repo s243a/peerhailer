@@ -816,6 +816,13 @@ export function createDirectory(state = {}) {
     /** @param {string} name */
     profileFor: (name) => resolveProfile(asOfNow(admitted.get(name))?.profile, profileSet),
     /**
+     * The resolvable profile set, as it stands now — the single source the daemon
+     * reads for listing, assignment validation, and rejection style, so those
+     * never lag behind resolution after a `useProfiles` refresh. A shallow copy,
+     * so a caller can't mutate the live set.
+     */
+    currentProfiles: () => ({ ...profileSet }),
+    /**
      * A peer's assigned profile, and whether it still names a real one. `parked`
      * is true when a name was assigned but no longer resolves (a removed or
      * renamed profile, a hand-edited record) — the peer is granted nothing until
@@ -850,6 +857,11 @@ export function createDirectory(state = {}) {
      * to the file. After one lands, this brings the two back together — without
      * it the page would keep showing what was true before the change it just
      * made.
+     *
+     * Deliberately does *not* touch the profile set: the resolvable profiles are
+     * built-ins + plugin-suggested + stored, and the plugin half is only known to
+     * the host, not here. The caller (`applyChange`/`reload`) re-applies the
+     * merged set via `useProfiles` after adopting — see the note there.
      *
      * @param {any} state
      */
