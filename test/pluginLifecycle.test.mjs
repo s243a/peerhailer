@@ -47,3 +47,15 @@ test("reload() swaps to the new plugins and stops the replaced ones", async () =
   assert.deepEqual(stopped, ["old"], "the replaced plugin was stopped after the swap");
   await daemon.close();
 });
+
+test("reload() stops only retired plugins — an instance carried into the new set keeps serving", async () => {
+  const stopped = [];
+  const shared = { name: "shared", routes: [], stop: () => stopped.push("shared") };
+  const daemon = daemonWith([shared, { name: "old", routes: [], stop: () => stopped.push("old") }]);
+  await daemon.listen({ port: 0 });
+  daemon.reload({ plugins: [shared, { name: "new", routes: [] }] }); // shared carried over
+  await tick();
+  assert.deepEqual(stopped, ["old"], "the retired plugin is stopped; the carried-over instance is not");
+  await daemon.close(); // now shared IS stopped (it's the current set)
+  assert.ok(stopped.includes("shared"), "the carried-over instance stops on close, once");
+});

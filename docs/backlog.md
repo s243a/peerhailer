@@ -151,6 +151,9 @@ roadmap is shared, not scattered across PR threads.
 - `[sol]` an invalid file op silently becomes `list`; `block()` isn't idempotent; a few overview
   comments have drifted (`ui.js` "read-mostly", `directory.js` "only names/routes/timestamps",
   `server.js` "every refusal is a 404").
+- `[fable, from #27 review]` `composer.closeAll` does `void stop(id)` on async teardown; the one
+  unguarded call inside (`entry.gate?.close()`, `composer.js:294`) could surface as an unhandled
+  rejection (process-fatal under default Node) on shutdown. Guard it. Marginal.
 
 ## Test gaps to pin
 

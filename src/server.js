@@ -1184,7 +1184,12 @@ export function createDaemon({
         const oldPlugins = plugins;
         plugins = nextPlugins;
         pluginRoutes = nextRoutes;
-        Promise.allSettled(oldPlugins.map((plugin) => Promise.resolve().then(() => plugin.stop?.()))).catch(() => {});
+        // Stop only the plugins actually retired — an instance carried into the
+        // new set (a module-level singleton like `hailPlugin`, or an external
+        // plugin that exports an object rather than a factory) is still serving,
+        // and stopping it would leave the daemon running a torn-down plugin.
+        const retired = oldPlugins.filter((plugin) => !nextPlugins.includes(plugin));
+        Promise.allSettled(retired.map((plugin) => Promise.resolve().then(() => plugin.stop?.()))).catch(() => {});
       }
       if (nextProfiles) {
         profiles = nextProfiles;
