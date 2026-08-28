@@ -230,6 +230,13 @@ test("adopting state without a self leaves the running self untouched", () => {
   assert.equal(directory.self.publicKey, "PK");
 });
 
+test("a daemon with no seal key does not inherit one from persisted state (absence, not undefined)", () => {
+  const directory = createDirectory({ self: { name: "me", publicKey: "PK" } }); // no sealPublicKey
+  directory.adopt({ admitted: [], candidates: [], self: { name: "me2", publicKey: "PK", sealPublicKey: "PERSISTED" } });
+  assert.equal(directory.self.name, "me2", "the rename still lands");
+  assert.equal("sealPublicKey" in directory.self, false, "the key is absent, not a stale/undefined own-key");
+});
+
 test("an address you can type is an address that can be dialled", () => {
   const directory = createDirectory({ self: { name: "me" } });
   // People type host:port. Stored values are used as a URL base, so without

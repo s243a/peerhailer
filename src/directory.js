@@ -930,10 +930,14 @@ export function createDirectory(state = {}) {
       if (state?.self) {
         const incoming = makePeerRecord(state.self);
         if (incoming) {
-          Object.assign(self, incoming, {
-            publicKey: self.publicKey,
-            sealPublicKey: self.sealPublicKey,
-          });
+          const { publicKey, sealPublicKey } = self;
+          Object.assign(self, incoming);
+          self.publicKey = publicKey;
+          // Restore the runtime seal key, or *remove* it when the daemon holds
+          // none — matching the codebase's key-absence convention rather than
+          // leaving a `sealPublicKey: undefined` own-key an `in` check would trip.
+          if (sealPublicKey === undefined) delete self.sealPublicKey;
+          else self.sealPublicKey = sealPublicKey;
         }
       }
       blocklist.names = [...(state?.blocklist?.names ?? [])];
