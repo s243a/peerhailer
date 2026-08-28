@@ -181,9 +181,16 @@ roadmap is shared, not scattered across PR threads.
   socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
   `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
 - **TODO** — `[sol]` **CLI arg parsing** — `node:util.parseArgs` or a per-command schema. `bin/hail.js`.
-- **TODO** — `[sol, split from #12]` **Immutable read views** — getters/snapshots hand out mutable
-  records that bypass `commit`. Return **deeply** cloned/frozen views (a shallow spread or a top-level
-  `Object.freeze` still exposes nested `addresses`/`conflicts`). `directory.js`.
+- **DONE** — `[sol, split from #12]` **Immutable read views** — `get`/`getByKey`/`listAdmitted`/
+  `listCandidates`/`holdersOf`/`snapshot`/`currentProfiles` handed out live records, so a caller
+  mutating one (e.g. `record.addresses.push(...)`) corrupted directory state behind `commit`'s back
+  (no revision bump). Fixed with a `readView(value)` = `deepFreeze(structuredClone(value))` applied to
+  each getter: a deep clone (the nested `addresses`/`conflicts` arrays are copied, not shared) that is
+  also deeply frozen, so a stray mutation is *loud* (throws in strict mode) rather than silently lost.
+  `deepFreeze` only ever touches a fresh clone — never a live record, which `commit` still mutates.
+  `mergeByRevision` is pure, so a frozen snapshot flows through the persist path untouched; the whole
+  suite passed unchanged, confirming no consumer mutated a read view. Test in `test/directory.test.mjs`.
+  (Mutator returns like `admit`'s are out of scope — the item is read getters.) `directory.js`.
 
 ## Phase 5 — deferred feature work
 
