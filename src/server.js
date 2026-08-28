@@ -53,19 +53,33 @@ const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
 const FRESHNESS_MS = 5 * 60_000;
 
+/** The request body exceeded {@link MAX_BODY} — a 413 on the control API. */
+class RequestTooLarge extends Error {}
+/** The request body was not valid JSON — a 400 on the control API. */
+class MalformedRequest extends Error {}
+
 /**
  * @param {import("node:http").IncomingMessage} request
  * @returns {Promise<string>}
  */
 function readBody(request) {
   return new Promise((resolve, reject) => {
+    // Reject an over-declared body before reading a byte of it, without destroying
+    // the socket — so a caller can still be answered (a 413 on the control API).
+    // The streaming guard below stays for a body that under-declares or omits its
+    // length: that one is dropped (socket destroyed) rather than answered.
+    const declared = Number(request.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > MAX_BODY) {
+      reject(new RequestTooLarge("body too large"));
+      return;
+    }
     let size = 0;
     /** @type {Buffer[]} */
     const chunks = [];
     request.on("data", (chunk) => {
       size += chunk.length;
       if (size > MAX_BODY) {
-        reject(new Error("body too large"));
+        reject(new RequestTooLarge("body too large"));
         request.destroy();
         return;
       }
@@ -74,6 +88,25 @@ function readBody(request) {
     request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     request.on("error", reject);
   });
+}
+
+/**
+ * Read and parse a JSON request body, as a typed operation. An empty body is `{}`
+ * (the routes all treat a missing field as absent). The two failure modes are
+ * *typed* — {@link RequestTooLarge} (from `readBody`) and {@link MalformedRequest}
+ * — so the caller can answer each with the right status where that is wanted (the
+ * control API) and conceal it where it is not (a peer-facing plugin route).
+ *
+ * @param {import("node:http").IncomingMessage} request
+ * @returns {Promise<any>}
+ */
+async function readJson(request) {
+  const raw = await readBody(request);
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    throw new MalformedRequest("request body is not valid JSON");
+  }
 }
 
 /**
@@ -673,7 +706,15 @@ export function createDaemon({
         // replays within the freshness window), so a shell is not served there.
         if (pluginRoute.requiresEncryptedArrival === "mutual" && !arrivalIsMutual) return nothingHere(response);
 
-        const body = JSON.parse((await readBody(request)) || "{}");
+        // A plugin route is peer-facing and conceals: a malformed or oversized
+        // body reveals nothing beyond "not here", exactly as an unmatched route
+        // would — so it is answered that way rather than with a diagnostic status.
+        let body;
+        try {
+          body = await readJson(request);
+        } catch {
+          return nothingHere(response);
+        }
         // Authentication and capability happen here, in the core, before the
         // plugin is reached. A plugin cannot opt out of this, which is what
         // makes loading one a smaller decision than writing one.
@@ -751,7 +792,7 @@ export function createDaemon({
       }
 
       if (scope === "control" && url.pathname === "/api/block" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         if (typeof body?.name !== "string") return send(response, 400, { error: "a name is required" });
         const result = change((peers) =>
           body.blocked === false
@@ -872,7 +913,7 @@ export function createDaemon({
       }
       if (scope === "control" && url.pathname === "/api/chat/send" && request.method === "POST") {
         if (!chat) return send(response, 501, { error: "chat is off — start the daemon with --chat" });
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const record = directory.get?.(body?.peer ?? "");
         const text = typeof body?.text === "string" ? body.text : "";
         if (!record) return send(response, 404, { error: "unknown peer" });
@@ -928,7 +969,7 @@ export function createDaemon({
       }
       if (scope === "control" && url.pathname === "/api/chat/clear" && request.method === "POST") {
         if (!chat) return send(response, 200, { cleared: false });
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const record = directory.get?.(body?.peer ?? "");
         if (record) chat.forget(record.publicKey);
         return send(response, 200, { cleared: Boolean(record) });
@@ -940,7 +981,7 @@ export function createDaemon({
       // trusted here. `share` and `op` are validated because they become URL path
       // segments — a peer name and a share name, never a free path.
       if (scope === "control" && url.pathname === "/api/files/browse" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const op = ["list", "get", "put", "stat"].includes(body?.op) ? body.op : "list";
         const share = String(body?.share ?? "");
         if (!body?.peer || !/^[a-z0-9][a-z0-9-]*$/i.test(share)) {
@@ -960,7 +1001,7 @@ export function createDaemon({
         return send(response, 200, { mounts: [...mounts.entries()].map(([id, m]) => ({ mountId: id, peer: m.peer, share: m.share, url: m.url })) });
       }
       if (scope === "control" && url.pathname === "/api/files/mount" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const share = String(body?.share ?? "");
         const peer = String(body?.peer ?? "");
         if (!peer || !/^[a-z0-9][a-z0-9-]*$/i.test(share)) return send(response, 400, { error: "a peer and a valid share name are required" });
@@ -978,7 +1019,7 @@ export function createDaemon({
         }
       }
       if (scope === "control" && url.pathname === "/api/files/mount/stop" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const entry = mounts.get(String(body?.mountId ?? ""));
         if (!entry) return send(response, 200, { stopped: false });
         mounts.delete(String(body.mountId));
@@ -992,7 +1033,7 @@ export function createDaemon({
       if (scope === "control" && url.pathname === "/api/route/send" && request.method === "POST") {
         const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
         const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
         return send(response, 200, result);
@@ -1039,7 +1080,7 @@ export function createDaemon({
       }
 
       if (scope === "control" && url.pathname === "/api/peers" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         // An unrecognised profile now fails closed (grants nothing), so admitting
         // to one silently would strand the peer — reject it at the door instead.
         if (typeof body?.profile === "string" && !isAssignableProfile(body.profile, currentProfiles())) {
@@ -1064,7 +1105,7 @@ export function createDaemon({
       // re-walk is not allowed to perform. Routed through `change`, so it applies
       // to current disk state and cannot be rolled back by a stale writer.
       if (scope === "control" && url.pathname === "/api/seal/accept" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         const name = typeof body?.peer === "string" ? body.peer : "";
         const sealKey = typeof body?.sealKey === "string" && body.sealKey.trim() ? body.sealKey : undefined;
         if (!name || !directory.get?.(name)) return send(response, 404, { error: "unknown peer" });
@@ -1090,7 +1131,7 @@ export function createDaemon({
         return send(response, 200, await composer.nodes());
       }
       if (scope === "control" && url.pathname === "/api/compose/launch" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         try {
           return send(response, 200, await composer.launch(body));
         } catch (error) {
@@ -1102,13 +1143,13 @@ export function createDaemon({
         return send(response, 200, composer.seat(url.searchParams.get("launchId") ?? ""));
       }
       if (scope === "control" && url.pathname === "/api/compose/stop" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         return send(response, 200, await composer.stop(body?.launchId));
       }
       // T3-to-T3 remote control: mint a grant on a peer, tunnel its T3 origin
       // here, and hand back a deep link the local T3 client opens to drive it.
       if (scope === "control" && url.pathname === "/api/compose/control" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         try {
           return send(response, 200, await composer.controlRemote(body));
         } catch (error) {
@@ -1117,14 +1158,26 @@ export function createDaemon({
         }
       }
       if (scope === "control" && url.pathname === "/api/compose/control/stop" && request.method === "POST") {
-        const body = JSON.parse((await readBody(request)) || "{}");
+        const body = await readJson(request);
         return send(response, 200, await composer.stopControl(body?.controlId));
       }
 
       return nothingHere(response);
     } catch (cause) {
+      // The control API is a loopback management surface: a malformed or oversized
+      // request there is the caller's own mistake, and the status that says which —
+      // so a script or the page can act on it — beats a blank 404. A hail listener
+      // is peer-facing and deliberately conceals: an unexpected throw is answered
+      // like any unmatched route, revealing nothing. (Plugin routes conceal their
+      // own body errors above, on either listener.)
       // `url` may be undefined if it was the thing that threw — fall back to the
       // raw target so the log never throws a second time inside the catch.
+      if (scope === "control") {
+        if (cause instanceof RequestTooLarge) return send(response, 413, { error: "request body too large" });
+        if (cause instanceof MalformedRequest) return send(response, 400, { error: "request body is not valid JSON" });
+        log(`[daemon] ${url?.pathname ?? request.url} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+        return send(response, 500, { error: "internal error" });
+      }
       log(`[daemon] ${url?.pathname ?? request.url} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
       return nothingHere(response);
     }
