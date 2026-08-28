@@ -120,11 +120,14 @@ roadmap is shared, not scattered across PR threads.
 
 ## Phase 3 — UX (separate concerns — not one "UI batch")
 
-- **TODO** — `[fable]` **New incoming conversations never appear in the chat UI.** Careful: polling
-  `chLoad()` every 4s would *worsen* the open-`<select>` churn below. Fix shape: **replace** the
-  `chOpen()` poll with a single state refresh that updates peer options **only when their model
-  changed**, preserves the current selection, opens the selected thread once, and does **not** replace
-  options while the chat selector is actively in use. `ui.js`.
+- **DONE** — `[fable]` **New incoming conversations never appear in the chat UI.** The 4s poll only
+  called `chOpen()` (the open thread's messages), never rebuilding the peer `<option>` list, so a peer
+  who messaged first never showed in the dropdown. Fixed: the poll now runs `chPoll()`, which rebuilds
+  the list from `/api/chat/state` and writes it **only when it changed** (`html !== chLastOpts`) **and**
+  the selector isn't the focused element — so an open dropdown / mid-choice selection is never churned
+  (same guard as the peer table). Selection preserved; the open thread still refreshes each tick.
+  Option-building extracted to `chOptions`/`chApplyOptions` (shared by `chLoad`). Served-page guard in
+  `test/ui.test.mjs`; visual pass deferred. `ui.js`.
 - **DONE** — `[fable]` **`api()` discards the server's error message** — the 409 sealing explanations
   and "a name is required" were unreachable; `api()` threw a bare `HTTP <n>`. Fixed: `api()` now reads
   the body and throws `data.error ?? "HTTP <n>"`, mirroring `cxPost` (the server sends `{error}` on 20
