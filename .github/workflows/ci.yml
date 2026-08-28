@@ -17,6 +17,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite runs in seconds; a job that reaches minutes is hung, not slow.
+    # Without this a hung runner blocks for GitHub's 360-minute default and, worse,
+    # its log is never retrievable — so an intermittent hang is invisible instead of
+    # a fast, diagnosable failure that names the step it died in.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +45,7 @@ jobs:
   # because both are properties of the tarball rather than of the source.
   package:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # same reasoning as `test`: a hang here should fail fast, not block for hours.
     name: the tarball a consumer actually gets
     steps:
       - uses: actions/checkout@v4
