@@ -213,13 +213,24 @@ function addressesOf(peer) {
     .join("<br>");
 }
 
-async function refresh() {
+// force distinguishes the 5s auto-refresh (which yields to an open select) from a
+// refresh a deliberate action asked for. An action's own button keeps focus inside
+// the table, so without force the post-action repaint — the whole point of the
+// call — would be the very thing the focus guard suppresses, leaving a forgotten
+// row or a stale block label until focus happened to move.
+async function refresh(force = false) {
   try {
     const [state, profiles] = await Promise.all([api("/api/peers"), api("/api/profiles")]);
     $("clock").textContent = new Date().toLocaleTimeString();
 
     const options = profiles.map((p) => p.name);
-    $("peers").innerHTML = state.admitted.length
+    // Don't repaint the peer table out from under an open profile <select>: the
+    // 5s refresh replacing innerHTML would snap it shut mid-choice and drop the
+    // half-made selection. The focus check runs right before the write, so focus
+    // cannot slip into the table between the check and the replacement.
+    const peersEl = $("peers");
+    if (force || !peersEl.contains(document.activeElement))
+      peersEl.innerHTML = state.admitted.length
       ? '<table><tr><th>Peer</th><th>Profile</th><th>Why</th><th>Reachable at</th><th></th></tr>' +
         state.admitted.map((peer) => {
           const chosen = options
@@ -278,7 +289,7 @@ document.addEventListener("click", async (event) => {
     // refresh landing between render and click would otherwise invert the
     // action, and the row would look unchanged because it did the opposite.
     if (block) await api("/api/block", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: block, blocked: target.dataset.blocked !== "true" }) });
-    await refresh();
+    await refresh(true);
   } catch (cause) {
     $("error").textContent = String(cause.message ?? cause);
   }
@@ -293,7 +304,7 @@ document.addEventListener("change", async (event) => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name: target.dataset.peer, profile: target.value }),
     });
-    await refresh();
+    await refresh(true);
   } catch (cause) {
     $("error").textContent = String(cause.message ?? cause);
   }
