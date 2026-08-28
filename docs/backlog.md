@@ -23,21 +23,35 @@ roadmap is shared, not scattered across PR threads.
 
 ## Phase 1 — security & robustness (do first)
 
-- **TODO** — `[kimi/sol]` **Profile fail-closed: honesty layer** (follow-up to #24). Fail-closed
-  without surfacing recreates the "looks like a network fault" fear, so pair it with:
-  - **Validate at the library boundary** (`directory.admit`), not only CLI/API — a future caller
-    must not silently store an unassignable profile. (Security itself is already caller-independent:
-    the resolver fails closed at every reader; this is the loud-at-the-door half.)
-  - **Removal semantics:** `hail profiles remove` should **refuse while the profile is still
-    assigned** (list holders), with `--force` demoting holders to `unknown` (never `trusted`) and
-    `--reassign <name>` moving them. Mirrors the existing refuse-to-edit-built-ins rule.
-  - **Surface a parked peer:** `profileFor`/`effectiveProfile` carry an "assigned profile 'X' no
-    longer exists" reason; render it in `hail peers` and the page like a seal conflict.
-  - **Migration/startup warning** for state files already naming a missing profile (a renamed
-    built-in ships a one-line migration map; a dropped one parks with the surfaced reason).
-  - Note: this **reverses a documented availability choice** — missing profiles used to preserve
-    connectivity; they now revoke capabilities, visibly.
-  Ships as one trust-semantics PR (validation + resolution + removal + migration + tests).
+- **DONE (across #24/#26/#28 + CLI-visibility PR)** — `[kimi/sol]` **Profile fail-closed: honesty
+  layer** (follow-up to #24). Delivered by *surfacing*, which is what keeps fail-closed from reading
+  as a network fault:
+  - **Removal semantics:** `hail profiles remove` refuses while the profile is still assigned (lists
+    holders), `--force` demotes to `unknown` (never `trusted`), `--reassign <name>` moves them. ✓
+  - **Surface a parked peer:** `profileStatus` carries `parked` + the "assigned 'X' no longer exists"
+    reason, rendered in `hail peers`, the page, and a `[daemon]` startup warning. ✓ (The CLI's markers
+    were false for *external* plugin profiles until the CLI-visibility PR below — now fixed.)
+  - **Startup warning** for state files naming a missing profile: the daemon logs parked peers at
+    boot. ✓
+  - **Validate at the library boundary (`directory.admit`):** deliberately **not** done as a *refusal*
+    — admit's contract is park-don't-refuse (it can't know the plugin-suggested set at construction,
+    and refusing would break replay/reload of a record naming a since-removed profile), and
+    `createDirectory` takes no log to warn through. The "must not *silently* store" goal is met by the
+    parked surfacing above (it is never silent). A boundary *warning* (not refusal) would need a log
+    threaded through `createDirectory` — deferred as low value given the surfacing already lands
+    everywhere a reader looks.
+  - Note: this reverses a documented availability choice — missing profiles used to preserve
+    connectivity; they now revoke capabilities, **visibly**.
+- **DONE** — `[kimi, from #26 review]` **CLI parked markers were false for external plugin
+  profiles.** The CLI never loaded plugins, so its resolvable set was built-ins + stored custom; a
+  peer on an *external* plugin's suggested profile falsely read `⚠ parked` in `hail peers` and its
+  `--profile`/`--reassign` were falsely refused (bundled plugins add only built-ins, so no false
+  marker there). Fixed: `bin/hail.js` gains a memoised `resolvableProfiles()` that loads the
+  configured external plugins (like `hail plugins` does) and folds their suggestions in; used by
+  `hail peers` (via `useProfiles`) and the `add`/`trust`/`profiles --reassign` assignability checks.
+  `loadPlugins([])` is instant, so a config with no external plugins pays nothing; fail-closed intact
+  (a genuinely-unknown profile is still refused/parked). Test in `test/cli.test.mjs` with a fixture
+  plugin.
 - **DONE (#28)** — `[kimi, from #26 review; extended per fable]` **A profile removal/rename
   never reached a running daemon.** `adopt()` refreshed admitted/candidates/blocklist/trust but
   not `profileSet`. Fixed: `applyChange` re-applies the **merged** (built-ins + plugin-suggested
@@ -51,16 +65,15 @@ roadmap is shared, not scattered across PR threads.
   `buildRuntime` extraction (Phase 4), which should absorb the whole plugin+profile build so the
   three sites can't diverge again. Tests: adopt-leaves-profileSet contract, and page
   listing/validation track the live set.
-- **TODO** — `[kimi, from #26 review]` **CLI parked markers are false for plugin-suggested
-  profiles.** The CLI never loads plugins, so its `profileSet` = built-ins + stored custom; a
-  peer on a plugin-suggested profile shows `⚠ parked` in `hail peers` and its `--reassign` is
-  falsely refused. A false parked marker trains the operator to ignore the marker. Load
-  plugin-suggested profiles in the CLI like the daemon, or footnote that the set is partial.
-  `bin/hail.js`.
-- **TODO (release-gated)** — `[kimi]` **Renamed-built-in migration map.** A startup warning is
-  enough until a built-in is actually renamed; the day one is, every record holding the old
-  name parks at upgrade. Any release that renames a built-in must ship a one-line migration
-  map applied on load. Checklist item, gated on "a built-in is renamed".
+<!-- CLI parked-marker visibility: DONE — folded into the "Profile fail-closed: honesty layer" entry
+     above (resolvableProfiles() in bin/hail.js loads external plugins so the CLI resolves the daemon's set). -->
+
+- **CHECKLIST (release-gated, no code now)** — `[kimi]` **Renamed-built-in migration map.** The
+  interim measure is shipped: the daemon logs parked peers at boot, so a record naming a missing
+  profile is surfaced, not silent. Nothing to build until a built-in is actually renamed — building a
+  map speculatively is YAGNI. **Release checklist:** any release that renames a built-in profile must
+  ship a one-line `old → new` migration map applied on load, or every record holding the old name
+  parks at upgrade.
 - **DONE (#27)** — `[sol]` **Resource lifecycle.** `close()` never called plugin `stop()`,
   orphaning `shell`/`service`/`tunnel` child processes and tunnels on shutdown. Fixed:
   `close()` stops listeners first, then plugins (`Promise.allSettled`, best-effort), then
