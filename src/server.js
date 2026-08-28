@@ -134,6 +134,13 @@ export function createDaemon({
   // does not catch.
   let plugins = initialPlugins;
   let profiles = initialProfiles;
+  // The resolvable profile set, read from the directory when it exposes one so
+  // listing, assignment validation, and rejection style never lag behind
+  // resolution — a `profiles remove` applied through `applyChange` updates the
+  // directory's set, and reading it here keeps the page's offered/accepted set in
+  // step. Falls back to the local `profiles` (still set by `reload`) if a host
+  // wired an older directory without the accessor.
+  const currentProfiles = () => directory.currentProfiles?.() ?? profiles;
 
   // The fabric seam for the composer: enumerate peers' offers and start/stop a
   // worker service on one, all via the same signed `callPeer` the CLI uses.
@@ -215,7 +222,7 @@ export function createDaemon({
    * @param {string} [profileName]
    */
   const turnAway = (response, profileName) => {
-    if (rejectionFor(profileName, profiles) === "drop") {
+    if (rejectionFor(profileName, currentProfiles()) === "drop") {
       response.destroy();
       return;
     }
@@ -739,7 +746,7 @@ export function createDaemon({
       }
 
       if (scope === "control" && url.pathname === "/api/profiles" && request.method === "GET") {
-        return send(response, 200, listProfiles(profiles));
+        return send(response, 200, listProfiles(currentProfiles()));
       }
 
       if (scope === "control" && url.pathname === "/api/block" && request.method === "POST") {
@@ -1004,7 +1011,7 @@ export function createDaemon({
       // neither gets nothing. Describing that is not the same as showing it.
       if (scope === "control" && url.pathname === "/api/shared" && request.method === "GET") {
         const profileName = url.searchParams.get("profile") ?? "";
-        const known = listProfiles(profiles).find((entry) => entry.name === profileName);
+        const known = listProfiles(currentProfiles()).find((entry) => entry.name === profileName);
         if (!known) return send(response, 404, { error: `no profile called ${profileName}` });
 
         const mayHail = (known.allows ?? []).includes(HAIL);
@@ -1024,7 +1031,7 @@ export function createDaemon({
         const body = JSON.parse((await readBody(request)) || "{}");
         // An unrecognised profile now fails closed (grants nothing), so admitting
         // to one silently would strand the peer — reject it at the door instead.
-        if (typeof body?.profile === "string" && !isAssignableProfile(body.profile, profiles)) {
+        if (typeof body?.profile === "string" && !isAssignableProfile(body.profile, currentProfiles())) {
           return send(response, 400, {
             error: body.profile === "blocked" ? "`blocked` is not assignable — use the block control" : `no profile called ${body.profile}`,
           });
