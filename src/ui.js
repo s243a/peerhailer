@@ -713,7 +713,15 @@ async function fxUpload() {
     let bin = "";
     for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
     const r = await fxBrowse("put", { path: fxJoin(ctx.path, f.name), data: btoa(bin) }, ctx);
-    if (!fresh()) { $("fx-status").textContent = "uploaded to " + ctx.peer + ":" + ctx.share + " (view since changed)"; return; }
+    if (!fresh()) {
+      // The view moved on, but this upload had a definite outcome for its own
+      // target — report it honestly (a refusal is not a success), attributed to
+      // the target it was for, not the one on screen now.
+      $("fx-status").textContent = r.error
+        ? "upload to " + ctx.peer + ":" + ctx.share + " refused: " + r.error
+        : "uploaded to " + ctx.peer + ":" + ctx.share + " (view since changed)";
+      return;
+    }
     if (r.error) $("fx-status").textContent = "upload refused: " + r.error;
     else { $("fx-status").textContent = "uploaded " + f.name + " (" + (r.written == null ? "?" : r.written) + " bytes)"; await fxOpen(); }
   } catch (e) { if (fresh()) $("fx-status").textContent = "upload failed: " + (e.message ?? e); }
