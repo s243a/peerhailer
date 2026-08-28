@@ -1174,9 +1174,22 @@ export function createDaemon({
       // plugins) *before* calling this; an await moved inside here would reopen
       // exactly that window.
       if (Array.isArray(nextPlugins)) {
-        for (const plugin of plugins) plugin.stop?.();
+        // Build the replacement into a temporary *before* touching any live
+        // reference, then swap both at once — so a future validation that could
+        // reject the new set leaves the old one whole rather than half-swapped.
+        // Only after the swap are the replaced plugins stopped, best-effort and
+        // fire-and-forget (a sync throw or a rejected async stop() must not tear
+        // the reload, and awaiting here would break the no-await invariant above).
+        const nextRoutes = collectRoutes(nextPlugins, { log });
+        const oldPlugins = plugins;
         plugins = nextPlugins;
-        pluginRoutes = collectRoutes(plugins, { log });
+        pluginRoutes = nextRoutes;
+        // Stop only the plugins actually retired — an instance carried into the
+        // new set (a module-level singleton like `hailPlugin`, or an external
+        // plugin that exports an object rather than a factory) is still serving,
+        // and stopping it would leave the daemon running a torn-down plugin.
+        const retired = oldPlugins.filter((plugin) => !nextPlugins.includes(plugin));
+        Promise.allSettled(retired.map((plugin) => Promise.resolve().then(() => plugin.stop?.()))).catch(() => {});
       }
       if (nextProfiles) {
         profiles = nextProfiles;
@@ -1272,12 +1285,18 @@ export function createDaemon({
     },
 
     close: async () => {
-      composer.closeAll();
-      for (const [, m] of mounts) { try { await m.close(); } catch {} }
-      mounts.clear();
+      // Listeners first, so no new request lands on a resource being torn down.
       await Promise.all(hailServers.map(stop));
       hailServers.length = 0;
       await stop(control);
+      // Then the plugins — shell/service/tunnel hold child processes and tunnels
+      // that were otherwise orphaned on shutdown, because close() never stopped
+      // them. Best-effort (sync throw or rejected stop() must not block the rest),
+      // symmetric with the teardown `reload` does when it replaces a plugin set.
+      await Promise.allSettled(plugins.map((plugin) => Promise.resolve().then(() => plugin.stop?.())));
+      composer.closeAll();
+      for (const [, m] of mounts) { try { await m.close(); } catch {} }
+      mounts.clear();
     },
   };
 }
