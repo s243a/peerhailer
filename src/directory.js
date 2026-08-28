@@ -758,6 +758,16 @@ export function createDirectory(state = {}) {
     /** @param {string} name */
     get: (name) => admitted.get(name) ?? null,
     /**
+     * The best record we hold for a name — admitted, or merely a candidate. Used
+     * where a *key* matters more than admission, chiefly blocking: a gossiped key
+     * on a candidate is still a key, and blocking by it (not by name) is what
+     * stops the peer renaming its way back in. `unblock` already consults
+     * candidates; this makes `block` symmetric.
+     *
+     * @param {string} name
+     */
+    recordFor: (name) => admitted.get(name) ?? candidates.get(name)?.record ?? null,
+    /**
      * Find an admitted peer by the key it signs with.
      *
      * The lookup that matters when someone calls: a name is what they claim, a

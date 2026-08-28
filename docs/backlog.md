@@ -70,11 +70,12 @@ roadmap is shared, not scattered across PR threads.
   `reload` is synchronous, so the reload restaging is defensive hardening — the definite bug
   was `close()`. Tests: close stops plugins, a throwing stop() doesn't block the rest, reload
   swaps and stops the old set.
-- **TODO** — `[fable, moved from Phase 2]` **Blocking a candidate ignores its key** — a security
-  *bypass* (a gossiped-key candidate blocked by name renames back in), so Phase 1. Fix: resolve the
-  admitted-or-candidate record and pass it to `directory.block()`, which is already key-first with a
-  name fallback. Do **not** record both name and key — that changes the documented key-first
-  semantics and would stop a different identity legitimately reusing the name later.
+- **DONE** — `[fable, moved from Phase 2]` **Blocking a candidate ignores its key** — a security
+  *bypass* (a gossiped-key candidate blocked by name renames back in), so Phase 1. Fixed: added
+  `directory.recordFor(name)` (admitted-or-candidate, key-first) and both call sites (CLI `block`,
+  `/api/block`) now pass its record to `directory.block()`, which is already key-first with a name
+  fallback. A key is recorded *xor* a name, never both — a name-only candidate still blocks by name,
+  so a different identity can legitimately reuse a freed name later. Tests in `test/blockCandidate.test.mjs`.
 - **TODO (late Phase 1)** — `[fable]` `reconcilePersist` marks `trust` as changed on the first load
   of a legacy state file (constructor materialised defaults), which could overwrite a concurrent
   trust-policy edit in that first-load window. Not "or comment": either **classify as accepted debt**

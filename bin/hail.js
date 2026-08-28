@@ -355,7 +355,9 @@ switch (command) {
   case "block": {
     const [name] = rest;
     if (!name) fail("usage: hail block <name>");
-    const peer = directory.get(name) ?? { name };
+    // Resolve admitted *or candidate*, so a gossiped key on a peer we only heard
+    // of is blocked by key — otherwise it renames its way back in.
+    const peer = directory.recordFor(name) ?? { name };
     directory.block(peer);
     persist();
     log(

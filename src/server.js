@@ -755,7 +755,9 @@ export function createDaemon({
         const list = change((peers) =>
           body.blocked === false
             ? peers.unblock(body.name)
-            : peers.block(peers.get(body.name) ?? { name: body.name }),
+            : // recordFor, not get: block a candidate by its gossiped key too, so
+              // it can't rename its way back in (get resolves admitted peers only).
+              peers.block(peers.recordFor(body.name) ?? { name: body.name }),
         );
         return send(response, 200, list);
       }
