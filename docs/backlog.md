@@ -86,11 +86,16 @@ roadmap is shared, not scattered across PR threads.
   for a key that outlived its record (candidate blocked then forgotten). Tests in
   `test/blockCandidate.test.mjs`. Deferred follow-up: a web-UI affordance for the `--include-key`
   confirm (the UI block button correctly does the safe name-only default today).
-- **TODO (late Phase 1)** — `[fable]` `reconcilePersist` marks `trust` as changed on the first load
-  of a legacy state file (constructor materialised defaults), which could overwrite a concurrent
-  trust-policy edit in that first-load window. Not "or comment": either **classify as accepted debt**
-  (documented) or **fix** — normalise legacy state consistently before both baseline capture and the
-  locked re-read, with a regression test. Late in Phase 1 because it can lose a trust edit.
+- **DONE** — `[fable]` `reconcilePersist` marked `trust` (and any default-materialised key: an empty
+  `blocklist`, `candidates`) as changed on the first load of a legacy state file, because the baseline
+  was the *raw* stored file while `current` came through the constructor-materialised snapshot — so a
+  pure default filled in by the constructor read as an edit and clobbered a concurrent writer's real
+  edit to that key. **Fixed** by building the baseline the same way `current` is built: new exported
+  `directory.reconcileBaseline(stored, snapshot)` takes the directory-managed keys through the startup
+  snapshot on both sides, so materialisation is a no-op and only a real edit is written. `self` is the
+  deliberate exception (kept raw) so identity stamping is still persisted on first sight — verified a
+  brand-new machine still saves its identity and a legacy file gains no spurious `trust` key.
+  Regression tests in `test/sealPersistence.test.mjs` (incl. an assertion documenting the pre-fix clobber).
 
 ## Phase 2 — correctness
 

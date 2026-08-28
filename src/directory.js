@@ -108,6 +108,32 @@ export function reconcilePersist(onDisk, baseline, current) {
 }
 
 /**
+ * The baseline `reconcilePersist` diffs a command's `current` state against.
+ *
+ * It must be built the *same way* as `current` (`{ ...stored, ...snapshot }`), or
+ * the directory constructor merely **materialising defaults** on a legacy file —
+ * an absent `blocklist` becoming `{names:[],keys:[]}`, an absent `trust` becoming
+ * the default policy — reads as a change this command made. It isn't: nobody
+ * touched it. Treated as a change, it would overwrite whatever a concurrent writer
+ * committed to that key (a `block`, a `trust` edit) between this process's startup
+ * and its write. Taking the directory-managed keys through the startup `snapshot`
+ * on *both* sides makes a pure materialisation a no-op, so only a real edit is
+ * written and a concurrent one on an untouched key survives.
+ *
+ * `self` is the deliberate exception: it stays the raw stored value, because
+ * stamping this machine's identity (its keys) onto a legacy or empty `self` *is* a
+ * change worth persisting on first sight — normalising it away would stop a brand
+ * new machine ever saving its own identity.
+ *
+ * @param {any} stored raw state as first read from disk
+ * @param {any} snapshot `directory.snapshot()` taken at startup, before any mutation
+ * @returns {any} a deep clone, safe to diff against later
+ */
+export function reconcileBaseline(stored, snapshot) {
+  return JSON.parse(JSON.stringify({ ...stored, ...snapshot, self: stored?.self }));
+}
+
+/**
  * Merge two views of the admitted set by per-record revision.
  *
  * Every mutation bumps a monotone `rev` (see `commit`), so the higher `rev` wins

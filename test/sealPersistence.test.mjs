@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createDirectory, mergeByRevision, reconcilePersist } from "../src/directory.js";
+import { createDirectory, mergeByRevision, reconcileBaseline, reconcilePersist } from "../src/directory.js";
 import { generateIdentity, sameKey } from "../src/identity.js";
 import { walk } from "../src/hail.js";
 import { makePeerRecord, signRecord } from "../src/peerRecord.js";
@@ -94,6 +94,46 @@ test("setTrust changes the snapshot, so a trust change actually persists", () =>
   const current = { trust: dir.snapshot().trust };
   const written = reconcilePersist({ trust: { model: "direct" } }, baseline, current);
   assert.equal(written.trust.model, "web-of-trust", "the change lands on disk, not diffed away");
+});
+
+test("reconcileBaseline: default-materialised trust on a legacy file does not clobber a concurrent trust edit", () => {
+  // A legacy state file predating the trust policy: no `trust` key at all. The
+  // constructor materialises a full default trust, but this command changed nothing.
+  const stored = { self: { name: "me" }, admitted: [] };
+  const dir = createDirectory({ ...stored, self: { ...stored.self, publicKey: "PK" } });
+  const baseline = reconcileBaseline(stored, dir.snapshot());
+  const current = { ...stored, ...dir.snapshot() };
+  // Meanwhile another writer set a trust model on disk, which this process never saw.
+  const onDisk = { self: stored.self, admitted: [], trust: { model: "web-of-trust", settings: {}, unknownProfile: "unknown" } };
+  assert.equal(reconcilePersist(onDisk, baseline, current).trust.model, "web-of-trust", "the concurrent trust edit survives");
+
+  // Documents the bug: the old raw baseline (no trust) made materialisation look
+  // like a change, so the default clobbered the concurrent edit.
+  const rawBaseline = JSON.parse(JSON.stringify(stored));
+  assert.equal(reconcilePersist(onDisk, rawBaseline, current).trust.model, "direct", "the pre-fix baseline would have clobbered it");
+});
+
+test("reconcileBaseline: a materialised empty blocklist does not clobber a concurrent block", () => {
+  const stored = { self: { name: "me" }, admitted: [] }; // no blocklist key (legacy)
+  const dir = createDirectory({ ...stored, self: { ...stored.self, publicKey: "PK" } });
+  const baseline = reconcileBaseline(stored, dir.snapshot());
+  const current = { ...stored, ...dir.snapshot() }; // this command blocked nobody
+  const onDisk = { self: stored.self, admitted: [], blocklist: { names: ["mallory"], keys: [] } };
+  assert.deepEqual(reconcilePersist(onDisk, baseline, current).blocklist.names, ["mallory"], "concurrent block survives");
+});
+
+test("reconcileBaseline: identity stamping is still a change — the first-sight write is preserved", () => {
+  // self is the deliberate exception: normalising it away would stop a machine
+  // ever saving its freshly-stamped identity.
+  const legacy = { self: { name: "me" } }; // legacy self, no keys yet
+  const dir = createDirectory({ ...legacy, self: { ...legacy.self, publicKey: "PK", sealPublicKey: "SK" } });
+  const stamped = reconcilePersist({ self: legacy.self }, reconcileBaseline(legacy, dir.snapshot()), { ...legacy, ...dir.snapshot() });
+  assert.ok(stamped.self.publicKey, "the stamped identity is written, not diffed away");
+
+  // And a brand-new machine with no stored self at all still persists its identity.
+  const fresh = createDirectory({ self: { name: "host", publicKey: "PK", sealPublicKey: "SK" } });
+  const written = reconcilePersist({}, reconcileBaseline({}, fresh.snapshot()), { ...fresh.snapshot() });
+  assert.ok(written.self?.publicKey, "identity is written on first sight");
 });
 
 test("mergeByRevision: a revision tie resolves to disk (a stale writer does not overwrite)", () => {

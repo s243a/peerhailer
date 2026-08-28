@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory, reconcilePersist } from "../src/directory.js";
+import { createDirectory, reconcileBaseline, reconcilePersist } from "../src/directory.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -116,7 +116,11 @@ const directory = createDirectory({
 // from current disk — so a slow writer (a walk mid-flight) cannot revert a
 // concurrent `block`, `trust`, `name`, or `gate` change it never saw. Without
 // it, spreading a startup snapshot over disk silently rolled those back.
-const baseline = JSON.parse(JSON.stringify(stored));
+//
+// Built through the startup snapshot (the same shape `current` uses at persist
+// time), so the constructor materialising defaults on a legacy file is not later
+// mistaken for a change and made to clobber a concurrent edit. See reconcileBaseline.
+const baseline = reconcileBaseline(stored, directory.snapshot());
 
 /**
  * Write the directory back, keeping everything else in the file.
