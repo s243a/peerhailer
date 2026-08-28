@@ -23,6 +23,18 @@ test("resolveProfile fails closed for a named-but-missing profile, open only for
   assert.deepEqual(resolveProfile("trustd-typo").allows, []);
 });
 
+test("a non-string profile is not stored verbatim — a candidate lands on its fallback, not trusted", () => {
+  const bob = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" } });
+  dir.learnFrom("introducer", [{ name: "cand", publicKey: bob.publicKey, addresses: [{ value: "https://127.0.0.1:9" }] }]);
+  // Promote as a candidate (no new address) with a falsy non-string profile. A
+  // bare `??` would keep `0` and resolve it down the no-name branch to trusted;
+  // it must instead be ignored so the candidate fallback (`known`) applies.
+  const admitted = dir.admit({ name: "cand", profile: 0 });
+  assert.equal(typeof admitted.profile, "string", "a non-string profile is never stored");
+  assert.equal(admitted.profile, "known", "candidate fallback, not the trusted no-name default");
+});
+
 test("isAssignableProfile: real names yes, unknown names no, `blocked` never", () => {
   assert.equal(isAssignableProfile("trusted"), true);
   assert.equal(isAssignableProfile("known"), true);

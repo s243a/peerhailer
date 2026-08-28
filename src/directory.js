@@ -281,8 +281,12 @@ export function createDirectory(state = {}) {
     // A profile can arrive either as an option or on the peer record itself, and
     // both forms are a deliberate set — resolve one value and use it for both the
     // assignment and the elevation decision, or the `peer.profile` form changes
-    // the profile while silently keeping a stale expiry.
-    const requestedProfile = profile ?? peer?.profile;
+    // the profile while silently keeping a stale expiry. Only a *string* counts:
+    // a non-string profile (`false`, `0`, a number) is not a name, and would
+    // otherwise be stored verbatim and resolve down the no-name branch to the
+    // trusted default instead of the arrival-based fallback below.
+    const asName = (/** @type {any} */ value) => (typeof value === "string" ? value : undefined);
+    const requestedProfile = asName(profile) ?? asName(peer?.profile);
     // What it reverts to is captured now, while we still know what it was
     // raised from. Working it out at expiry means guessing months later.
     const elevation =
