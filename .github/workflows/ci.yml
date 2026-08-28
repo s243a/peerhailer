@@ -20,7 +20,10 @@ jobs:
     # The suite runs in seconds; a job that reaches minutes is hung, not slow.
     # Without this a hung runner blocks for GitHub's 360-minute default and, worse,
     # its log is never retrievable — so an intermittent hang is invisible instead of
-    # a fast, diagnosable failure that names the step it died in.
+    # a fast, diagnosable failure that names the step it died in. Kept well above the
+    # 180s step `timeout` below (and its 30s kill grace) so the *step* trips first —
+    # a step timeout fails-with-log, this job-level one only cancels (no log), so it
+    # is a backstop for a hung `npm ci`/typecheck, not the test hang itself.
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -42,11 +45,12 @@ jobs:
       # TAP progress up to the point it wedged is there to read, and a completed
       # "# pass" with the process still not exiting (an open-handle leak) reads
       # differently from a test stuck mid-run. `--kill-after` is load-bearing: a
-      # process that swallows the SIGTERM (observed — a plain `timeout 300` sat
-      # wedged past 5 minutes) gets a SIGKILL 30s later, so the step actually
-      # ends. The suite runs in seconds; 300s is pure hang margin, under
-      # `timeout-minutes` so this trips first.
-      - run: timeout --kill-after=30s 300 npm test
+      # process that swallows the SIGTERM (observed — a plain `timeout` sat wedged
+      # past its deadline) gets a SIGKILL 30s later, so the step actually ends.
+      # 180s (30x the ~6s the suite takes) is pure hang margin and sits well under
+      # `timeout-minutes`, so the *step* trips first and produces the log rather
+      # than racing the log-less job cancel.
+      - run: timeout --kill-after=30s 180 npm test
       - run: npm run typecheck
 
   # Kimi's earlier review found the package shipped no usable declarations —
