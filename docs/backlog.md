@@ -168,6 +168,16 @@ roadmap is shared, not scattered across PR threads.
 - `[fable, from #27 review]` `composer.closeAll` does `void stop(id)` on async teardown; the one
   unguarded call inside (`entry.gate?.close()`, `composer.js:294`) could surface as an unhandled
   rejection (process-fatal under default Node) on shutdown. Guard it. Marginal.
+- `[fable, from #29 review]` `loadState` returns `{}` on a read failure (never throws), so a
+  transiently-unreadable state file at a reload's commit degrades to a near-empty runtime and
+  `adopt({})` clears the admitted peers — fail-closed and near-unreachable (atomic-rename writes +
+  lock), but "failed read keeps the old runtime" isn't literally true. Guard the reload commit
+  against an empty re-read. Related: the `try/catch` around `loadState` in `gateConfig`
+  (`bin/hail.js`) is dead code (loadState can't throw). Both pre-existing.
+- `[kimi #26 / fable #29]` The CLI builds its profile set from `stored.profiles` + built-ins only
+  (no plugin suggestions), so a profile suggested *only by an external plugin* is unassignable via
+  the CLI while the daemon/page accept it. Fail-closed (refuses, never grants) and bundled profiles
+  are all built-ins, so no false parked marker today. The deferred CLI-visibility item.
 
 ## Test gaps to pin
 
