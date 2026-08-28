@@ -47,3 +47,24 @@ test("reassigning holders (what `profiles remove --reassign` does) un-parks them
   assert.equal(dir.profileStatus("phone").parked, false);
   assert.equal(dir.profileStatus("phone").effective, "known");
 });
+
+test("holdersOf catches a peer elevated AWAY from the profile (it would park at lapse)", () => {
+  const dir = withLowpriv();
+  const key = generateIdentity().publicKey;
+  dir.admit({ name: "alice", publicKey: key, addresses: addr }, { profile: "lowpriv" });
+  dir.admit({ name: "alice", publicKey: key, addresses: addr }, { profile: "trusted", until: Date.now() + 1_000_000 });
+  // Effectively trusted now, but profileAfter === lowpriv → she reverts to it.
+  assert.equal(dir.effectiveProfile("alice").profile, "trusted");
+  assert.deepEqual(dir.holdersOf("lowpriv").map((p) => p.name), ["alice"], "the scheduled holder is not missed at removal time");
+});
+
+test("an explicit permanent re-admit clears a live elevation (so --reassign is permanent)", () => {
+  const dir = withLowpriv();
+  const key = generateIdentity().publicKey;
+  dir.admit({ name: "bob", publicKey: key, addresses: addr }, { profile: "lowpriv", until: Date.now() + 1_000_000 });
+  assert.equal(dir.effectiveProfile("bob").profile, "lowpriv");
+  assert.ok(dir.get("bob").profileUntil, "bob is elevated");
+  dir.admit({ name: "bob" }, { profile: "known" }); // the reassign move
+  assert.equal(dir.effectiveProfile("bob").profile, "known");
+  assert.equal(dir.get("bob").profileUntil, undefined, "the elevation is cleared, so it can't resurrect the old profile");
+});

@@ -1434,14 +1434,22 @@ switch (command) {
     }
     if (action === "remove") {
       if (!target) fail("usage: hail profiles remove <name> [--reassign <profile> | --force]");
+      // Built-ins are not removable (they come from the code, not the file) —
+      // say so before churning any peer record.
+      if (listProfiles(stored.profiles).find((p) => p.name === target)?.builtIn) {
+        fail(`${target} is a built-in profile and cannot be removed`);
+      }
+      const reassign = typeof flags.reassign === "string" ? flags.reassign : null;
+      if (reassign === target) fail(`cannot reassign to ${target} while removing it`);
       // Removing a profile out from under its holders would silently park them
       // (granted nothing) — the surprise the fail-closed resolver exists to make
       // loud. Refuse while it is assigned, unless a person says how: `--reassign
-      // <profile>` moves the holders, `--force` parks them knowingly.
+      // <profile>` moves the holders, `--force` parks them knowingly. Holders
+      // include peers currently elevated *away* from it (they revert to it later).
       const holders = directory.holdersOf(target);
-      const reassign = typeof flags.reassign === "string" ? flags.reassign : null;
       if (holders.length && !reassign && flags.force !== true) {
-        fail(`${target} is still assigned to: ${holders.map((h) => h.name).join(", ")} — reassign them with --reassign <profile>, or --force to leave them granted nothing`);
+        const label = (h) => (directory.effectiveProfile(h.name).profile === target ? h.name : `${h.name} (reverts to it on lapse)`);
+        fail(`${target} is still assigned to: ${holders.map(label).join(", ")} — reassign them with --reassign <profile>, or --force to leave them granted nothing`);
       }
       if (reassign) {
         if (!isAssignableProfile(reassign, stored.profiles)) {
