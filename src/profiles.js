@@ -94,6 +94,22 @@ const TRUSTED = {
   builtIn: true,
 };
 
+/**
+ * The other always-present fallback: what a name that does not resolve gets.
+ * Concrete (not a Record lookup) so `resolveProfile` can name it as a terminal
+ * fallback whose type is definitely a profile, never `undefined`.
+ */
+const UNKNOWN = {
+  name: "unknown",
+  builtIn: true,
+  // What a peer gets when nobody has said anything about it — and, now, what a
+  // *named* profile that does not resolve gets. Empty by default, and a real
+  // profile rather than a special case so that a fabric wanting to answer
+  // strangers can grant it something without new machinery.
+  allows: [],
+  description: "Peers you hold no opinion about. Granted nothing by default.",
+};
+
 /** @type {Record<string, CapabilityProfile>} */
 export const BUILT_IN_PROFILES = {
   trusted: TRUSTED,
@@ -105,15 +121,7 @@ export const BUILT_IN_PROFILES = {
     allows: [],
     description: "Recorded, but granted nothing. Useful for one-way reachability.",
   },
-  unknown: {
-    name: "unknown",
-    builtIn: true,
-    // What a peer gets when nobody has said anything about it. Empty by
-    // default, and a real profile rather than a special case so that a fabric
-    // wanting to answer strangers can grant it something without new machinery.
-    allows: [],
-    description: "Peers you hold no opinion about. Granted nothing by default.",
-  },
+  unknown: UNKNOWN,
   blocked: {
     name: "blocked",
     builtIn: true,
@@ -161,19 +169,48 @@ export const ADMIT_PROFILE = "trusted";
 export const CANDIDATE_PROFILE = "known";
 
 /**
- * Resolve a profile by name, falling back to the default.
+ * Resolve a profile by name.
  *
- * An unknown profile name resolves to `trusted` rather than to nothing, because
- * the alternative is a peer that silently stops working after a config edit or
- * a version change — a failure that looks exactly like a network problem.
+ * The invariant: a name that does not resolve is a peer that gets *nothing*, not
+ * everything. No name at all is the legacy/default path — records predating the
+ * profile field, and peers admitted under the implicit trusted default — so that
+ * falls back to `DEFAULT_PROFILE`. But a name that *was* given and doesn't exist
+ * (a typo, a since-removed profile, a renamed built-in, a hand-edited record)
+ * resolves to `unknown` (grants nothing), never to `trusted`. Resolving an
+ * unrecognised name to `trusted` would be a second, unaudited assignment path —
+ * a config edit could silently invert an operator's restricted grant into full
+ * trust, or promote every holder of a removed profile. Everything else in this
+ * system fails closed (grants, seal states); profiles do too. The cost is a peer
+ * that stops working rather than one that over-works — a *visible* failure (the
+ * peer is refused in the `deny` style and its parked profile shows in `hail peers`
+ * and the page), which is the safer direction of error where admitting a peer is
+ * a security decision. Assignment-time validation (CLI/API) catches the typo at
+ * the door; this is the durable backstop for the paths validation cannot cover.
  *
  * @param {string | undefined} name
  * @param {Record<string, CapabilityProfile>} [profiles]
  * @returns {CapabilityProfile}
  */
 export function resolveProfile(name, profiles = BUILT_IN_PROFILES) {
-  const found = name ? profiles[name] : undefined;
-  return found ?? profiles[DEFAULT_PROFILE] ?? TRUSTED;
+  // A name given but not found is fail-closed to `unknown` (grants nothing), not
+  // fail-open to the default. Empty string counts as "no name" (legacy records
+  // predate the field), so `admit` must never write "".
+  if (name) return profiles[name] ?? profiles.unknown ?? UNKNOWN;
+  return profiles[DEFAULT_PROFILE] ?? TRUSTED;
+}
+
+/**
+ * Is `name` a profile a person may assign to a peer? True when it exists in the
+ * (built-in + custom) set and is not `blocked` — `blocked` is produced by the
+ * blocklist, never assigned by name, since assigning it grants nothing but does
+ * not stop the peer renaming its way back in (that is what `hail block` is for).
+ *
+ * @param {string} name
+ * @param {Record<string, CapabilityProfile>} [custom]
+ */
+export function isAssignableProfile(name, custom = {}) {
+  if (!name || name === BLOCKED_PROFILE) return false;
+  return listProfiles(custom).some((profile) => profile.name === name);
 }
 
 /**

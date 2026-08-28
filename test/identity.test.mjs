@@ -120,10 +120,14 @@ test("the default profile grants hailing, and 'known' grants nothing", () => {
   assert.equal(allows("carrier", "relay"), true);
 });
 
-test("an unknown profile name falls back rather than failing shut", () => {
-  // A peer that silently stops working after a config edit looks exactly like a
-  // network problem, which is the worst way for this to fail.
-  assert.equal(resolveProfile("typo-profile").name, "trusted");
+test("a named-but-unknown profile fails closed to `unknown`, not open to `trusted`", () => {
+  // A name given but not found (a typo, a removed profile, a hand-edited record)
+  // grants nothing — resolving it to `trusted` would silently invert a restricted
+  // grant into full trust. Only the *absence* of a name is the trusted default.
+  assert.equal(resolveProfile("typo-profile").name, "unknown");
+  assert.deepEqual(resolveProfile("typo-profile").allows, []);
+  assert.equal(resolveProfile(undefined).name, "trusted");
+  assert.equal(resolveProfile("").name, "trusted"); // empty == no name (legacy records)
 });
 
 test("trusted is offered first out of the box", () => {
