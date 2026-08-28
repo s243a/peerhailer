@@ -159,6 +159,17 @@ test("repinning a built-in does not freeze what it grants", () => {
   assert.notEqual(trusted.pinned, true);
 });
 
+test("listProfiles is idempotent — an unpin survives re-merging its own output", () => {
+  // A surface that reads the already-merged profile set back through listProfiles
+  // (as the daemon now does) must not resurrect a built-in's default pin over an
+  // explicit unpin.
+  const once = listProfiles(setPinned({}, "trusted", false));
+  const asRecord = Object.fromEntries(once.map((p) => [p.name, p]));
+  const twice = listProfiles(asRecord);
+  assert.equal(once.find((p) => p.name === "trusted").pinned, false);
+  assert.equal(twice.find((p) => p.name === "trusted").pinned, false, "still unpinned after the double merge");
+});
+
 test("a user-defined profile joins the list", () => {
   const listed = listProfiles({
     backup: { allows: ["hail"], description: "The backup box.", pinned: true },
