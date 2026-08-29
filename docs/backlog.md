@@ -240,8 +240,14 @@ roadmap is shared, not scattered across PR threads.
   day. Tests for the shipped per-session ratchet in `test/chatSealed.test.mjs`. Relayed caveat
   (key on the in-payload origin, never `caller`) remains a hard requirement — see the NOTE in
   `chatPlugin.js`.
-- **TODO (roadmapped — `docs/routing-security-roadmap.md`; M0 doc-honesty done, M1 mechanical fix
-  optional/off-path, M2 key-discovery + M3 authenticated relay are the real path)** — `[sol, deferred]`
+- **IN PROGRESS (roadmapped + reviewed — `docs/routing-security-roadmap.md`)** — `[sol/kimi, deferred]`
+  **Routing replay + authentication.** M0 done (#52: `child.id` propagates so the destination dedup
+  catches accidental double-delivery; doc honesty corrected). **M1 primitive landed:** `src/routeManifest.js`
+  — the origin-signed route manifest (fixed-order-array canonicalisation, key ids = SHA-256 of SPKI DER,
+  strict field validation, origin-binding on verify), tested. **M1 remaining:** wire the manifest into the
+  engine (bind to the envelope, destination self-check, replay-state discipline — session-vs-durable
+  chosen and stated). Then M2 (record-piggyback key discovery + tier model) and M3 (sealed payload +
+  the shared observation seam). Original framing:
   **Routing replay hole — pick a plan; the doc previously promised the wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
   fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at
   Stage 1** (Stage 1 has no sealed block and an unsigned origin). Choose:
