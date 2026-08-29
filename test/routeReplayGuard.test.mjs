@@ -39,6 +39,20 @@ test("the time window is enforced with skew, whatever the origin signed", () => 
   assert.equal(g.admit(man({ issuedAt: T + 1000, expiresAt: T + 30_000 })).ok, true);
 });
 
+test("the reservation dedups for exactly as long as the window admits (no one-tick gap)", () => {
+  let clock = T;
+  const g = createRouteReplayGuard({ now: () => clock, clockSkewMs: 1000, maxValidityMs: 60_000 });
+  const m = man({ expiresAt: T + 30_000 }); // reservation lives until exp = T+31_000
+  assert.equal(g.admit(m).ok, true);
+  // At the exact last admissible instant (exp), a replay is still a duplicate — and
+  // the message itself is still in-window, so the two agree rather than leaving a gap.
+  clock = T + 31_000;
+  assert.deepEqual(g.admit(m), { ok: false, reason: "duplicate" });
+  // One ms later both flip together: the window refuses it as expired.
+  clock = T + 31_001;
+  assert.deepEqual(g.admit(m), { ok: false, reason: "expired" });
+});
+
 test("at global capacity a new message fails closed — a live reservation is never evicted", () => {
   const g = createRouteReplayGuard({ now: () => T, maxEntries: 2, maxPerOrigin: 100 });
   assert.equal(g.admit(man({ messageId: "a" })).ok, true);
