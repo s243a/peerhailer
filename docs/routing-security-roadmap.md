@@ -1,124 +1,169 @@
 # Routing security roadmap: from admission-gated delivery to authenticated sealed relay
 
 **Status: design / for review.** `docs/routing.md` is the full routing roadmap
-(stages 1–6: discovery, caching, adaptive tables, anonymity). This is the narrower,
-security-focused companion: it sequences the *security* properties — replay, origin
-authentication, confidentiality, key discovery — by their **dependencies**, corrects
-a false claim in `routing.md`, and situates the one near-term choice (a mechanical
-replay fix) on that path. It supersedes the earlier narrow replay-options note.
+(discovery, caching, adaptive tables, anonymity). This is the security-focused
+companion: it sequences the *security* properties — replay, origin authentication,
+confidentiality, key trust — by their dependencies. **Substantially revised after a
+Kimi review** that corrected the original spine (which conflated signing with
+sealing) and, in doing so, shrank the "hard, novel" part from an unbuilt primitive to
+a piggyback plus one equality check. It supersedes the earlier narrow replay-options
+note.
 
 ## Where we are, honestly (Stage 1, shipped)
 
 Stage 1 gives **admission-gated, loop-free, best-effort multi-hop delivery** over the
-F2F trust graph. What it does **not** give, said plainly:
+F2F trust graph. What it does **not** give:
 
-- **Payloads are cleartext to every relay.** A relay reads everything it carries.
-- **`origin` is unsigned** — advisory only, so a relay can spoof it.
-- **Replay is not actually closed.** `send()` mints an envelope `id`, but `relay()`'s
-  child envelope drops it, so every *relayed* message reaches the destination with no
-  id and the destination dedup (`firstDelivery`) never fires. The guard is present but
-  **dead for all relayed traffic**. `routing.md` contradicts itself here — one passage
-  confirms the hole, another claims replay was "handled in Stage 1." It was not; that
-  claim is corrected as milestone M0 below.
+- **Payloads are cleartext to every relay.**
+- **`origin` is unsigned** — advisory, so a relay can spoof it.
+- **Replay is not closed.** `send()` mints an envelope `id`, but `relay()`'s child
+  envelope drops it, so the destination dedup never fires for relayed traffic. The
+  guard is present but **dead**. `routing.md` used to claim replay was "handled in
+  Stage 1"; that was false and is corrected (M0).
 
-None of this is a Stage-1 bug to be ashamed of — Stage 1's honest promise is
-*reachability under admission*, not confidentiality or replay safety. The problem is
-only the doc that over-promised.
+The Stage-1 metadata's weakness is that it is **unsigned**, not that it is unsealed —
+the distinction the rest of this roadmap turns on.
 
-## Where we want to be (the target)
+## The corrected spine — two independent roots
 
-Fully-realized routing carries **end-to-end sealed** payloads (relays hold opaque
-blocks), authenticates the **origin** cryptographically (replies are addressable, no
-spoofing), and closes **replay** with a signed `id`/sequence/expiry — all three bound
-*inside* the sealed block so no relay on the path can read, forge, or replay them.
-(Performance — chunked probe-and-cache, reassembly quotas — and statistical trust and
-anonymity are `routing.md`'s stages 1.5-perf / 2 / 5, referenced not re-specified.)
-
-## The dependency spine — why these three cluster
-
-The load-bearing prerequisite is **one primitive: an end-to-end sealed block to a
-routed destination.** Every security property hangs off it:
+The original draft claimed replay, origin-auth, and confidentiality were "three uses
+of one sealed block." That is wrong: only confidentiality needs *encryption*. Replay
+and origin-auth need *integrity/authenticity* — a **signature** a relay cannot forge —
+not privacy. So there are two independent roots, not one:
 
 ```
-  sealing-key discovery for a routed destination   (the root — novel, unbuilt)
-              │
-              ▼
-     end-to-end sealed block to `dest`
-        ├── confidentiality  (the block is opaque to relays)
-        ├── authenticated origin  (signed INSIDE the block, not the last-hop caller)
-        └── replay-safe id/seq/expiry  (signature-covered INSIDE the block —
-                                        mutable outer metadata a relay can rewrite
-                                        is not enough)
+origin's Ed25519 identity key  (already distributed & verified — signRecord/verifyRecord)
+    └── SIGNED header  →  replay + origin-authentication          … no key discovery
+destination's X25519 sealing key  (must be learned over relays)
+    └── SEALED payload →  confidentiality                          … the (smaller) M2
 ```
 
-Two consequences fall out of this shape:
+Consequences that reorder everything:
 
-1. **Replay, origin-auth, and confidentiality are not independent features.** They are
-   three uses of one sealed block. Building them piecemeal on unsealed outer metadata
-   gives protections a relay defeats; they must be built *together*.
-2. **The true root is key discovery.** Sealing to a destination needs its sealing key,
-   which today comes from a **walk** — a direct verification. But a *routed* destination
-   is reached only through relays; you cannot walk it. So the fabric needs **public,
-   data-free sealing-key discovery for a routed destination**. That primitive does not
-   exist, and it gates everything above it. It is the hard, novel part of this roadmap.
+1. **Replay and origin-auth land *before* any key-discovery problem** — they need only
+   a signed envelope header, using the identity key the fabric already distributes.
+2. **A signed *expiry* lets the replay dedup stay in-memory.** Dedup only has to
+   outlive the window a captured envelope is valid; a signature-covered expiry bounds
+   that window, so the `seen` map never needs durability. (The absence of an expiry is
+   exactly what makes today's dedup and chat's nonce cache nervous about restarts.)
+3. **Signed ≠ named.** A signed header proves "the holder of key K signed this," not
+   "this is alice" — sybil origins are free. Routing is keyed by **key**, not name
+   (`N(dest)`), so key-level authenticity is the right granularity — but the
+   destination's *acceptance* policy must keep the existing discipline: an unknown
+   origin gets unknown-profile treatment, **surfaced, never silently admitted**.
+   *Authenticated ≠ admitted*, and a routed key is never auto-bound to a name (that is
+   the gossip-trust hole the block-candidate fix closed).
 
-## Milestones
+## Key trust for a routed destination — a tier, not a new primitive
 
-### M0 — honesty (now, plan-independent)
-Correct `routing.md`'s replay claim: Stage 1 has **no** replay/confidentiality/origin
-guarantee. Non-negotiable and independent of every choice below. (Done in this change.)
+The confidentiality direction (origin must trust the destination's *sealing* key)
+looked like the hard, novel part. It mostly isn't. Decompose what a **walk** actually
+buys: (i) the record is **signed by the identity key** — the cryptographic binding of
+sealing key to identity; and (ii) **liveness/provenance** — it arrived over a
+connection authenticated as that identity, just now. Point (i) is **portable**: a
+signed record carries it over any relay. The staple/gossip attack the key ban exists
+to stop works only on *unsigned* bindings — a relay **cannot fabricate** a record
+binding the victim's Ed25519 key to an attacker's X25519 key.
 
-### M1 — mechanical replay dedup *(optional interim; = the old "Option A")*
-Propagate the `id` through `relay()`'s child envelope so the **existing** destination
-dedup functions. Closes **accidental** duplication and **naive** capture-and-reinject on
-a plaintext hop; explicitly **not** a defence against a malicious admitted relay (which
-can strip, rewrite, or re-mint the unsigned id). **Off the critical path to the target:**
-M3 supersedes it, reusing only the dedup *machinery* (the `seen` map), not the outer-id
-line. Cost ~one line + a test. **Worth it iff M2/M3 are far off; skip if going soon.**
+And routing hands us the check that makes a relayed key safe: **the routing target is
+the destination's identity key.** So the discovery primitive is a **piggyback**: the
+route probe (or first delivery) carries the destination's *signed record*, and the
+origin accepts the sealing key iff, after `verifyRecord`, **`record.publicKey ===
+envelope.dest`**. A relay that substitutes its own or an accomplice's record breaks
+that equality and is caught; it can only **withhold** (an availability failure, and
+visible) or replay a **stale** record (a pre-rotation key) — and the stale case is
+already handled: a later walk that disagrees raises `sealConflict` → fail closed →
+operator resolves. Confidentiality never fails open; it fails to *refusal*.
 
-### M2 — sealing-key discovery for a routed destination *(the root primitive)*
-A public, data-free way to learn a routed destination's sealing key without a direct
-walk. This is the gating dependency for M3 and the genuinely unsolved design problem —
-see the open questions.
+The coherent model is therefore **tiered**, reusing existing machinery:
 
-### M3 — authenticated sealed relay *(= the old "Option B" / Stage 1.5 security core)*
-End-to-end sealed blocks; **signed origin** and **signed+sealed id/seq/expiry**, so
-replay and origin-spoofing are closed against a malicious admitted relay. Depends on M2.
-Crucially, this is **the same origin-keyed sealed-observation seam** the deferred durable
-seal-ratchet needs (`docs/durable-seal-ratchet.md`): both want to act on an origin
-authenticated from inside a sealed payload. **Build one seam, not two** — design M3 and
-the durable ratchet together.
+- **Tier 0 — walk-verified** (`bindSealKey` today): full trust, unchanged.
+- **Tier 1 — record-carried**: signed, identity-key-equal-to-`dest`, but relay-delivered
+  (no liveness). Sealing to it is *strictly better than cleartext* — passive relays are
+  shut out, and the residual attacks (withholding, stale key) both fail **loud**. Allowed,
+  with the tier **surfaced** on the conversation/route (honesty, not silence).
+- **Tier 2 — gossip / unsigned / key-mismatched**: never seal. Unchanged.
+
+"Restrict sealed routing to previously-walked peers" folds in as a per-operator
+**policy floor** on top (refuse Tier 1), not the architecture — and the likely F2F
+mobility case (two laptops that met on a LAN, now reachable only through friends) is
+already Tier 0. Two implementation notes: `sealKeyFor` is name-keyed while routing is
+key-keyed, so the discovery path needs a key-indexed `sealKeyForKey`; and Tier-1 keys
+must live in their own marked slot (a relayed record is **not** `sealSeen`), or the
+tier semantics blur into the ambiguity `sealState` exists to remove.
+
+## Milestones (revised order)
+
+### M0 — honesty, with M1 folded in as a labelled non-security fix *(done here)*
+`routing.md` corrected: Stage 1 has no replay/confidentiality/origin guarantee. And
+the **mechanical dedup fix** (propagate `id` into `relay()`'s child so the live-but-
+starved `firstDelivery` receives relayed ids) rides here as a **correctness** fix, not
+a security control. It is real — with default `fanout: 3`, a diamond topology has two
+parents forward to the destination independently, so *delivered-twice* happens without
+any adversary. But against a malicious relay it closes nothing (a Stage-1 relay rewrites
+the *payload*; the id is the least of it), so it is labelled "not a security control."
+Dedup re-keys on `(origin, id)` at M2′, not here (a spoofable origin makes it cosmetic
+now).
+
+### M2′ — signed envelope header *(new; the actual replay + origin fix)*
+`{ origin, dest, id, seq, expiry, payloadHash }` **signed by the origin's identity
+key**, with the origin's signed self-record attached. The **destination** verifies
+(self-record signature → key; header signature → same key). Closes replay **and**
+origin-spoofing **against a malicious admitted relay** — the relay can't mint ids for
+an origin it isn't, strip the id, swap the payload (hash), or extend the expiry. **No
+key discovery needed.** Re-key dedup on `(origin, id)`; the signed expiry keeps it
+in-memory. Relays verify only optionally, and **destination-only is the safe default**
+— inviting every relay to verify attacker-chosen envelope signatures is a CPU-DoS
+lever. Docs must say plainly: **signed ≠ private** — relays still read payloads here.
+
+### M2 — record-piggyback key discovery *(rescoped, much smaller)*
+The destination's signed record rides the probe / first delivery; the origin accepts
+its sealing key on the linchpin check `record.publicKey === dest` after `verifyRecord`;
+conflicts fail closed into the existing `sealConflict` path; Tier-1 keys are marked and
+surfaced. No lookup service, no new trust assumption.
+
+### M3 — sealed payloads + the shared observation seam
+Seal payloads to the destination key (Tier 0 always; Tier 1 per policy, default
+allow-with-surfacing), and move the origin signature *inside* the sealed block (hiding
+the header fields too). Stand up **one origin-keyed durable observation seam** — the
+generalization of the deferred seal-ratchet (`docs/durable-seal-ratchet.md`): the same
+caller-bound, `applyChange`-backed, request-failing, OR-floored, rotation-resetting
+capability, with exactly one parameter changed — **who may name the key**. Direct
+consumers: the host binds it to `caller.publicKey`. Routed consumers: the plugin
+supplies the origin it authenticated *from inside the verified payload* (the host
+can't see that far) — contract: *the key passed must be one the plugin cryptographically
+authenticated in this request*. Interface sketch: `recordObservation({ key, kind })`,
+kinds extensible (`requireSealFrom` first), host-owned. This is where PR #49's
+receiver-side downgrade ratchet gets its routed generalization: **cleartext routed
+delivery is an allowed mode — sender-chosen, destination-floored** (the destination
+advertises a sealed-only floor in its record and refuses cleartext routed delivery when
+set; relays never decide).
 
 ### M4+ — performance and trust
 Chunking / route caching / reassembly quotas (`routing.md` Stage 1.5), first-party
 statistics for grayhole down-weighting (Stage 2), the anonymity knob (Stage 5).
-Referenced here only to place them *after* the confidentiality/replay spine.
 
-## The replay decision, situated
+## Net effect of the review
 
-- **M0 is mandatory now** — the doc is currently wrong, plan or no plan.
-- **"Go straight to B" = do M2 + M3** — a real subsystem gated on an unbuilt primitive,
-  not a shortcut past M1.
-- **M1 is an optional, off-path interim.** Its code is nearly disposable (only the
-  outer-id propagation is superseded), so the question is purely: *is closing the
-  fault/naive-replay cases worth a line and a test while M2/M3 are pending?*
+The original roadmap's "hard, novel, gates-everything" M2 is demoted to a piggyback,
+an equality check, and a tier marker. The genuinely new work is M2′'s envelope schema
+and the destination-floor policy — both bounded. Replay and origin-auth (M2′) can ship
+without touching the key-trust question; confidentiality (M2 + M3) follows on the tier
+model, not a new primitive.
 
-**Recommendation:** M0 now; M1 only if M2/M3 are not imminent; and when M2/M3 come,
-design them with the durable-seal seam so the fabric grows one authenticated origin-keyed
-primitive rather than several bespoke ones.
+## Open questions still worth a second reviewer
 
-## Open questions for review
-
-1. **M2 is the crux.** Is a separate "sealing-key discovery" lookup the right shape, or
-   can the destination's *signed* sealing key be **piggybacked on the discovery path
-   itself** (the probe that finds a route also returns the dest's signed record), avoiding
-   a new lookup service? What binds that key to the destination's identity without a walk?
-2. Should M3 and the durable seal-ratchet share **one** origin-keyed sealed-observation
-   seam from the first line, and what is its interface (a host capability keyed by the
-   in-payload origin)?
-3. Does confidentiality (M3) gate **every** multi-hop of private data, or is Stage-1
-   cleartext delivery an allowed mode for explicitly non-private payloads? (`routing.md`
-   Q4's open half.)
-4. Is M1 worth shipping at all, or does its partialness argue for **M0-only until M3**?
-   (Honest documentation is the reason it need not read as false confidence — but it is
-   the one judgment call.)
+1. **M2′ envelope schema and canonicalization.** What exactly is signed, and how is it
+   canonicalized so a relay cannot mutate-yet-reverify (field ordering, the `payloadHash`
+   over cleartext vs ciphertext, whether `visited`/`ttl`/`budget` are inside or outside
+   the signature — they are relay-mutated by design, so they must be *outside*, which
+   means the signature must not cover them and replay/loop rules must tolerate that).
+2. **Tier-1 surfacing and policy.** Is default-allow-with-surfacing right, or should
+   Tier-1 sealing be default-off until an operator opts in per peer? Where is the tier
+   shown so it is not ignored (the parked-marker lesson)?
+3. **The destination sealed-only floor.** Its record advertises it; is that floor itself
+   authenticated (signed record) so a relay can't strip it, and what is the failure mode
+   if a routed sender ignores it — refuse at the destination (loud) is the intent.
+4. **The seam's routed contract.** "The plugin passes a key it authenticated this
+   request" is a least-authority convention, not an enforced boundary (plugins are
+   trusted in-process). Is a convention enough, or is there a cheap enforcement?
