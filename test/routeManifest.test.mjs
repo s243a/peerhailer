@@ -83,6 +83,8 @@ test("malformed manifests fail verification without throwing", () => {
   assert.equal(verifyManifest({ ...m, version: 999 }, sig, alice.publicKey), false);
   assert.equal(verifyManifest(m, "not-a-signature", alice.publicKey), false);
   assert.equal(verifyManifest(m, sig, "not-a-key"), false);
+  // An unsigned extra property is not covered by the signature — refuse it.
+  assert.equal(verifyManifest({ ...m, sneaky: "x" }, sig, alice.publicKey), false, "extra unsigned field is refused");
 });
 
 test("manifestProblem catches out-of-range fields; buildManifest refuses to assemble them", () => {

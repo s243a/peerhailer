@@ -92,6 +92,10 @@ export function payloadDigest(bytes) {
 export function manifestProblem(m) {
   if (!m || typeof m !== "object") return "not an object";
   for (const f of FIELDS) if (!(f in m)) return `missing ${f}`;
+  // Exactly the signed fields, no more: an unsigned extra property is not covered by
+  // the signature, so a relay could attach one to a valid manifest. Refusing it here
+  // means a verified manifest is guaranteed to be precisely what was signed.
+  if (Object.keys(m).length !== FIELDS.length) return "unexpected fields";
   if (m.domain !== MANIFEST_DOMAIN) return "wrong domain";
   if (m.version !== MANIFEST_VERSION) return "unknown version";
   if (!isB64Url(m.originKeyId, SHA256_B64URL_LEN, SHA256_B64URL_LEN)) return "bad originKeyId";
