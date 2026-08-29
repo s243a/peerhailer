@@ -60,13 +60,15 @@ test("the CLI loads and its common commands run", async () => {
     assert.notEqual((await hail(state, ["profiles", "add", "trusted", "--allows", "hail"])).code, 0);
     assert.notEqual((await hail(state, ["add", "z", "--key", ""])).code, 0);
 
-    // A security-posture boolean flag that swallowed a value must fail loudly,
-    // not silently disable itself: `--require-target-binding yes` reads as the
-    // string "yes", which is `!== true`, so without the guard the operator would
-    // believe they closed the door and left it open.
+    // A security-posture boolean flag that swallowed a value must fail loudly, not
+    // silently disable itself: `--require-target-binding yes` used to read as the
+    // string "yes" (which is `!== true`), so the operator could believe they closed
+    // the door and leave it open. The typed parser now knows the flag is boolean, so
+    // the stray value is a refused extra argument rather than a swallowed value —
+    // still a loud failure, which is the contract here.
     const trap = await hail(state, ["daemon", "--require-target-binding", "yes"]);
     assert.notEqual(trap.code, 0, "a value on the bare flag is refused, not quietly ignored");
-    assert.match(trap.out, /takes no value/);
+    assert.match(trap.out, /takes no value|extra argument/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
