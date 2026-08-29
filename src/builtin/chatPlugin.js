@@ -15,7 +15,7 @@
  *
  * @module builtin/chatPlugin
  */
-import { sameKey } from "../identity.js";
+import { normalizeKey, sameKey } from "../identity.js";
 import { REFUSE } from "../plugins.js";
 import { openSigned } from "../sealing.js";
 
@@ -84,6 +84,17 @@ export function createChatPlugin({
     // real defence.
     while (seenNonces.size > 4096) { const oldest = seenNonces.keys().next().value; if (oldest === undefined) break; seenNonces.delete(oldest); }
   };
+
+  // Downgrade refusal: the keys of peers who have sent us a *sealed* message. Once
+  // a peer is here, a later *cleartext* message from them is refused — a
+  // confidentiality ratchet ("once sealed, always sealed") so a forced downgrade
+  // cannot quietly expose content the peer had been encrypting. Sealing is not a
+  // negotiated handshake; the sender already fails closed on its side, and this is
+  // the receiver's matching half. Per-instance like the nonce cache above: a
+  // reload resets it and the next sealed message re-establishes it, which is
+  // acceptable because the hail layer authenticates every caller regardless.
+  /** @type {Set<string>} normalized publicKey */
+  const sealedFrom = new Set();
   /**
    * Peer fingerprint -> their messages, newest last.
    *
@@ -205,12 +216,22 @@ export function createChatPlugin({
           } else {
             text = typeof body?.text === "string" ? body.text : "";
           }
+          // Refuse a cleartext message from a peer we have received sealed from —
+          // no silent downgrade of a conversation that had been encrypted.
+          if (!sealed && sealedFrom.has(normalizeKey(caller.publicKey) ?? "")) {
+            return { [REFUSE]: true, reason: "this peer has sent sealed messages; a cleartext one is refused (no downgrade)" };
+          }
           if (!text.trim()) return { [REFUSE]: true, reason: "an empty message is not a message" };
           if (text.length > MAX_MESSAGE) return { [REFUSE]: true, reason: "that is longer than a note" };
 
           // Validated — now the nonce is spent. A retry of a genuinely-delivered
           // message repeats this nonce and is correctly dropped as a duplicate.
-          if (sealed) rememberNonce(nonce);
+          if (sealed) {
+            rememberNonce(nonce);
+            // From now on this peer is expected to keep sealing (see sealedFrom).
+            const key = normalizeKey(caller.publicKey);
+            if (key) sealedFrom.add(key);
+          }
           // `mine: false` — it came from them. Stored verbatim, and this is the
           // one place to be clear about it: the text is attacker-chosen and the
           // storage does not sanitise it. Whatever renders a thread MUST escape

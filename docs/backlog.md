@@ -215,11 +215,19 @@ roadmap is shared, not scattered across PR threads.
 
 ## Phase 5 — deferred feature work
 
-- **TODO** — `[kimi/sol, deferred]` **Sealing: receiver-side downgrade refusal.** A receiver still
-  accepts cleartext from a peer whose sealing key it holds; add an inbound `requireSealFrom` marker
-  set after the first sealed message. Reasonably Phase 5 today (direct cleartext still comes from the
-  authenticated peer itself, not a network attacker), but **mandatory before any relayed/routed
-  consumer**. `chatPlugin.js`, `directory.js`. See `docs/sealing.md`.
+- **DONE (per-session; durable is a follow-up)** — `[kimi/sol, deferred]` **Sealing: receiver-side
+  downgrade refusal.** A receiver accepted cleartext even from a peer it had received *sealed* messages
+  from — a silent confidentiality downgrade, the missing receiver half of the sender's already-closed
+  door. Fixed in `chatPlugin.js`: a per-instance `sealedFrom` set records the keys of peers that have
+  sent a validated sealed message; a later cleartext from such a peer is refused (`REFUSE`, "no
+  downgrade"), while an unrelated peer's cleartext and the peer's own continued sealing are unaffected.
+  Kept in the plugin instance, in the same spirit as its nonce cache (a reload resets it and the next
+  sealed message re-establishes it; the hail layer authenticates every caller regardless), so it is a
+  **per-session** ratchet. **Follow-up:** a *durable* marker (a monotone `requireSealFrom` on the
+  directory record, persisted through `change`) would hold the ratchet across restarts — deferred
+  because a plugin has the live directory but not the persist path, so it needs a small host seam.
+  Test in `test/chatSealed.test.mjs`. Still **mandatory to revisit before any relayed/routed consumer**
+  (there the origin must be authenticated from inside the sealed payload, not from `caller`).
 - **TODO** — `[sol, deferred]` **Routing replay hole — pick a plan; the doc previously promised the
   wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
   fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at
