@@ -173,12 +173,12 @@ destination-side change; a replayed remote record never lowers local enforcement
 
 ## Milestones (reordered per the review)
 
-- **M0 — honesty.** Correct `routing.md` (done). Optionally propagate the existing
-  *unsigned* `id` into `relay()`'s child so the live-but-starved dedup catches
-  **accidental** duplicates (real: with `fanout:3`, a diamond delivers twice with no
-  adversary) — a **correctness** fix, explicitly *not a security control*. **Do not mark
-  it done until `child.id` actually exists in `routing.js`** — it does not yet; this is
-  a separate one-line code change + test.
+- **M0 — honesty. Done.** `routing.md` corrected, and the *unsigned* `id` now
+  propagates into `relay()`'s child, so the live-but-starved dedup catches **accidental**
+  duplicates (real: with `fanout:3`, a diamond delivers twice with no adversary) — a
+  **correctness** fix, explicitly *not a security control* (an unsigned id is strippable
+  and re-mintable by a dishonest relay; that is M1). Regression test: a two-hop replayed
+  id is delivered once.
 - **M1 — authenticated route manifest.** The fixed canonical schema above; origin
   authentication; payload commitment; destination binding; the explicit expiry rules;
   and **either durable replay state or a stated per-process replay guarantee**. Re-key

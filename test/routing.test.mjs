@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createRouter, greedyPolicy, floodPolicy, xorDistanceOver } from "../src/routing.js";
 
 /** Build a network from an adjacency map; returns the routers and a forward counter. */
-function net(adjacency, { policy, ttlMax, budgetMax, fanoutMax, blocked = new Set() } = {}) {
+function net(adjacency, { policy, ttlMax, budgetMax, fanoutMax, blocked = new Set(), onDeliver } = {}) {
   const nodes = new Map();
   let forwards = 0;
   for (const key of Object.keys(adjacency)) {
@@ -24,7 +24,7 @@ function net(adjacency, { policy, ttlMax, budgetMax, fanoutMax, blocked = new Se
           forwards += 1;
           return nodes.get(peer).relay(env, key);
         },
-        deliver: async (payload, meta) => ({ payload, at: key, via: meta.via, origin: meta.origin }),
+        deliver: async (payload, meta) => { onDeliver?.(key); return { payload, at: key, via: meta.via, origin: meta.origin }; },
         isBlocked: (k) => blocked.has(k),
         policy,
         ttlMax,
@@ -208,4 +208,16 @@ test("an envelope with no id is not deduped (only originated messages carry one)
   await d.relay(env, "a");
   await d.relay(env, "a");
   assert.equal(delivers, 2, "without an id there is nothing to dedup");
+});
+
+test("a relayed message replayed with the same id is delivered once, not twice (M0 dedup)", async () => {
+  // The destination dedup (firstDelivery) only works if the id survives relaying.
+  // Before the fix, relay() dropped the id from the child envelope, so a message that
+  // crossed a relay carried no id and was delivered again on replay. a → b → d.
+  let deliveries = 0;
+  const { nodes } = net({ a: ["b"], b: ["a", "d"], d: ["b"] }, { onDeliver: (k) => { if (k === "d") deliveries += 1; } });
+  const first = await nodes.get("a").send("d", "hi", { id: "msg-1" });
+  assert.equal(first.delivered, true);
+  await nodes.get("a").send("d", "hi", { id: "msg-1" }); // same id, replayed
+  assert.equal(deliveries, 1, "the destination acted on the message once; the relayed replay was deduped");
 });

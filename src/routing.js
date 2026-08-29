@@ -157,6 +157,14 @@ export function createRouter({
         visited: path,
         payload,
         origin,
+        // Propagate the origin's id so the destination dedup (firstDelivery) actually
+        // fires for relayed traffic — without this the id survives only a direct
+        // send, and a message that crosses a relay is delivered again on replay. This
+        // is the M0 stopgap in docs/routing-security-roadmap.md: it suppresses
+        // *accidental* double-delivery (a diamond topology forwards twice under
+        // fanout), NOT a malicious relay — the id is unsigned, so a dishonest relay
+        // can strip or re-mint it. The authenticated version is M1.
+        id: envelope.id,
       };
       let r;
       try {
