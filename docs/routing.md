@@ -225,11 +225,14 @@ discussion is one mechanism, not a separate discovery phase:
   closed at Stage 1, despite an earlier draft of this file claiming so: `send()` mints an
   envelope id but `relay()`'s child envelope drops it, so the destination dedup is dead
   for all relayed traffic (confirmed above, and see `docs/routing-security-roadmap.md`).
-  The real fix belongs here — the id, a sequence number, and an expiry **signature-covered
-  inside the sealed block**, so a relay cannot strip or rewrite them. A purely mechanical
-  Stage-1 stopgap (propagate the outer id so the existing dedup functions) closes only
-  *accidental* and *naive* replay, never a malicious admitted relay; it is milestone M1 in
-  the security roadmap, off the critical path to this authenticated version.
+  The real fix is a **signed route manifest** — origin, dest, id, seq, expiry, and a
+  payload digest signed by the origin's identity key and carried *outside* the sealed
+  payload (committing to the ciphertext, so verify-before-decrypt is preserved) — so a
+  relay cannot strip or rewrite them. That is milestone **M1** in
+  `docs/routing-security-roadmap.md`. A purely mechanical **M0** stopgap (propagate the
+  outer, unsigned id so the existing dedup catches *accidental* double-delivery) is a
+  correctness fix only, explicitly not a security control, and off the path to the
+  authenticated version.
 - **Asynchronous reply routing.** Stage 1 threads replies synchronously up the call
   chain, which caps chain length at `ttl × per-hop timeout` and holds a call open per
   hop; once a cached source route exists, a reply can travel its own path.
