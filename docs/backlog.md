@@ -248,11 +248,15 @@ roadmap is shared, not scattered across PR threads.
   `src/routeReplayGuard.js` — the destination-side discipline over an already-verified manifest
   (time-window with skew + max-validity, `(origin,messageId,blockIndex)` dedup, fail-closed at
   capacity, per-origin ceiling, expired-sweep), a stated per-process/session guard (not restart-safe,
-  per Sol), tested. **M1 remaining:** the middle plumbing — build+sign the manifest at send, attach the
-  origin's signed self-record, carry it through the (pure) engine in the payload wrapper, and at the
-  destination verify manifest + origin record + destination self-check, then hand to the replay guard.
-  Then M2 (record-piggyback key discovery + tier model) and M3 (sealed payload + the shared observation
-  seam). Original framing:
+  per Sol), tested. **M1 integration core landed (branch `routing-m1-wrapper`, awaiting security review):**
+  `src/routedMessage.js` — `wrapRoutedMessage` (build+sign the manifest at send, attach the origin's
+  signed self-record, carry the body as digested bytes) and `openRoutedMessage` (the destination's
+  fail-closed gates in order: recover origin key from the record → bind to `originKeyId` → verify manifest
+  → destination self-check → refuse non-clear mode / multi-block → payload-digest → parse → replay guard
+  last), 12 tests + a folded-in Fable pass. **M1 remaining:** the engine wiring — build the wrapper at
+  `send` and open it at the destination inside `routePlugin`, keeping the pure routing engine opaque to
+  it. Then M2 (record-piggyback key discovery + tier model) and M3 (sealed payload + the shared
+  observation seam). Original framing:
   **Routing replay hole — pick a plan; the doc previously promised the wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
   fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at
   Stage 1** (Stage 1 has no sealed block and an unsigned origin). Choose:
