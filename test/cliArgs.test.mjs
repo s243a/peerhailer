@@ -85,3 +85,23 @@ test("an unmigrated command falls back to the lenient parse (no schema, no error
   assert.equal(positional[0], "tunnels");
   assert.equal(flags.anything, "here");
 });
+
+test("regression: daemon accepts --hail-on-encrypted / --hail-on-tls (Fable)", () => {
+  assert.equal(of("daemon --hail-on-encrypted tailscale0").flags["hail-on-encrypted"], "tailscale0");
+  assert.equal(of("daemon --hail-on-tls eth0").flags["hail-on-tls"], "eth0");
+});
+
+test("regression: unblock --key with no name is valid (Fable)", () => {
+  const { flags, positional } = of("unblock --key ABCDEF12");
+  assert.equal(flags.key, "ABCDEF12");
+  assert.deepEqual(positional, ["unblock"], "no name required");
+  // ...and the name form still works.
+  assert.deepEqual(of("unblock bob").positional, ["unblock", "bob"]);
+});
+
+test("the lenient fallback is verbatim: --a --b=c keeps the old greedy reading", () => {
+  // An unmigrated command must behave exactly as before: the old parser read
+  // `--b=c` (which is not a bare --word) as the value of --a.
+  const { flags } = of("tunnels --a --b=c");
+  assert.equal(flags.a, "--b=c", "unchanged legacy behaviour on an unmigrated command");
+});

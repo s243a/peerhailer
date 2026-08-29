@@ -47,7 +47,8 @@ export const GLOBAL_OPTIONS = /** @type {Record<string, OptionKind>} */ ({
  */
 export const COMMANDS = {
   block: { positionals: ["name"], options: { "include-key": "boolean" } },
-  unblock: { positionals: ["name"], options: { key: "string" } },
+  // name is optional: `unblock --key <pem|fingerprint>` lifts a key with no name.
+  unblock: { positionals: ["[name]"], options: { key: "string" } },
   add: {
     positionals: ["name", "[address]"],
     options: { profile: "string", until: "string", key: "string", "key-file": "string", transport: "string" },
@@ -58,14 +59,14 @@ export const COMMANDS = {
       port: "string",
       host: "string",
       "hail-on": "string",
+      "hail-on-encrypted": "string",
+      "hail-on-tls": "string",
       "tls-cert": "string",
       "tls-key": "string",
       "allow-origin": "string",
-      "exit-token": "string",
       chat: "boolean",
       route: "boolean",
       ui: "boolean",
-      share: "boolean",
       "require-target-binding": "boolean",
     },
   },
@@ -87,8 +88,16 @@ export const COMMANDS = {
   },
 };
 
-/** @param {string} token */
+/** A `--word` or `--word=…` option token (the strict parser's notion). @param {string} token */
 const isLongFlag = (token) => /^--[a-z][a-z0-9-]*(=|$)/i.test(token);
+/**
+ * The *legacy* parser's flag test — a bare `--word` only, so `--x=y` does not read
+ * as a flag when it follows another option. Used solely by `parseLenient` to keep
+ * unmigrated commands byte-for-byte as they were; the strict parser uses the
+ * broader `isLongFlag`.
+ * @param {string} token
+ */
+const looksLikeLegacyFlag = (token) => /^--[a-z][a-z0-9-]*$/i.test(token);
 
 /**
  * Resolve the schema for a command (and, for a grouped command, its action — the
@@ -137,7 +146,7 @@ function parseLenient(argv) {
     }
     const key = token.slice(2);
     const next = argv[i + 1];
-    if (next === undefined || isLongFlag(next)) flags[key] = true;
+    if (next === undefined || looksLikeLegacyFlag(next)) flags[key] = true;
     else {
       flags[key] = next;
       i += 1;
