@@ -205,11 +205,19 @@ destination-side change; a replayed remote record never lowers local enforcement
   recursive searches are capped globally/per caller, downstream work claims cannot
   replenish budget, and malformed/oversized encodings fail closed. **Signed ≠ private** — relays still
   read payloads at this milestone.
-- **M2 — destination record discovery.** Verify the destination record against the
-  routing target; introduce Tier-1 state and policy; add the signed floor advertisement;
-  define Tier-1 replacement/conflict rules. Piggybacks on a route-discovery
-  response/probe or an earlier authenticated *clear* delivery — **not** on the first
-  confidential delivery (the origin needs the key *before* producing that).
+- **M2 — destination record discovery. Implemented (Tier-1 store + discovery wiring) on
+  `routing-m2-tier1`.** Verify the destination record against the routing target; introduce
+  Tier-1 state and policy; define Tier-1 replacement/conflict rules. Piggybacks on a
+  route-discovery response/probe or an earlier authenticated *clear* delivery — **not** on
+  the first confidential delivery (the origin needs the key *before* producing that). The
+  destination attaches a **key-only** signed record (name + identity key + sealing key,
+  *no addresses*): discovery is key discovery, and handing direct addresses to return-path
+  relays would undercut F2F reachability. The store is session-scoped and identity-key-
+  indexed, quarantined from Tier-0's persisted model; two differing keys for one target are
+  a sticky conflict, not a selection; conflicts survive capacity eviction. No record "age"
+  is surfaced — a Tier-1 record carries no liveness, and any age would be a value a relay
+  selects. The **signed floor advertisement** folds into M3b, where it is enforceable (a
+  destination rejecting `clear` needs a sealed alternative to exist first).
 - **M3a — authenticated-origin capability seam.** The general durable observation API,
   with a request-scoped authenticated-origin proof (below). Built and testable *before*
   it is load-bearing.

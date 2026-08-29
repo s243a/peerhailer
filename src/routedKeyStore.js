@@ -54,7 +54,6 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
    *   sealKey: string | null,   // the record-carried X25519 sealing key (null once conflicted)
    *   conflict: boolean,        // two differing sealing keys seen -> refuse to pick
    *   name: string,             // the destination's self-declared name, for surfacing
-   *   recordLastSeen: number | null, // the record's own freshness stamp, for age surfacing
    * }>}
    */
   const entries = new Map();
@@ -106,20 +105,11 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
       const existing = entries.get(targetKeyId);
       if (!existing) {
         if (entries.size >= maxEntries) evictOldest();
-        entries.set(targetKeyId, {
-          sealKey,
-          conflict: false,
-          name: rec.record.name,
-          recordLastSeen: rec.record.lastSeen,
-        });
+        entries.set(targetKeyId, { sealKey, conflict: false, name: rec.record.name });
         return "record-carried";
       }
       if (existing.conflict) return "record-conflict"; // sticky within the session
-      if (sameKey(existing.sealKey, sealKey)) {
-        // A matching record adds no authority; refresh only the freshness stamp.
-        if (typeof rec.record.lastSeen === "number") existing.recordLastSeen = rec.record.lastSeen;
-        return "record-carried";
-      }
+      if (sameKey(existing.sealKey, sealKey)) return "record-carried"; // adds no authority
       // A different sealing key for the same target: ambiguous hearsay, refuse to pick.
       existing.sealKey = null;
       existing.conflict = true;
@@ -154,17 +144,18 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
     },
 
     /**
-     * What to show a person before a Tier-1 send: the sealing key (to fingerprint), the
-     * destination's declared name, and the record's own freshness stamp (its age). Null
-     * when there is no usable Tier-1 key.
+     * What to show a person before a Tier-1 send: the sealing key (to fingerprint) and
+     * the destination's declared name. Null when there is no usable Tier-1 key. No
+     * "freshness" is surfaced on purpose — Tier 1 carries no liveness proof, and any
+     * record age would be a value a relay selects by replaying whichever record it chose.
      *
      * @param {string} targetKeyId
-     * @returns {{ sealKey: string, name: string, recordLastSeen: number | null } | null}
+     * @returns {{ sealKey: string, name: string } | null}
      */
     recordDetail(targetKeyId) {
       const e = entries.get(targetKeyId);
       if (!e || e.conflict || !e.sealKey) return null;
-      return { sealKey: e.sealKey, name: e.name, recordLastSeen: e.recordLastSeen };
+      return { sealKey: e.sealKey, name: e.name };
     },
 
     /**

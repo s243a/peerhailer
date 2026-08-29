@@ -44,7 +44,7 @@ test("a signed record whose identity is the target contributes its sealing key",
   assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
   assert.equal(store.recordSealKey(d.keyId), d.sealPublicKey);
   assert.equal(store.recordState(d.keyId), "record-carried");
-  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest", recordLastSeen: null });
+  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest" });
 });
 
 test("a record for a different identity than the target is not stored", () => {
@@ -82,10 +82,10 @@ test("two differing sealing keys for one target become a sticky conflict", () =>
 test("the same sealing key observed again adds no authority and no second entry", () => {
   const store = createRoutedKeyStore();
   const d = machine("dest");
-  assert.equal(store.observe(d.keyId, recordOf(d, { lastSeen: 100 })), "record-carried");
-  assert.equal(store.observe(d.keyId, recordOf(d, { lastSeen: 200 })), "record-carried");
+  assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
+  assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
   assert.equal(store.size(), 1);
-  assert.equal(store.recordDetail(d.keyId)?.recordLastSeen, 200, "freshness stamp refreshes");
+  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest" });
 });
 
 test("a malformed or unsigned envelope contributes nothing", () => {

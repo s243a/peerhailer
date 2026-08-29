@@ -11,8 +11,10 @@ import {
   MAX_IN_FLIGHT_RELAYS,
   MAX_RELAYS_PER_WINDOW,
   RELAY_WINDOW_MS,
+  ROUTED_RECORD_FIELD,
 } from "../src/builtin/routePlugin.js";
-import { generateIdentity } from "../src/identity.js";
+import { generateIdentity, normalizeKey } from "../src/identity.js";
+import { signRecord } from "../src/peerRecord.js";
 import { REFUSE } from "../src/plugins.js";
 import { keyId } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
@@ -21,7 +23,18 @@ import { wrapRoutedMessage } from "../src/routedMessage.js";
 const T = 1_700_000_000_000;
 const machine = (name) => {
   const identity = generateIdentity();
-  return { name, identity, record: { name, publicKey: identity.publicKey, addresses: [] } };
+  return {
+    name,
+    identity,
+    record: { name, publicKey: identity.publicKey, sealPublicKey: identity.sealPublicKey, addresses: [] },
+  };
+};
+
+/** A delivery response with the M2 discovery record stripped, for exact-shape checks. */
+const responseBody = (response) => {
+  if (!response || typeof response !== "object") return response;
+  const { [ROUTED_RECORD_FIELD]: _record, ...rest } = response;
+  return rest;
 };
 
 const cryptoDeps = (self, over = {}) => ({
@@ -88,7 +101,7 @@ test("send wraps once, relays opaquely, and delivers only the authenticated orig
 
   const result = await pluginA.send(b.identity.publicKey, { hello: "graph" });
   assert.equal(result.delivered, true);
-  assert.deepEqual(result.response, { received: true, echo: { hello: "graph" } });
+  assert.deepEqual(responseBody(result.response), { received: true, echo: { hello: "graph" } });
   assert.deepEqual(delivered.body, { hello: "graph" });
   assert.equal(delivered.meta.originKeyId, keyId(a.identity.publicKey));
   assert.equal(delivered.meta.origin, delivered.meta.originKeyId, "the unsigned outer origin is replaced");
@@ -99,6 +112,60 @@ test("send wraps once, relays opaquely, and delivers only the authenticated orig
   const local = await pluginB.send(b.identity.publicKey, { hello: "self" });
   assert.equal(local.delivered, true, "self-send passes through the same wrap/open gates");
   assert.equal(delivered.meta.originKeyId, keyId(b.identity.publicKey));
+});
+
+test("the origin learns the destination's Tier-1 sealing key from its piggybacked record", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey] }));
+
+  // Before any exchange, alice holds no routed sealing key for bob.
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "none");
+
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" });
+  assert.equal(result.delivered, true);
+  assert.ok(result.response[ROUTED_RECORD_FIELD], "bob piggybacked his signed record");
+
+  // Alice now holds bob's advertised sealing key at Tier 1 (record-carried, not verified).
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried");
+  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), normalizeKey(b.identity.sealPublicKey));
+  assert.equal(pluginA.router.routedSealDetail(b.identity.publicKey)?.name, "bob");
+});
+
+test("a relay that swaps in an older record of the destination causes a Tier-1 conflict, not a wrong key", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const bStale = generateIdentity(); // bob's retired sealing key
+  let pluginB;
+  let trips = 0;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => {
+      const result = await pluginB.router.relay(envelope, a.identity.publicKey);
+      // On the second round-trip a dishonest relay substitutes an older record it
+      // captured — signed by bob's identity, but advertising a since-retired sealing
+      // key. It cannot forge a record for a different identity, only replay this one.
+      if ((trips += 1) === 2 && result?.response?.[ROUTED_RECORD_FIELD]) {
+        result.response[ROUTED_RECORD_FIELD] = signRecord(
+          { name: "bob", publicKey: b.identity.publicKey, sealPublicKey: bStale.sealPublicKey, addresses: [] },
+          b.identity.privateKey,
+        );
+      }
+      return result;
+    },
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey] }));
+
+  await pluginA.send(b.identity.publicKey, { n: 1 }); // honest: learns bob's real key
+  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), normalizeKey(b.identity.sealPublicKey));
+  await pluginA.send(b.identity.publicKey, { n: 2 }); // tampered: a second, different key
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-conflict");
+  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), null, "a disputed target seals to nothing");
 });
 
 test("an unsigned outer-id pre-injection cannot poison M1; changed-id replay still opens once", async () => {
@@ -142,7 +209,7 @@ test("an unsigned outer-id pre-injection cannot poison M1; changed-id replay sti
 
   const good = await relay({ body: { ...base, payload: wrapper }, caller: { publicKey: carrier.identity.publicKey } });
   assert.equal(good.delivered, true, "the unsigned id was not reserved by the poison");
-  assert.deepEqual(good.response, { received: true });
+  assert.deepEqual(responseBody(good.response), { received: true });
   assert.equal(deliveries, 1);
   assert.equal(authenticatedOrigin, keyId(a.identity.publicKey), "outer origin spoof is ignored");
 
