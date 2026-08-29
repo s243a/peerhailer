@@ -180,13 +180,15 @@ roadmap is shared, not scattered across PR threads.
   a `content-length` pre-check so an over-declared body is refused *and answered* (413) rather than the
   socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
   `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
-- **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The current
-  ad-hoc parser has one real bug (a boolean flag before a positional is misparsed — verified:
-  `hail block --include-key bob` drops the name) and soft edges (no typo rejection, no per-command
-  schema/help). Recommendation is **staged**: (1) a light-touch boolean-flag set now to close the bug,
-  no migration; (2) later, if wanted, per-command schemas over `node:util.parseArgs` (stdlib, zero-dep)
-  for typo rejection + generated help, migrated command-by-command. Awaiting a pick before code.
-  `bin/hail.js`.
+- **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The audit found
+  several real bugs: booleans can consume positionals, forwarded flags disappear (there is no `--`
+  terminator), unknown flags are ignored, and missing string values behave inconsistently. The
+  documented `--debug [minutes]` is genuinely boolean-or-valued, which `node:util.parseArgs` cannot
+  express directly. The revised design compares a local typed parser, stdlib, Commander,
+  Lisp-origin `@babashka/cli`, CAC, Yargs, and Citty. Any runtime package would reverse the documented
+  source-clone/no-`npm install` deployment promise unless vendored or bundled. If that policy changes,
+  Commander 14 and `@babashka/cli` are the two package finalists and should face the same contract
+  proof before handlers change; otherwise use a local typed schema. `bin/hail.js`.
 - **DONE** — `[sol, split from #12]` **Immutable read views** — `get`/`getByKey`/`listAdmitted`/
   `listCandidates`/`holdersOf`/`snapshot`/`currentProfiles` handed out live records, so a caller
   mutating one (e.g. `record.addresses.push(...)`) corrupted directory state behind `commit`'s back
