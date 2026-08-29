@@ -220,10 +220,16 @@ discussion is one mechanism, not a separate discovery phase:
   fabric-level primitive, not a routing feature** — the same seal chat and tunnel-exits
   want; the identity-key decision it rests on is its own record, `docs/sealing.md`.
   Distinct from Stage 5 *anonymity*, which hides *who*, not *what*.
-- **Sign `origin`; replay is already handled.** Signing `origin` lets a reply be
-  addressed to it rather than threaded back up the call chain. Replay itself was closed
-  in Stage 1 (a per-destination envelope-id dedup — a relay cannot make the destination
-  act on an old envelope twice); an envelope expiry can tighten it further.
+- **Sign `origin`, and *actually* close replay here.** Signing `origin` lets a reply
+  be addressed to it rather than threaded back up the call chain. Replay is **not**
+  closed at Stage 1, despite an earlier draft of this file claiming so: `send()` mints an
+  envelope id but `relay()`'s child envelope drops it, so the destination dedup is dead
+  for all relayed traffic (confirmed above, and see `docs/routing-security-roadmap.md`).
+  The real fix belongs here — the id, a sequence number, and an expiry **signature-covered
+  inside the sealed block**, so a relay cannot strip or rewrite them. A purely mechanical
+  Stage-1 stopgap (propagate the outer id so the existing dedup functions) closes only
+  *accidental* and *naive* replay, never a malicious admitted relay; it is milestone M1 in
+  the security roadmap, off the critical path to this authenticated version.
 - **Asynchronous reply routing.** Stage 1 threads replies synchronously up the call
   chain, which caps chain length at `ttl × per-hop timeout` and holds a call open per
   hop; once a cached source route exists, a reply can travel its own path.

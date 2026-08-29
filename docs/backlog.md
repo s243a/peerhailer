@@ -240,9 +240,9 @@ roadmap is shared, not scattered across PR threads.
   day. Tests for the shipped per-session ratchet in `test/chatSealed.test.mjs`. Relayed caveat
   (key on the in-payload origin, never `caller`) remains a hard requirement — see the NOTE in
   `chatPlugin.js`.
-- **TODO (options documented — `docs/routing-replay-options.md`; recommend A now + honest doc, B at
-  Stage 1.5)** — `[sol, deferred]` **Routing replay hole — pick a plan; the doc previously promised the
-  wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
+- **TODO (roadmapped — `docs/routing-security-roadmap.md`; M0 doc-honesty done, M1 mechanical fix
+  optional/off-path, M2 key-discovery + M3 authenticated relay are the real path)** — `[sol, deferred]`
+  **Routing replay hole — pick a plan; the doc previously promised the wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
   fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at
   Stage 1** (Stage 1 has no sealed block and an unsigned origin). Choose:
   - **Now (mechanical):** propagate the same id through every child envelope and keep destination
