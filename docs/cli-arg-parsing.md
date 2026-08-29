@@ -1,9 +1,14 @@
 # CLI argument parsing
 
-**Status: design / proposed.** Revised 2026-08-28 after auditing every flag and
-running preliminary smoke checks against the leading candidates. No parser has
-been selected, the full contract proof is still pending, and no CLI behaviour has
-been migrated yet.
+**Status: Candidate A selected and landing.** Revised 2026-08-28 after auditing
+every flag and running preliminary smoke checks against the leading candidates. The
+decision was made to keep the no-`npm install` deployment promise binding, so
+**Candidate A (a small local typed parser)** was chosen and built in
+`src/cliArgs.js`, proven against the contract matrix in `test/cliArgs.test.mjs`, and
+wired into `bin/hail.js` with a lenient fallback so commands migrate leaf by leaf.
+The package candidates below remain the record of what a policy reversal would buy;
+they were not adopted. Point 14 (help generated from the schemas) and migrating the
+remaining commands are the open follow-ups.
 
 ## Decision to make
 
@@ -405,3 +410,34 @@ shims.
     `profiles remove`, not the `profiles` group globally.
 13. Every string-valued option fails when its value is missing.
 14. Root and leaf `--help` are generated from the same schemas used to validate.
+
+## Future work (low priority) — a mature parser as a dev-time oracle
+
+Not selected as the runtime engine, a mature package can still earn its keep at
+**dev time only**, with no effect on the deployment promise: `dependencies` stays
+`{}`, `node bin/hail.js` still runs with no install, and the package lives in
+`devDependencies` beside `typescript`.
+
+- **Differential oracle.** Run each contract input through both the local parser
+  and **Commander** and assert equivalent parsed shapes. Commander becomes a
+  battle-tested reference implementation that catches divergence in the hand-rolled
+  one — especially on the awkward cases (`--debug` optional value, `--`
+  pass-through, dash-leading values). **`@babashka/cli`** could serve as a *second,
+  independently-implemented* oracle (different heritage → a stronger cross-check),
+  though its larger dev-install tree makes it the lower-priority second.
+- **Fuzzing.** Feed random `argv` through both and assert agreement — finds edge
+  cases nobody wrote a test for.
+- **Keep the core suite install-free.** Guard the oracle test: dynamically
+  `import("commander")` and `test.skip` when it is absent. `node --test` with no
+  install still runs the full local-parser contract suite; CI's `npm ci` pulls the
+  oracle and runs the cross-check. Zero-install default, opt-in robustness.
+
+Caveats: the oracle needs a small *equivalence adapter* (the package's output shape
+is not our schema's 1:1), and a wrong adapter means a wrong oracle; it only covers
+what both can express, so deliberately-divergent behaviour (the inline-PEM `--key`)
+is tested directly instead; and a dev dependency is still supply-chain surface at
+dev time — pin it and keep the lockfile.
+
+This is a robustness enhancement, **not a prerequisite**. The local parser ships and
+is proven by the hand-written contract matrix above regardless; the oracle is
+optional assurance to add if and when it feels worth the one dev dependency.

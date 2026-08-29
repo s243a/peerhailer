@@ -21,6 +21,7 @@ import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
 import { createDirectory, reconcileBaseline, reconcilePersist } from "../src/directory.js";
+import { parseArgs, CliError } from "../src/cliArgs.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -46,44 +47,17 @@ const fail = (message) => {
   process.exit(1);
 };
 
-/**
- * Flags, values, and one trap worth avoiding.
- *
- * `--flag value` is convenient until the value is a PEM, which begins with
- * `-----BEGIN` and looks exactly like another flag. So a value is only refused
- * when it starts with `--` *and* reads like a flag name; anything else is taken
- * as the value it plainly is. `--flag=value` always works and is what to use
- * when the value could be anything at all.
- */
-function parseArgs(argv) {
-  const positional = [];
-  /** @type {Record<string, string | true>} */
-  const flags = {};
-  const looksLikeFlag = (token) => /^--[a-z][a-z0-9-]*$/i.test(token);
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i];
-    if (!token.startsWith("--")) {
-      positional.push(token);
-      continue;
-    }
-    const equals = token.indexOf("=");
-    if (equals !== -1) {
-      flags[token.slice(2, equals)] = token.slice(equals + 1);
-      continue;
-    }
-    const key = token.slice(2);
-    const next = argv[i + 1];
-    if (next === undefined || looksLikeFlag(next)) flags[key] = true;
-    else {
-      flags[key] = next;
-      i += 1;
-    }
-  }
-  return { positional, flags };
+// Argument parsing lives in src/cliArgs.js (typed, tested, schema-driven). A
+// scheduled command is parsed strictly (typed options, `--` pass-through, unknown
+// options refused, arity checked); the rest fall back to the legacy lenient parse.
+// A schema violation is a CliError, answered like any other usage failure.
+let positional, flags;
+try {
+  ({ positional, flags } = parseArgs(process.argv.slice(2)));
+} catch (error) {
+  if (error instanceof CliError) fail(error.message);
+  throw error;
 }
-
-const { positional, flags } = parseArgs(process.argv.slice(2));
 const [command, ...rest] = positional;
 const statePath = typeof flags.state === "string" ? flags.state : defaultStatePath();
 const stored = loadState(statePath, { log: (m) => process.stderr.write(`${m}\n`) });

@@ -180,6 +180,17 @@ roadmap is shared, not scattered across PR threads.
   a `content-length` pre-check so an over-declared body is refused *and answered* (413) rather than the
   socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
   `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
+- **IN PROGRESS (Candidate A landed)** — `[sol]` **CLI arg parsing** — the local typed parser
+  (`docs/cli-arg-parsing.md` Candidate A) is built in `src/cliArgs.js` (typed + tested, out of the
+  un-checked `bin/`): per-leaf schemas with `boolean`/`string`/`optional` kinds, `--` pass-through,
+  unknown-option rejection, and positional-arity checks. Proven against the 13 assertable contract-
+  matrix points in `test/cliArgs.test.mjs` (point 14, help generated from the schemas, is future
+  work). Wired into `bin/hail.js`, replacing the ad-hoc parser; commands **without** a schema fall
+  back to the legacy lenient parse, so migration proceeds leaf by leaf with zero regression. Migrated
+  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`. **Remaining (follow-ups):**
+  schema the rest (`tunnels`, `services`, `shells`, `shares`, `files`, `gate`, `seal`, `rotate`,
+  `walk`, `trust`, `chat`, compose…), then generated `--help` from the schemas. Optional future
+  robustness: the Commander/Babashka dev-only differential+fuzz oracle (RFC "Future work"). Survey below:
 - **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The audit found
   several real bugs: booleans can consume positionals, forwarded flags disappear (there is no `--`
   terminator), unknown flags are ignored, and missing string values behave inconsistently. The
