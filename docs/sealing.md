@@ -277,13 +277,16 @@ first consumer does not rediscover them.
    peer that keeps its identity but loses its seal keypair is refused on cleartext until it
    seals again (it can, from our advertised key) or the daemon reloads.
 
-   **Deferred, tracked for follow-up:**
-   - *A durable `requireSealFrom` marker* on the directory record, OR-merged across writers
-     like `sealRequired` (so a stale writer cannot roll the ratchet back), which would hold it
-     across restarts — with an operator override for the lost-keypair case. **Mandatory to
-     revisit before any relayed consumer** (routing): there both the sender-binding and the
-     ratchet must key on the origin authenticated from *inside* the sealed payload, never on
-     the last-hop `caller`.
+   **Deferred, tracked for follow-up (design reviewed, not building yet):** a durable
+   `requireSealFrom` marker on the directory record would hold the ratchet across restarts. A
+   Sol design review (`docs/durable-seal-ratchet.md`) found the trade presently negative and the
+   first draft's override and recovery reasoning unsound — notably that a peer does **not** need
+   its own sealing keypair to seal *to us*, so key-loss is not the recovery case. The corrected
+   design (OR-floor field, a caller-bound persist seam that fails the request on error, no
+   revision-based override, reset on identity rotation) is kept for when routing adds a second
+   seal consumer. **Mandatory to revisit before any relayed consumer** (routing): there both the
+   sender-binding and the ratchet must key on the origin authenticated from *inside* the sealed
+   payload, never on the last-hop `caller`.
 
 **Forward-secrecy scope, stated for consumers:** sender-side only. If the *recipient's*
 static sealing key is later compromised, every past block sealed to it is decryptable
