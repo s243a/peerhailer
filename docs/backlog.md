@@ -223,11 +223,18 @@ roadmap is shared, not scattered across PR threads.
   downgrade"), while an unrelated peer's cleartext and the peer's own continued sealing are unaffected.
   Kept in the plugin instance, in the same spirit as its nonce cache (a reload resets it and the next
   sealed message re-establishes it; the hail layer authenticates every caller regardless), so it is a
-  **per-session** ratchet. **Follow-up:** a *durable* marker (a monotone `requireSealFrom` on the
-  directory record, persisted through `change`) would hold the ratchet across restarts — deferred
-  because a plugin has the live directory but not the persist path, so it needs a small host seam.
-  Test in `test/chatSealed.test.mjs`. Still **mandatory to revisit before any relayed/routed consumer**
-  (there the origin must be authenticated from inside the sealed payload, not from `caller`).
+  **per-session** ratchet. Kimi (PR #49) approved and confirmed the arming is post-validation and the
+  keying fail-closed. **Follow-up — durable marker:** a monotone `requireSealFrom` on the directory
+  record, persisted through `change` **and carried through `mergeByRevision` as an OR-floor like
+  `sealRequired`** (else a stale writer rolls the ratchet back — the exact bug class the sender-side
+  floor fixed); design an **operator override** at the same time, since a persisted ratchet makes the
+  lost-seal-keypair false-refusal case permanent. Needs a small host seam (a plugin has the live
+  directory but not the persist path). Tests in `test/chatSealed.test.mjs` (arms, spares strangers,
+  allows continued sealing, and — Kimi's ask — a *failed* sealed message does **not** arm it). Still
+  **mandatory to revisit before any relayed/routed consumer**: there both the sender-binding *and* the
+  ratchet must key on the origin authenticated from **inside the sealed payload**, never on `caller`
+  (the last hop) — see the NOTE in `chatPlugin.js`. Identity rotation resets the ratchet (noted in
+  `docs/sealing.md`).
 - **TODO** — `[sol, deferred]` **Routing replay hole — pick a plan; the doc previously promised the
   wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
   fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at

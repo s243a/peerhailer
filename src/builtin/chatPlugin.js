@@ -190,7 +190,12 @@ export function createChatPlugin({
             // caller, which is right for direct chat but wrong for a relayed
             // consumer (e.g. routing) — there the caller is the last hop, not the
             // origin, so authenticate the origin from INSIDE the sealed payload,
-            // not from `caller`. Do not copy this check into a relayed path.
+            // not from `caller`. Do not copy this check into a relayed path. The
+            // same warning applies to the `sealedFrom` downgrade ratchet below: a
+            // relayed consumer must key it on that inside-the-payload origin, never
+            // on `caller` — keyed on the last hop it would refuse other origins'
+            // cleartext (a false refusal) and be blind to the origin's own downgrade
+            // (the case it exists for).
             if (!sameKey(opened.from, caller.publicKey)) return { [REFUSE]: true, reason: "sealed sender is not the caller" };
             let payload;
             try {

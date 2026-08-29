@@ -266,13 +266,24 @@ first consumer does not rediscover them.
    is replayable), and `hail seal accept <peer> --seal-key-file <f>` / a `sealKey` in the
    API to lift a `reverify` without a forget-and-re-add (which would drop the floor).
 
+   **Receiver-side downgrade refusal — done (per-session):** once a peer sends a *validated*
+   sealed message, a later cleartext message from that peer is refused (no silent downgrade
+   of a conversation that had been encrypted). It gates on having *received* sealed from the
+   peer, **not** on `sealKeyFor(sender)` — holding the sender's recipient key does not prove
+   the sender verified ours. The marker is a per-plugin-instance set (like the nonce replay
+   cache): a reload resets it and the peer's next sealed message re-establishes it. Two edges
+   to know: **identity rotation resets the ratchet** (the new key has not sealed yet, so its
+   first cleartext is accepted — operator-only on both ends, so not an attacker lever), and a
+   peer that keeps its identity but loses its seal keypair is refused on cleartext until it
+   seals again (it can, from our advertised key) or the daemon reloads.
+
    **Deferred, tracked for follow-up:**
-   - *Receiver-side downgrade refusal.* The receiver still accepts a cleartext message
-     from a peer whose sealing key it holds. It must not gate on `sealKeyFor(sender)` —
-     holding the sender's recipient key does not prove the sender verified *ours*. The fix
-     is an inbound `requireSealFrom` marker set after the first sealed message from a peer,
-     after which cleartext from that peer is refused. **Mandatory before any relayed
-     consumer** (routing).
+   - *A durable `requireSealFrom` marker* on the directory record, OR-merged across writers
+     like `sealRequired` (so a stale writer cannot roll the ratchet back), which would hold it
+     across restarts — with an operator override for the lost-keypair case. **Mandatory to
+     revisit before any relayed consumer** (routing): there both the sender-binding and the
+     ratchet must key on the origin authenticated from *inside* the sealed payload, never on
+     the last-hop `caller`.
 
 **Forward-secrecy scope, stated for consumers:** sender-side only. If the *recipient's*
 static sealing key is later compromised, every past block sealed to it is decryptable
