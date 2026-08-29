@@ -48,6 +48,7 @@ import { forwardTunnel } from "./tunnelClient.js";
 import { mountShare } from "./filesMount.js";
 import { seal } from "./sealing.js";
 import { MAX_MESSAGE } from "./builtin/chatPlugin.js";
+import { RoutedMessageInputError } from "./routedMessage.js";
 
 const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
@@ -1027,16 +1028,27 @@ export function createDaemon({
         return send(response, 200, { stopped: true });
       }
 
-      // Originate a multi-hop routed message (Stage 1). The routing plugin (present
-      // only with --route) holds the engine and this node's neighbours; we just
-      // hand it a destination key and a payload and report what came back.
+      // Originate an M1 signed-cleartext multi-hop message. The routing plugin
+      // (present only with --route) wraps/authenticates around the pure engine; we
+      // hand it a destination identity key and JSON payload and report what came back.
       if (scope === "control" && url.pathname === "/api/route/send" && request.method === "POST") {
         const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
-        const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
-        return send(response, 200, result);
+        try {
+          const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
+          if (result?.reason === "invalid destination identity key") return send(response, 400, { error: result.reason });
+          return send(response, 200, result);
+        } catch (error) {
+          // A control caller can exceed the routed-body ceiling even while the
+          // enclosing request remains under MAX_BODY (base64 needs headroom).
+          // Everything else — key/record drift, signing/RNG failure, or a delivery
+          // callback throwing — is an internal fault and belongs to the generic 500
+          // path below, which logs it without exposing details.
+          if (error instanceof RoutedMessageInputError) return send(response, 400, { error: error.message });
+          throw error;
+        }
       }
 
       // What this machine offers, as it knows itself. Locally sourced: nothing
@@ -1268,12 +1280,14 @@ export function createDaemon({
       }
       if (state) directory.adopt(state);
       log(`[daemon] reloaded: ${pluginRoutes.size} routes, ${Object.keys(profiles).length} profiles`);
-      // A reload rebuilds plugin instances, so their in-memory state is reset —
-      // most notably the chat replay-guard nonce cache and the command-history
-      // buffer. Say so, since a security control resetting unremarked is the kind
-      // of thing this project treats as the worst kind. (A later change can keep
-      // instances whose config is unchanged; until then a reload is a reset.)
-      if (Array.isArray(nextPlugins)) log(`[daemon]          plugin in-memory state reset (chat replay guard, command history)`);
+      // A reload rebuilds plugin instances, so instance-owned state is reset — most
+      // notably chat's replay nonce cache and command history. State a host injects
+      // from outside the plugin instances is untouched, but only that host knows
+      // whether its replacement plugins reuse it (the CLI reports its route guard
+      // explicitly after this generic reload completes).
+      if (Array.isArray(nextPlugins)) {
+        log(`[daemon]          plugin instance state reset (chat replay guard, command history); host-injected state unchanged`);
+      }
       return { routes: pluginRoutes.size, profiles: Object.keys(profiles).length };
     },
     /** Loopback unless told otherwise: the API admits peers, so it stays local. */

@@ -240,7 +240,8 @@ roadmap is shared, not scattered across PR threads.
   day. Tests for the shipped per-session ratchet in `test/chatSealed.test.mjs`. Relayed caveat
   (key on the in-payload origin, never `caller`) remains a hard requirement — see the NOTE in
   `chatPlugin.js`.
-- **IN PROGRESS (roadmapped + reviewed — `docs/routing-security-roadmap.md`)** — `[sol/kimi, deferred]`
+- **IN PROGRESS (M1 implementation complete on `routing-m1-wrapper`, awaiting PR —
+  `docs/routing-security-roadmap.md`)** — `[sol/kimi/fable, deferred]`
   **Routing replay + authentication.** M0 done (#52: `child.id` propagates so the destination dedup
   catches accidental double-delivery; doc honesty corrected). **M1 primitive landed:** `src/routeManifest.js`
   — the origin-signed route manifest (fixed-order-array canonicalisation, key ids = SHA-256 of SPKI DER,
@@ -248,19 +249,22 @@ roadmap is shared, not scattered across PR threads.
   `src/routeReplayGuard.js` — the destination-side discipline over an already-verified manifest
   (time-window with skew + max-validity, `(origin,messageId,blockIndex)` dedup, fail-closed at
   capacity, per-origin ceiling, expired-sweep), a stated per-process/session guard (not restart-safe,
-  per Sol), tested. **M1 remaining:** the middle plumbing — build+sign the manifest at send, attach the
-  origin's signed self-record, carry it through the (pure) engine in the payload wrapper, and at the
-  destination verify manifest + origin record + destination self-check, then hand to the replay guard.
-  Then M2 (record-piggyback key discovery + tier model) and M3 (sealed payload + the shared observation
-  seam). Original framing:
-  **Routing replay hole — pick a plan; the doc previously promised the wrong one.** `send()` mints an envelope id but `relay()`'s child envelope drops it. The *authenticated*
-  fix (id/seq/expiry/origin signed and sealed) needs Stage 1.5 primitives that **do not exist at
-  Stage 1** (Stage 1 has no sealed block and an unsigned origin). Choose:
-  - **Now (mechanical):** propagate the same id through every child envelope and keep destination
-    dedup — documenting that an admitted malicious relay can still alter/replace it; **or**
-  - **Stage 1.5 (authenticated):** fold it in where immutable origin/id/expiry can be signed and
-    covered by destination sealing.
-  See `docs/routing.md`.
+  per Sol), tested. **M1 integration + engine wiring complete on `routing-m1-wrapper`:**
+  `src/routedMessage.js` — `wrapRoutedMessage` (build+sign the manifest at send, attach the origin's
+  signed self-record, carry the body as digested bytes) and `openRoutedMessage` (the destination's
+  fail-closed gates in order: cheap shape/size/destination → verify record + manifest → authorize
+  authenticated origin → non-reserving replay/time preflight → strict payload validation → reserve),
+  with canonical encodings, strict UTF-8/finite JSON, Ed25519/keypair enforcement, and a 700 kB body
+  / 950 kB total-wrapper ceiling. `routePlugin` now wraps at host `send`, opens only at destination, exposes only a secure
+  router facade, generates 128-bit IDs, and forces the unsigned outer M0 id to null so its pre-open
+  cache cannot be poisoned. The daemon injects one replay guard across config reloads; a process
+  restart remains the stated boundary. Live A→B→D and adversarial integration tests cover opaque
+  relay, authenticated-origin attribution, outer-origin spoofing, outer-id poisoning/reminting,
+  legacy refusal, self-send, reload persistence, concurrent replay, the full wire-size boundary,
+  and multi-hop refusal propagation. Final adversarial review also added global/per-caller in-flight
+  search ceilings and fail-closed accounting for untrusted downstream `spent`; the threaded response
+  remains explicitly unauthenticated. **Next:** M2 (record-piggyback key discovery +
+  tier model), then M3 (sealed payload + shared observation seam).
 - **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
   identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
   (not the direct-chat `from === caller` binding). See `docs/routing.md`.

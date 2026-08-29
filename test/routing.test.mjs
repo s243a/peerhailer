@@ -91,6 +91,24 @@ test("budget is a hard ceiling on total forwards, so a search cannot flood", asy
   assert.deepEqual(fed.via, ["a", "c", "d"]);
 });
 
+test("an untrusted negative spent report cannot mint budget for later siblings", async () => {
+  const childBudgets = [];
+  const router = createRouter({
+    self: "a",
+    neighbors: () => ["b", "c", "d"],
+    forward: async (_peer, envelope) => {
+      childBudgets.push(envelope.budget);
+      return { delivered: false, spent: -1000 };
+    },
+    deliver: () => ({}),
+  });
+
+  const result = await router.relay({ dest: "z", ttl: 4, budget: 2, visited: [], payload: "x" });
+  assert.equal(result.delivered, false);
+  assert.deepEqual(childBudgets, [1], "an invalid report is charged the child's full allowance and search stops");
+  assert.equal(result.spent, 2, "local accounting never exceeds or replenishes the received budget");
+});
+
 test("never routes through a blocked key", async () => {
   // Both b and c reach d; block b, so the only usable route is via c.
   const order = (cands) => [...cands].sort(); // would try b first if allowed

@@ -1,0 +1,3 @@
+# A few historical JavaScript sources contain literal NUL key separators. They are
+# source text, not binary assets; force review tools to render their diffs as text.
+*.js diff

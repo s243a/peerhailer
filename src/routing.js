@@ -1,6 +1,8 @@
 /**
- * Stage 1 routing: deliverable multi-hop over the trust graph, loop-free by
- * construction. See docs/routing.md for the roadmap this is the floor of.
+ * The pure Stage-1 routing engine: deliverable multi-hop over the trust graph,
+ * loop-free by construction. See docs/routing.md for the roadmap this is the
+ * floor of. It deliberately knows no cryptography; builtin/routePlugin.js layers
+ * the M1 signed wrapper and replay discipline around its opaque `payload` seam.
  *
  * The engine is the **protocol**, and it is fixed and shared: a message carries a
  * `dest`, a hard `ttl` (a depth ceiling), a `budget` (a soft ceiling on total
@@ -9,14 +11,15 @@
  * decrement ttl, never revisit, never step toward a blocked key — are not
  * negotiable.
  *
- * **Confidentiality, stated honestly: at Stage 1 the `payload` is NOT sealed.**
- * Every relay on the path can read it (and log or alter it). `requiresEncryptedArrival`
+ * **Confidentiality, stated honestly: at M1 the `payload` is NOT sealed.** Every
+ * relay on the path can read the wrapper's clear body (and log or alter the wire
+ * copy, though alteration is refused at the destination). `requiresEncryptedArrival`
  * on the plugin protects each *hop's* transport, not the path — an intermediary is
  * an admitted peer, and admission is not confidentiality. Sealing the payload to the
  * destination's key is a near-term prerequisite before routing anything private (see
  * docs/routing.md); it is distinct from the Stage 5 *anonymity* (onion) work. The
- * `origin` field is likewise carried **unsigned** at Stage 1 — advisory only; it
- * becomes load-bearing (and must be signed) once replies are origin-addressed.
+ * outer `origin` field is likewise carried **unsigned** and remains advisory only;
+ * the M1 plugin discards it at delivery and supplies the signed inner origin id.
  *
  * Everything *else* is **policy**, injected: which admitted neighbour to try first,
  * how many to try (`fanout`), and the distance metric that orders them. The engine
@@ -78,13 +81,17 @@ export function createRouter({
 }) {
   const N = normalize;
   self = N(self);
-  // Replay guard, at the DESTINATION only. A message carries a unique `id`; the
+  // Stage-1/M0 correctness dedup, at the DESTINATION only. A raw-engine message
+  // carries a unique `id`; the
   // destination delivers each id at most once within a window, so a relay re-
   // injecting an old envelope cannot make the destination act on it twice. Only the
   // destination dedups — an intermediate keeps re-forwarding, so the recursive
   // search stays complete (a node legitimately reached via a second path during
   // backtracking is not wrongly refused). Absent an id (an old or non-originated
-  // envelope), delivery is not deduped.
+  // envelope), delivery is not deduped. The M1 plugin intentionally forces this
+  // outer id to null: it is unsigned and runs before cryptographic open, so letting
+  // it reserve would let a relay poison the real signed message's slot. M1 uses its
+  // inner `(origin,messageId,blockIndex)` guard instead.
   /** @type {Map<string, number>} id -> expiry */
   const seen = new Map();
   /** @param {string | undefined} id */
@@ -160,10 +167,11 @@ export function createRouter({
         // Propagate the origin's id so the destination dedup (firstDelivery) actually
         // fires for relayed traffic — without this the id survives only a direct
         // send, and a message that crosses a relay is delivered again on replay. This
-        // is the M0 stopgap in docs/routing-security-roadmap.md: it suppresses
+        // is the raw-engine M0 stopgap in docs/routing-security-roadmap.md: it suppresses
         // *accidental* double-delivery (a diamond topology forwards twice under
         // fanout), NOT a malicious relay — the id is unsigned, so a dishonest relay
-        // can strip or re-mint it. The authenticated version is M1.
+        // can strip or re-mint it. The M1 route plugin bypasses this field and uses
+        // the authenticated inner manifest instead.
         id: envelope.id,
       };
       let r;
@@ -172,7 +180,16 @@ export function createRouter({
       } catch (error) {
         r = { delivered: false, reason: String(/** @type {any} */ (error)?.message ?? error), spent: 0 };
       }
-      spent += 1 + (Number(r?.spent) || 0);
+      // `spent` came from another machine. A negative report used to *increase*
+      // the budget available to later siblings; a huge/NaN report could make the
+      // accounting equally meaningless. Accept only a finite non-negative claim,
+      // capped by the budget that child received. An invalid claim fails closed by
+      // charging the child its whole allowance.
+      const reportedSpent = Number(r?.spent);
+      const childSpent = Number.isFinite(reportedSpent) && reportedSpent >= 0
+        ? Math.min(reportedSpent, child.budget)
+        : child.budget;
+      spent += 1 + childSpent;
       if (r?.delivered) {
         return { delivered: true, response: r.response, via: r.via ?? [...path, next], spent };
       }

@@ -83,13 +83,15 @@ loops, amplifies, or gets stranded. So:
   hop is never repeated), the **payload**, and an **origin**. The rules for clamping
   ttl/budget/fanout, decrementing TTL, refusing a revisit, and never relaying toward
   a blocked key are not negotiable.
-  **The payload is not confidential at Stage 1** — it is carried in the clear and
+  **The payload is not confidential at M1** — the body is origin-signed but clear, so
   every relay can read it; `requiresEncryptedArrival` protects each hop's transport,
-  not the path. Sealing the payload to the destination's key (*confidentiality*) is a
-  near-term prerequisite before routing anything private, distinct from and earlier
-  than the Stage 5 *anonymity* (onion) work. `origin` is carried **unsigned** at
-  Stage 1 (advisory); it must be signed once a reply is addressed to it rather than
-  threaded back up the call chain.
+  not the path. Sealing to the destination (*confidentiality*) is a near-term
+  prerequisite before routing anything private, distinct from and earlier than Stage
+  5 *anonymity*. The engine's outer `origin` remains **unsigned** and advisory, but the
+  M1 plugin discards it at delivery and supplies only the signed manifest origin.
+- **The return path is not authenticated at M1.** A relay may forge or suppress
+  `delivered`, an acknowledgement, or a refusal. They are routing feedback, not proof
+  of destination action; a consequential consumer needs a destination-signed receipt.
 - **The policy is local and pluggable.** *Which* admitted peer to step to, how much
   to randomise, how long to wait, when to retry a more distant route, whether to
   share metadata — all local. This is your "each node chooses its own approach,"
@@ -138,9 +140,9 @@ each plugin rolls its own). Ships `custom` + a **`source-route`** family.
 floods a small *route request* to discover a path, then source-routes the data; the
 Stage 1 relay instead carries the **payload** down every exploratory branch, so one
 misrouted send can move up to `budget × payload` of exploratory traffic. Survivable
-on tens of nodes, but it makes **Stage 1.5 — chunk the payload, let the first block probe and cache the
-route, then source-route the rest — a hard prerequisite before routing large payloads**
-(or Stage 1 must cap exploratory payload size).
+on tens of nodes. M1 now caps a serialized body at 700 kB; **Stage 1.5 — chunk the
+payload, let the first block probe and cache the route, then source-route the rest —
+remains a hard prerequisite before routing genuinely large payloads**.
 (2) Backtracking can starve a shallow valid route behind a deep dead-end subtree;
 greedy ordering only mitigates it. Stats are **first-party** only. Prove it on a
 3–5 node loopback graph. *(Covers outline items 1's delivery half, 2's bound, and 5.)*
@@ -168,11 +170,11 @@ discussion is one mechanism, not a separate discovery phase:
 >    **end-to-end signed origin** (from inside the sealed block) as two separate facts —
 >    see the "do not copy this into a relayed path" note at the chat binding site.
 >
-> **Also confirmed: a live Stage-1 replay hole.** `send` mints an envelope id, but
-> forwarding drops it, so replaying the same id through a relay was delivered **twice**
-> at the destination. Stage 1.5's id, sequence, count, expiry, and origin must be
-> **signature-covered inside the sealed block** — mutable outer metadata a relay can
-> rewrite is not enough. (Fix this in the routing forwarding path, not the sealing PR.)
+> **Historical replay hole, now closed to M1's stated per-process boundary.** The M0
+> fix propagated the unsigned outer id for accidental duplicate suppression. M1 now
+> signs origin/destination/id/block/timing/payload digest outside the body, bypasses
+> the poisonable outer-id cache, and reserves `(origin,id,blockIndex)` at destination.
+> The cache survives config reload, not process restart; durable replay is separate.
 
 - **Chunk the payload, and let the first block be the probe.** Break a payload into
   small blocks and send block 1 through the route search. Its success both confirms a
@@ -220,19 +222,13 @@ discussion is one mechanism, not a separate discovery phase:
   fabric-level primitive, not a routing feature** — the same seal chat and tunnel-exits
   want; the identity-key decision it rests on is its own record, `docs/sealing.md`.
   Distinct from Stage 5 *anonymity*, which hides *who*, not *what*.
-- **Sign `origin`, and *actually* close replay here.** Signing `origin` lets a reply
-  be addressed to it rather than threaded back up the call chain. Replay is **not**
-  closed at Stage 1, despite an earlier draft of this file claiming so: `send()` mints an
-  envelope id but `relay()`'s child envelope drops it, so the destination dedup is dead
-  for all relayed traffic (confirmed above, and see `docs/routing-security-roadmap.md`).
-  The real fix is a **signed route manifest** — origin, dest, id, seq, expiry, and a
-  payload digest signed by the origin's identity key and carried *outside* the sealed
-  payload (committing to the ciphertext, so verify-before-decrypt is preserved) — so a
-  relay cannot strip or rewrite them. That is milestone **M1** in
-  `docs/routing-security-roadmap.md`. A purely mechanical **M0** stopgap (propagate the
-  outer, unsigned id so the existing dedup catches *accidental* double-delivery) is a
-  correctness fix only, explicitly not a security control, and off the path to the
-  authenticated version.
+- **Authenticate `origin` and close per-process replay — M1 done.** The signed route
+  manifest covers origin, destination, id, block index/count, timing, mode, algorithm,
+  and the exact payload digest. It stays *outside* the future seal (then committing to
+  ciphertext), preserving verify-before-decrypt. M0's unsigned-id cache remains only
+  for raw-engine correctness and is explicitly bypassed by the M1 plugin because it
+  runs before authentication. See `docs/routing-security-roadmap.md` for the exact
+  session guarantee, authorization order, and restart limitation.
 - **Asynchronous reply routing.** Stage 1 threads replies synchronously up the call
   chain, which caps chain length at `ttl × per-hop timeout` and holds a call open per
   hop; once a cached source route exists, a reply can travel its own path.
@@ -331,12 +327,12 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
 - **Sybil / eclipse:** defended *structurally* by the F2F reframe — you route only
   through admitted peers, so surrounding a target costs social compromise, not keys.
   Do not reopen this hole with open-overlay discovery. But F2F stops **Sybil**, not
-  the **admitted insider**: at Stage 1 a relay reads every payload it carries (see
+  the **admitted insider**: at M1 a relay reads every clear body it carries (see
   Confidentiality) and can silently grayhole until Stage 2's statistics exist.
   Stage 1's protection against a malicious admitted peer is approximately *admission
   itself* — which is exactly why payload sealing is a near-term prerequisite, not
   Stage 5 polish.
-- **Confidentiality:** Stage 1 payloads are **cleartext to every relay**. Sealing to
+- **Confidentiality:** M1 bodies are **signed cleartext to every relay**. Sealing to
   the destination's key is the fix and a near-term prerequisite for private payloads
   — and it is distinct from anonymity: confidentiality hides *what* is carried,
   anonymity hides *who* is talking. Sealing is a fabric-level primitive with its own
@@ -348,9 +344,10 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
   a Stage 1 relay can grayhole undetected.
 - **Loops and amplification:** the hard TTL and carried visited-set (loops), the
   receipt-clamped ttl/budget/fanout (breadth and total), and a **per-caller rate
-  limit implemented in the route plugin** — peerhailer has no framework rate limiter,
-  so each plugin (command, shell, route) rolls its own. Probabilistic multi-path must
-  stay bounded so retries cannot fan out into a flood.
+  limit plus per-caller/plugin-wide in-flight ceilings implemented in the route plugin** —
+  peerhailer has no framework rate limiter, so each plugin (command, shell, route)
+  rolls its own. Probabilistic multi-path must stay bounded so retries cannot fan out
+  into a flood. Downstream `spent` is untrusted and clamped to the child allowance.
 - **Replay / idempotency:** an envelope can be re-injected by any relay; harmless
   while `deliver` is a log+ack, but an envelope id + expiry and a dedup cache must
   close it before delivery does anything consequential.

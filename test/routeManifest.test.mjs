@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 
 import { generateIdentity } from "../src/identity.js";
 import {
@@ -26,7 +26,7 @@ const now = 1_700_000_000_000;
 const sampleParts = () => ({
   originKeyId: keyId(alice.publicKey),
   destinationKeyId: keyId(bob.publicKey),
-  messageId: createHash("sha256").update("m-1").digest("base64url").slice(0, 32),
+  messageId: createHash("sha256").update("m-1").digest().subarray(0, 16).toString("base64url"),
   issuedAt: now,
   expiresAt: now + 60_000,
   payloadMode: /** @type {const} */ ("clear"),
@@ -52,7 +52,7 @@ test("tampering with any signed field breaks verification", () => {
   const m = buildManifest(sampleParts());
   const sig = signManifest(m, alice.privateKey);
   for (const [field, value] of [
-    ["messageId", createHash("sha256").update("other").digest("base64url").slice(0, 32)],
+    ["messageId", createHash("sha256").update("other").digest().subarray(0, 16).toString("base64url")],
     ["expiresAt", m.expiresAt + 1],
     ["payloadDigest", payloadDigest(Buffer.from("HELLO"))], // a swapped payload
     ["destinationKeyId", keyId(generateIdentity().publicKey)],
@@ -82,9 +82,22 @@ test("malformed manifests fail verification without throwing", () => {
   assert.equal(verifyManifest({ ...m, domain: "evil" }, sig, alice.publicKey), false);
   assert.equal(verifyManifest({ ...m, version: 999 }, sig, alice.publicKey), false);
   assert.equal(verifyManifest(m, "not-a-signature", alice.publicKey), false);
+  assert.equal(verifyManifest(m, `${sig}!!!!`, alice.publicKey), false, "non-canonical base64 is refused");
   assert.equal(verifyManifest(m, sig, "not-a-key"), false);
   // An unsigned extra property is not covered by the signature — refuse it.
   assert.equal(verifyManifest({ ...m, sneaky: "x" }, sig, alice.publicKey), false, "extra unsigned field is refused");
+
+  const inherited = Object.assign(Object.create({ domain: m.domain }), m);
+  delete inherited.domain;
+  assert.match(manifestProblem(inherited), /missing domain/, "signed fields must be own properties");
+});
+
+test("route identities are Ed25519 — other asymmetric algorithms are refused", () => {
+  const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const rsaPublic = rsa.publicKey.export({ type: "spki", format: "pem" }).toString();
+  assert.throws(() => keyId(rsaPublic), /Ed25519/);
+  const m = buildManifest(sampleParts());
+  assert.equal(verifyManifest(m, signManifest(m, alice.privateKey), rsaPublic), false);
 });
 
 test("manifestProblem catches out-of-range fields; buildManifest refuses to assemble them", () => {
@@ -92,6 +105,12 @@ test("manifestProblem catches out-of-range fields; buildManifest refuses to asse
   assert.match(manifestProblem({ ...buildManifest(sampleParts()), blockIndex: 5, blockCount: 2 }), /out of range/);
   assert.match(manifestProblem({ ...buildManifest(sampleParts()), expiresAt: now, issuedAt: now }), /not after/);
   assert.match(manifestProblem({ ...buildManifest(sampleParts()), messageId: "short" }), /messageId/);
+  assert.match(
+    manifestProblem({ ...buildManifest(sampleParts()), messageId: "BBBBBBBBBBBBBBBBBBBBBB" }),
+    /messageId/,
+    "unused pad-bit aliases are not canonical 16-byte ids",
+  );
+  assert.match(manifestProblem({ ...buildManifest(sampleParts()), blockIndex: -0 }), /block index/);
   assert.match(manifestProblem({ ...buildManifest(sampleParts()), payloadMode: "onion" }), /payloadMode/);
   assert.throws(() => buildManifest({ ...sampleParts(), expiresAt: now - 1 }), /invalid manifest/);
   assert.equal(buildManifest(sampleParts()).domain, MANIFEST_DOMAIN);

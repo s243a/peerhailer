@@ -11,7 +11,25 @@ import { buildRuntime } from "../src/runtime.js";
 import { generateIdentity } from "../src/identity.js";
 import { createDiagnostics } from "../src/diagnostics.js";
 
-const deps = () => ({ identity: generateIdentity(), diagnostics: createDiagnostics(), port: 8787, routeDeps: () => ({}), flags: {}, log: () => {} });
+const deps = () => {
+  const identity = generateIdentity();
+  return {
+    identity,
+    diagnostics: createDiagnostics(),
+    port: 8787,
+    routeDeps: () => ({
+      self: identity.publicKey,
+      privateKey: identity.privateKey,
+      selfRecord: () => ({ name: "self", publicKey: identity.publicKey, addresses: [] }),
+      authorizeOrigin: () => true,
+      neighbors: () => [],
+      forward: async () => ({ delivered: false, spent: 0 }),
+      deliver: () => ({ received: true }),
+    }),
+    flags: {},
+    log: () => {},
+  };
+};
 const names = (rt) => rt.plugins.map((p) => p.name);
 
 test("deterministic: the same state yields the same plugin names in the same order", async () => {
@@ -39,6 +57,16 @@ test("flags can only enable: --chat with no state.chat still builds the chat plu
   assert.ok(fromState.plugins.some((p) => p.name === "chat"), "state enables chat even without the flag");
   const neither = await buildRuntime({}, deps());
   assert.ok(!neither.plugins.some((p) => p.name === "chat"), "off when neither says so");
+});
+
+test("route enablement builds the authenticated M1 plugin from the canonical deps", async () => {
+  const withFlag = await buildRuntime({}, { ...deps(), flags: { route: true } });
+  const route = withFlag.plugins.find((plugin) => plugin.name === "route");
+  assert.ok(route, "flag enables routing");
+  assert.match(route.description, /signed cleartext|M1/i);
+
+  const fromState = await buildRuntime({ routing: true }, deps());
+  assert.ok(fromState.plugins.some((plugin) => plugin.name === "route"), "state enables routing too");
 });
 
 test("a plugin-changing state changes the built set", async () => {

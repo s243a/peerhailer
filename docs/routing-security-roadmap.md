@@ -1,29 +1,40 @@
 # Routing security roadmap: from admission-gated delivery to authenticated sealed relay
 
-**Status: design / reviewed (Kimi, then Sol — depth pass).** `docs/routing.md` is
-the full routing roadmap. This is the security-focused companion: it sequences
+**Status: M1 implemented on `routing-m1-wrapper`; M2+ remains design / reviewed
+(Kimi, Sol, Fable, then an adversarial integration pass).** `docs/routing.md` is
+the full routing roadmap. This security-focused companion sequences
 *origin authentication*, *duplicate suppression (replay)*, *key trust*, and
 *confidentiality* by their dependencies. Kimi corrected the original spine (signing
 was conflated with sealing); Sol then corrected six over-strong claims and supplied
 the concrete protocol. Both are folded in below; where a claim was walked back, it
 says so.
 
-## Where we are, honestly (Stage 1, shipped)
+## Where we are, honestly (M1 branch)
 
 Admission-gated, loop-free-**by-construction-among-honest-relays**, best-effort
-multi-hop delivery over the F2F graph. What it does not give:
+multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapper:
 
 - **Payloads are cleartext to every relay.**
-- **`origin` is unsigned** — a relay can spoof it.
-- **Replay is not closed.** `send()` mints an envelope `id`, but `relay()`'s child
-  envelope drops it, so the destination dedup never fires for relayed traffic.
+- The outer **`origin` remains unsigned**, but it is discarded at delivery; consumers
+  receive only the manifest's authenticated full-width `originKeyId`.
+- Replay is bounded per process by `(originKeyId,messageId,blockIndex)` until signed
+  expiry + skew. The guard survives daemon config reloads, **not process restart**.
+- The pure engine's unsigned M0 `id` cache is deliberately bypassed by the M1 plugin:
+  it runs before cryptographic open and would otherwise be poisonable by a relay.
 - **"Loop-free" is a cooperative property, not a security one.** The visited-set / TTL
   / budget stop loops among relays that *follow the protocol*. A relay that does not —
   it can strip visited entries, reset TTL/budget, fork the envelope, and reinject it
   into a cycle — is not stopped by any end-to-end signature. The defences against that
   are and remain **local**: clamp every field on receipt, exclude the authenticated
-  immediate caller, rate-limit by caller, cap concurrent forwarding work, and treat
+  immediate caller, rate-limit by caller, cap concurrent forwarding work (eight
+  searches per plugin across host + peer entries, two per immediate peer caller), and treat
   visited/TTL/budget as *cooperative routing controls, never authenticated facts*.
+- Endpoint rollout is a flag day until route-version negotiation exists. Old and new
+  intermediate relays carry the opaque wrapper, but old/new destination behavior is
+  not interoperable; upgrade destinations before originating M1 messages.
+- The threaded response is still unsigned. `delivered`, acknowledgements, and refusal
+  reasons are routing feedback, **not cryptographic proof that the destination acted**;
+  an intermediary can forge, alter, or suppress them. Signed receipts are later work.
 
 ## The corrected spine — two independent roots
 
@@ -58,8 +69,9 @@ The origin signs a fixed manifest; hop-mutated fields stay outside it.
 
 Notes that matter:
 
-- `messageId` ≥ 128 random bits; there is **no** global origin sequence (it would
-  complicate legitimate out-of-order delivery). `blockIndex`/`blockCount` are present
+- `messageId` is exactly 16 random bytes encoded as 22-character unpadded base64url
+  (128 random bits); there is **no** global origin sequence (it would complicate
+  legitimate out-of-order delivery). `blockIndex`/`blockCount` are present
   from the start (`0`/`1` unchunked) so chunking is not a schema break, and `seq` is
   *defined* as `blockIndex`.
 - `payloadMode` and a bound `payloadDigestAlgorithm` (not "SHA-256 forever") mean the
@@ -90,9 +102,10 @@ The signed manifest makes replay *detectable*; it does not close replay *without
 state* — and a signed expiry does **not** make an in-memory cache restart-safe
 (corrected from the prior draft). The restart hole: destination records `(origin,id)`
 in memory, restarts while the envelope is still unexpired, cache is empty, a relay
-replays the valid envelope, it is accepted again. So **M1 must pick one and say which**:
+replays the valid envelope, it is accepted again. The implementation picks the first:
 
-- **session-only** dedup — in-memory, *explicitly not restart-safe*; or
+- **session-only** dedup — in-memory, *explicitly not restart-safe* (**implemented**);
+  the daemon retains this same guard across plugin/config reloads; or
 - **across-restart** dedup — durable, retained until `expiresAt` (+ skew).
 
 A signed expiry makes the durable state **bounded and garbage-collectable** — valuable
@@ -105,15 +118,20 @@ Validation, enforced locally regardless of what the origin signed:
   CLOCK_SKEW`; `expiresAt ≥ now − CLOCK_SKEW`.
 - keep a dedup entry until `expiresAt + CLOCK_SKEW`. A relay that holds a message until
   just before expiry spends its lifetime; it does not extend it.
+- hold local wall time to a process high-water mark. If the clock jumps forward and
+  entries are swept, a later rollback fails closed rather than reopening them.
 
 Dedup key: `(originKeyId, messageId)` unchunked, `(originKeyId, messageId, blockIndex)`
 for blocks.
 
 Processing order (cheap-and-safe first, allocate nothing for messages policy will
-refuse): shape/size → verify manifest → check signed destination → classify/authorize
-origin → time window → consult/reserve dedup → deliver. Bounds: global + per-origin
-live-entry caps, last-hop rate limit, fixed message-id length. **At capacity, fail
-closed on the new message — never evict an unexpired entry while still claiming replay
+refuse): shape/size/claimed-destination preflight → verify record + manifest →
+classify/authorize the authenticated origin → non-reserving time/replay/capacity check
+→ canonical payload/digest/strict-JSON validation → repeat-and-reserve replay state →
+deliver. Bounds: global + per-origin live-entry caps, last-hop rate limit, fixed
+message-id length, a 700 kB serialized-body ceiling, and a 950 kB total signed-wrapper
+ceiling below the 1 MB peer request limit. **At capacity, fail closed on
+the new message — never evict an unexpired entry while still claiming replay
 suppression.**
 
 Delivery semantics, stated honestly: the protocol cannot promise *exactly-once* for
@@ -179,11 +197,14 @@ destination-side change; a replayed remote record never lowers local enforcement
   **correctness** fix, explicitly *not a security control* (an unsigned id is strippable
   and re-mintable by a dishonest relay; that is M1). Regression test: a two-hop replayed
   id is delivered once.
-- **M1 — authenticated route manifest.** The fixed canonical schema above; origin
-  authentication; payload commitment; destination binding; the explicit expiry rules;
-  and **either durable replay state or a stated per-process replay guarantee**. Re-key
-  dedup on `(origin, id)` here. Docs must say plainly: **signed ≠ private** — relays
-  still read payloads at this milestone.
+- **M1 — authenticated route manifest. Implemented on `routing-m1-wrapper`.** Fixed
+  canonical schema; Ed25519 origin authentication; destination + payload commitment;
+  explicit expiry/skew/high-water rules; a stated per-process replay guarantee; and
+  plugin wrap/open wiring around an unchanged crypto-agnostic engine. The unsigned M0
+  cache is bypassed, IDs are 128 random bits, authorization precedes replay allocation,
+  recursive searches are capped globally/per caller, downstream work claims cannot
+  replenish budget, and malformed/oversized encodings fail closed. **Signed ≠ private** — relays still
+  read payloads at this milestone.
 - **M2 — destination record discovery.** Verify the destination record against the
   routing target; introduce Tier-1 state and policy; add the signed floor advertisement;
   define Tier-1 replacement/conflict rules. Piggybacks on a route-discovery
@@ -228,5 +249,6 @@ Kimi's two-root split and the equality-bound record discovery stand — routed k
 discovery is a piggyback plus a check, not a lookup protocol. Sol's corrections keep it
 honest: authenticate the exact bytes first (M1), establish destination-key policy second
 (M2), then add confidentiality without conflating it with freshness, replay state, or
-anonymity (M3). The remaining genuinely-new work is M1's manifest schema and replay
-discipline, and the tier/floor policy — all bounded and specified above.
+anonymity (M3). M1's manifest and per-process replay discipline are implemented; the
+remaining genuinely-new work is the M2 tier/floor policy and M3 sealing — both bounded
+and specified above.

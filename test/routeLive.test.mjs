@@ -14,6 +14,8 @@ import { generateIdentity, normalizeKey } from "../src/identity.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createRoutePlugin } from "../src/builtin/routePlugin.js";
 import { callPeer } from "../src/hail.js";
+import { keyId } from "../src/routeManifest.js";
+import { MAX_ROUTED_BODY_BYTES } from "../src/routedMessage.js";
 
 const norm = (k) => normalizeKey(k) ?? k;
 
@@ -35,9 +37,15 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
     const as = { name: k, publicKey: id[k].publicKey, privateKey: id[k].privateKey };
     plugin[k] = createRoutePlugin({
       self: id[k].publicKey,
+      privateKey: id[k].privateKey,
+      selfRecord: () => dir[k].self,
       normalize: norm,
       neighbors: () => dir[k].listAdmitted().map((p) => norm(p.publicKey)),
       isBlocked: () => false,
+      // This demo endpoint only records receipt. Unknown routed origins are
+      // explicitly allowed but remain unknown; a capability-bearing consumer
+      // would classify the authenticated key against its own policy here.
+      authorizeOrigin: () => true,
       forward: async (peerKey, env) => {
         const rec = recordFor.get(peerKey);
         if (!rec) return { delivered: false, reason: "unknown peer", spent: 0 };
@@ -76,7 +84,17 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
   assert.equal(res.response.at, "d", "delivered at D");
   assert.equal(res.response.echo, "across the graph", "D got the payload");
   assert.equal(delivered.d?.payload, "across the graph", "D's inbox recorded it");
+  assert.equal(delivered.d?.origin, keyId(id.a.publicKey), "D attributes the signed origin, not last hop B");
   assert.deepEqual(res.via.map((k) => Object.keys(id).find((n) => norm(id[n].publicKey) === k)), ["a", "b", "d"], "route was A -> B -> D");
+
+  // The advertised maximum serialized body fits through the actual signed hail
+  // request (whose own limit is 1 MB), not only through an in-memory wrapper.
+  const emptyShapeBytes = Buffer.byteLength(JSON.stringify({ blob: "" }), "utf8");
+  const nearLimit = { blob: "x".repeat(MAX_ROUTED_BODY_BYTES - emptyShapeBytes) };
+  assert.equal(Buffer.byteLength(JSON.stringify(nearLimit), "utf8"), MAX_ROUTED_BODY_BYTES);
+  const large = await plugin.a.send(norm(id.d.publicKey), nearLimit);
+  assert.equal(large.delivered, true, `maximum-size body crossed A -> B -> D (${large.reason ?? ""})`);
+  assert.equal(large.response.echo.blob.length, nearLimit.blob.length);
 
   // And a message to an unreachable key fails cleanly rather than looping.
   const gone = generateIdentity();
