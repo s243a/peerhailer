@@ -14,7 +14,7 @@ import { generateIdentity, sameKey } from "../src/identity.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { createChatPlugin, MAX_MESSAGE } from "../src/builtin/chatPlugin.js";
 import { seal } from "../src/sealing.js";
-import { REFUSE } from "../src/plugins.js";
+import { REFUSE, collectRoutes } from "../src/plugins.js";
 
 const CHAT = { chatp: { name: "chatp", allows: ["hail", "chat"] } };
 
@@ -173,4 +173,54 @@ test("an oversized message is refused locally with the limit, not round-tripped 
   // The boundary itself is allowed through (parity with the receiver's `>` check).
   const ok = await post(A, "/api/chat/send", { peer: "bob", text: "y".repeat(MAX_MESSAGE) });
   assert.notEqual(ok.status, 400, "a message exactly at the limit is not rejected by the pre-check");
+});
+
+test("receiver refuses cleartext from a peer that has sent it sealed (no downgrade)", async () => {
+  const alice = generateIdentity();
+  const bob = generateIdentity(); // the receiver, able to open sealed
+  const plugin = createChatPlugin({ identity: bob });
+  const routes = collectRoutes([plugin], { log: () => {} });
+  const recv = (input) => routes.get("POST /chat/send")?.handler({ log: () => {}, ...input });
+  const caller = { name: "alice", publicKey: alice.publicKey };
+  const signer = { publicKey: alice.publicKey, privateKey: alice.privateKey };
+
+  // Alice seals a message to bob — this establishes that she seals.
+  const inner = JSON.stringify({ text: "the key is under the mat", at: Date.now(), nonce: "n-1" });
+  const sealed = await recv({ caller, body: { sealed: seal(inner, bob.sealPublicKey, { signer }) } });
+  assert.equal(sealed.received, true);
+  assert.equal(sealed.sealed, true);
+
+  // A later CLEARTEXT message from alice is refused — no silent downgrade.
+  const clear = await recv({ caller, body: { text: "now in the clear" } });
+  assert.equal(clear[REFUSE], true, "cleartext after sealed is refused");
+
+  // An unrelated peer that never sealed can still send cleartext.
+  const carol = { name: "carol", publicKey: generateIdentity().publicKey };
+  assert.equal((await recv({ caller: carol, body: { text: "hi" } })).received, true);
+
+  // Alice can still send sealed (the ratchet only blocks the downgrade).
+  const inner2 = JSON.stringify({ text: "still sealed", at: Date.now(), nonce: "n-2" });
+  assert.equal((await recv({ caller, body: { sealed: seal(inner2, bob.sealPublicKey, { signer }) } })).sealed, true);
+});
+
+test("a sealed message that fails validation does not arm the downgrade ratchet", async () => {
+  // Load-bearing detail: the ratchet is armed only *after* full validation. A
+  // sealed block whose signer isn't the caller is refused — and must NOT ratchet
+  // the caller, or a future refactor that hoisted the arming would silently start
+  // refusing that caller's legitimate cleartext.
+  const alice = generateIdentity();
+  const mallory = generateIdentity();
+  const bob = generateIdentity(); // receiver
+  const plugin = createChatPlugin({ identity: bob });
+  const routes = collectRoutes([plugin], { log: () => {} });
+  const recv = (input) => routes.get("POST /chat/send")?.handler({ log: () => {}, ...input });
+  const caller = { name: "alice", publicKey: alice.publicKey };
+
+  // Sealed to bob, but signed by mallory, delivered as if from alice → refused.
+  const inner = JSON.stringify({ text: "forged", at: Date.now(), nonce: "z-1" });
+  const forged = seal(inner, bob.sealPublicKey, { signer: { publicKey: mallory.publicKey, privateKey: mallory.privateKey } });
+  assert.equal((await recv({ caller, body: { sealed: forged } }))[REFUSE], true, "mismatched sealed sender is refused");
+
+  // The failed sealed message did not arm alice's ratchet, so her cleartext lands.
+  assert.equal((await recv({ caller, body: { text: "legitimate cleartext" } })).received, true);
 });
