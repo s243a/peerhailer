@@ -441,3 +441,8 @@ dev time — pin it and keep the lockfile.
 This is a robustness enhancement, **not a prerequisite**. The local parser ships and
 is proven by the hand-written contract matrix above regardless; the oracle is
 optional assurance to add if and when it feels worth the one dev dependency.
+
+A further, more speculative thread — a Prolog DCG as the parser oracle (compiled or
+not), and what language a *generated* parser should target — is explored in
+`docs/exploratory-generated-code.md`. That is experimental, non-core work; this RFC
+and its Candidate A remain the shipping decision.
