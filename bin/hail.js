@@ -27,6 +27,8 @@ import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
 import hailPlugin from "../src/builtin/hailPlugin.js";
 import { greedyPolicy, xorDistanceOver } from "../src/routing.js";
+import { keyId as routeKeyId } from "../src/routeManifest.js";
+import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { createHash } from "node:crypto";
 import { listFiles, getFile, putFile } from "../src/filesClient.js";
 
@@ -575,10 +577,17 @@ switch (command) {
     // one, same principle as the page.
     const wantsChat = flags.chat === true || stored.chat === true;
     const wantsRoute = flags.route === true || stored.routing === true;
+    // One replay discipline for the daemon process, not one per plugin build: a
+    // config reload reconstructs the route plugin but must not reopen every still-
+    // valid signed envelope. A process restart remains the documented M1 boundary.
+    const routeReplayGuard = createRouteReplayGuard();
     // The routing plugin's deps read the *live* directory and identity, not stored
     // config, so one builder serves both the start and reload plugin arrays.
     const routeDeps = () => ({
       self: identity.publicKey,
+      privateKey: identity.privateKey,
+      selfRecord: () => directory.self,
+      replayGuard: routeReplayGuard,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {
@@ -593,8 +602,17 @@ switch (command) {
         const r = await callPeer(rec, "/route/relay", env, { as });
         return r.ok ? r.response : { delivered: false, reason: r.error, spent: 0 };
       },
+      // Today's daemon endpoint only records receipt, so it explicitly permits an
+      // authenticated-but-unknown origin and surfaces it as unknown below. A future
+      // capability-bearing routed consumer must replace this with its own policy;
+      // authentication is never admission.
+      authorizeOrigin: () => true,
       deliver: (/** @type {any} */ _payload, /** @type {any} */ meta) => {
-        log(`[route] delivered from ${fingerprint(meta.origin)} via ${Math.max(0, (meta.via?.length ?? 1) - 1)} hop(s)`);
+        const known = directory.listAdmitted().find((peer) => {
+          try { return routeKeyId(peer.publicKey) === meta.originKeyId; } catch { return false; }
+        });
+        const origin = known ? `${known.name} (${meta.originKeyId.slice(0, 12)})` : `unknown:${meta.originKeyId.slice(0, 12)}`;
+        log(`[route] delivered from ${origin} via ${Math.max(0, (meta.via?.length ?? 1) - 1)} hop(s)`);
         return { received: true, at: fingerprint(identity.publicKey) };
       },
       policy: greedyPolicy({ distance: xorDistanceOver((/** @type {string} */ k) => createHash("sha256").update(k).digest("hex")) }),
@@ -708,6 +726,9 @@ switch (command) {
         const freshState = loadState(statePath);
         const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, freshState), state: freshState });
         plugins = nextPlugins;
+        if (nextPlugins.some((plugin) => plugin.name === "route")) {
+          log(`[route] replay guard retained across reload`);
+        }
         return result;
       },
       // The page can admit and block, so those changes reach disk the same way

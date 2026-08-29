@@ -19,7 +19,7 @@
  *
  * @module routeManifest
  */
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash, createPublicKey, KeyObject } from "node:crypto";
 
 import { signPayload, verifyPayload } from "./identity.js";
 
@@ -47,25 +47,45 @@ const FIELDS = /** @type {const} */ ([
   "payloadDigestAlgorithm",
   "payloadDigest",
 ]);
+const FIELD_SET = new Set(/** @type {readonly string[]} */ (FIELDS));
 
 const B64URL = /^[A-Za-z0-9_-]+$/;
 const SHA256_B64URL_LEN = 43; // 32 bytes, base64url, unpadded
+const MESSAGE_ID_B64URL_LEN = 22; // exactly 16 random bytes, base64url, unpadded
+const ED25519_SIGNATURE_BYTES = 64;
+const ED25519_SIGNATURE_B64_LEN = 88;
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 
 /** @param {unknown} v */
-const isSafeUint = (v) => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_SAFE;
+const isSafeUint = (v) =>
+  typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_SAFE && !Object.is(v, -0);
 /** @param {unknown} v @param {number} min @param {number} max */
 const isB64Url = (v, min, max) => typeof v === "string" && v.length >= min && v.length <= max && B64URL.test(v);
+/** Exactly 16 bytes in their one canonical unpadded-base64url spelling. @param {unknown} v */
+const isMessageId = (v) => {
+  if (!isB64Url(v, MESSAGE_ID_B64URL_LEN, MESSAGE_ID_B64URL_LEN)) return false;
+  const text = /** @type {string} */ (v);
+  const bytes = Buffer.from(text, "base64url");
+  return bytes.length === 16 && bytes.toString("base64url") === text;
+};
 
 /**
- * The canonical, collision-resistant id of a public key: SHA-256 of its SPKI DER,
- * base64url. Accepts a PEM string or a `KeyObject`.
+ * The canonical, collision-resistant id of an Ed25519 identity key: SHA-256 of its
+ * SPKI DER, base64url. Accepts a PEM string or a public/private `KeyObject`; every
+ * other asymmetric algorithm is refused rather than silently widening the protocol.
  *
  * @param {string | import("node:crypto").KeyObject} publicKey
  * @returns {string}
  */
 export function keyId(publicKey) {
-  const der = createPublicKey(publicKey).export({ type: "spki", format: "der" });
+  const key =
+    publicKey instanceof KeyObject
+      ? publicKey.type === "private"
+        ? createPublicKey(publicKey)
+        : publicKey
+      : createPublicKey(publicKey);
+  if (key.asymmetricKeyType !== "ed25519") throw new Error("route identity key must be Ed25519");
+  const der = key.export({ type: "spki", format: "der" });
   return createHash("sha256").update(der).digest("base64url");
 }
 
@@ -91,16 +111,17 @@ export function payloadDigest(bytes) {
  */
 export function manifestProblem(m) {
   if (!m || typeof m !== "object") return "not an object";
-  for (const f of FIELDS) if (!(f in m)) return `missing ${f}`;
+  for (const f of FIELDS) if (!Object.hasOwn(m, f)) return `missing ${f}`;
   // Exactly the signed fields, no more: an unsigned extra property is not covered by
   // the signature, so a relay could attach one to a valid manifest. Refusing it here
   // means a verified manifest is guaranteed to be precisely what was signed.
-  if (Object.keys(m).length !== FIELDS.length) return "unexpected fields";
+  const keys = Object.keys(m);
+  if (keys.length !== FIELDS.length || keys.some((field) => !FIELD_SET.has(field))) return "unexpected fields";
   if (m.domain !== MANIFEST_DOMAIN) return "wrong domain";
   if (m.version !== MANIFEST_VERSION) return "unknown version";
   if (!isB64Url(m.originKeyId, SHA256_B64URL_LEN, SHA256_B64URL_LEN)) return "bad originKeyId";
   if (!isB64Url(m.destinationKeyId, SHA256_B64URL_LEN, SHA256_B64URL_LEN)) return "bad destinationKeyId";
-  if (!isB64Url(m.messageId, 22, 64)) return "bad messageId"; // >= 128 bits of base64url
+  if (!isMessageId(m.messageId)) return "bad messageId";
   if (!isSafeUint(m.blockIndex) || !isSafeUint(m.blockCount)) return "bad block index/count";
   if (m.blockCount < 1 || m.blockIndex >= m.blockCount) return "block index out of range";
   if (!isSafeUint(m.issuedAt) || !isSafeUint(m.expiresAt)) return "bad timestamps";
@@ -182,6 +203,12 @@ export function signManifest(manifest, privateKey) {
  */
 export function verifyManifest(manifest, signature, publicKey) {
   if (manifestProblem(manifest) !== null) return false;
+  // Ed25519 signatures are fixed-width. Require the one canonical base64 spelling
+  // rather than letting Buffer's lenient decoder ignore whitespace or junk: a relay
+  // must not be able to mutate bytes on the wire while verification still succeeds.
+  if (typeof signature !== "string" || signature.length !== ED25519_SIGNATURE_B64_LEN) return false;
+  const signatureBytes = Buffer.from(signature, "base64");
+  if (signatureBytes.length !== ED25519_SIGNATURE_BYTES || signatureBytes.toString("base64") !== signature) return false;
   let signerId;
   try {
     signerId = keyId(publicKey);

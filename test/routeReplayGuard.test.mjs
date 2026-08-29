@@ -21,7 +21,10 @@ const man = (over = {}) => ({
 
 test("a fresh in-window message is admitted; an identical replay is refused", () => {
   const g = createRouteReplayGuard({ now: () => T });
+  assert.deepEqual(g.check(man()), { ok: true }, "preflight accepts without reserving");
+  assert.equal(g.size(), 0, "preflight is non-reserving");
   assert.deepEqual(g.admit(man()), { ok: true });
+  assert.deepEqual(g.check(man()), { ok: false, reason: "duplicate" }, "preflight cheaply catches a replay");
   assert.deepEqual(g.admit(man()), { ok: false, reason: "duplicate" });
   // A different messageId from the same origin is fresh.
   assert.deepEqual(g.admit(man({ messageId: "m-2" })), { ok: true });
@@ -80,4 +83,29 @@ test("expired reservations are swept, reclaiming slots (and the message itself t
   assert.equal(g.size(), 1, "the expired reservation was swept, not accumulated");
   // And the original message, replayed now, is refused by the window (expired), not the cache.
   assert.deepEqual(g.admit(man({ messageId: "a", expiresAt: T + 10_000 })), { ok: false, reason: "expired" });
+});
+
+test("a wall-clock rollback never reopens a reservation swept after a forward jump", () => {
+  let clock = T;
+  const g = createRouteReplayGuard({ now: () => clock, maxEntries: 1, maxPerOrigin: 100, clockSkewMs: 0 });
+  const original = man({ messageId: "old", expiresAt: T + 10_000 });
+  assert.equal(g.admit(original).ok, true);
+
+  // Advance far enough that admitting a current message sweeps the old entry.
+  clock = T + 20_000;
+  assert.equal(g.admit(man({ messageId: "new", issuedAt: T + 19_000, expiresAt: T + 25_000 })).ok, true);
+
+  // Correct the wall clock backwards into the old envelope's signed window. The
+  // guard retains a high-water mark and fails closed instead of replaying it.
+  clock = T + 5_000;
+  assert.deepEqual(g.admit(original), { ok: false, reason: "expired" });
+});
+
+test("size reports live entries and garbage-collects an expired reservation", () => {
+  let clock = T;
+  const g = createRouteReplayGuard({ now: () => clock, clockSkewMs: 0 });
+  assert.equal(g.admit(man({ expiresAt: T + 1000 })).ok, true);
+  assert.equal(g.size(), 1);
+  clock = T + 1001;
+  assert.equal(g.size(), 0);
 });
