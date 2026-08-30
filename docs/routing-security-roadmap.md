@@ -1,20 +1,30 @@
 # Routing security roadmap: from admission-gated delivery to authenticated sealed relay
 
-**Status: M1 implemented on `routing-m1-wrapper`; M2+ remains design / reviewed
-(Kimi, Sol, Fable, then an adversarial integration pass).** `docs/routing.md` is
-the full routing roadmap. This security-focused companion sequences
-*origin authentication*, *duplicate suppression (replay)*, *key trust*, and
-*confidentiality* by their dependencies. Kimi corrected the original spine (signing
-was conflated with sealing); Sol then corrected six over-strong claims and supplied
-the concrete protocol. Both are folded in below; where a claim was walked back, it
-says so.
+**Status: M0–M2 merged to `main`; M3b (sealed routed payload) + the confidential-by-default
+hardening implemented on `routing-m3b-sealed`, in review.** `docs/routing.md` is the full
+routing roadmap. This security-focused companion sequences *origin authentication*,
+*duplicate suppression (replay)*, *key trust*, and *confidentiality* by their dependencies.
+Kimi corrected the original spine (signing was conflated with sealing); Sol then corrected
+several over-strong claims and, in an integrated review, surfaced the system-level
+composition gaps folded in below.
+
+**What is true today (m3b branch):** routed application data is **confidential by default** —
+a send with no *usable* key (Tier-0 walk-verified, or a Tier-1 discovered key an operator
+has **approved**) is refused, never sent in the clear; cleartext requires an explicit
+`public` opt-out, which is also how a **data-free discovery probe** learns a peer's key.
+Tier-0 posture is aggregated per identity key; a Tier-0 event invalidates a stale Tier-1
+key synchronously; the resolver fails closed on any ambiguous or incoherent input. Bodies
+are cleartext only when explicitly public; the *response* path is still unsigned and
+unsealed (below), and replay/Tier-1 remain per-process.
 
 ## Where we are, honestly (M1 branch)
 
 Admission-gated, loop-free-**by-construction-among-honest-relays**, best-effort
 multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapper:
 
-- **Payloads are cleartext to every relay.**
+- **Application-data payloads are confidential by default** (m3b branch): a send with no
+  usable key is refused, sealed sends are opaque to relays, and only an explicit `public`
+  payload (a discovery probe, or data the caller marked public) is cleartext to relays.
 - The outer **`origin` remains unsigned**, but it is discarded at delivery; consumers
   receive only the manifest's authenticated full-width `originKeyId`.
 - Replay is bounded per process by `(originKeyId,messageId,blockIndex)` until signed
@@ -32,9 +42,34 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
 - Endpoint rollout is a flag day until route-version negotiation exists. Old and new
   intermediate relays carry the opaque wrapper, but old/new destination behavior is
   not interoperable; upgrade destinations before originating M1 messages.
-- The threaded response is still unsigned. `delivered`, acknowledgements, and refusal
-  reasons are routing feedback, **not cryptographic proof that the destination acted**;
-  an intermediary can forge, alter, or suppress them. Signed receipts are later work.
+- The threaded response is still unsigned **and unsealed**. `delivered`, acknowledgements,
+  and refusal reasons are routing feedback, **not cryptographic proof that the destination
+  acted**; an intermediary can forge, alter, or suppress them. And M3b seals only the
+  *request* body — the consumer's response travels back through the same relays in the
+  clear. Today's consumer only acks, but the first content-returning consumer (a routed
+  `files get`) would send its payload back cleartext through the very relays the sealed
+  request bypassed; it must seal its own response. Signed/sealed receipts are later work.
+- Sealing to a **Tier-1** destination does not survive a restart. The record-carried key
+  store is session-scoped, so after a restart the first send to a Tier-1-only destination
+  resolves `cleartext` (no key, no dispute) — and that first send is also the
+  re-discovery vehicle, so the payload that was sealed pre-restart goes out clear once.
+  Tier-0 peers are protected by `sealRequired`'s durable floor; Tier-1 peers have no
+  equivalent until durable observation (M3a). The destination's own floor is the only
+  restart-safe backstop today.
+- **Multi-writer state can restore a retired Tier-0 sealing key (pre-existing, out of
+  routing scope).** The directory merges concurrent state via a per-record monotone `rev`
+  (higher wins). That is not a causal clock: a process that loaded a stale snapshot and
+  made several mutations reaches a higher `rev` than another process's newer one-step
+  identity rotation, and its OLD identity/sealing key wins the merge. This predates the
+  routing work and affects all sealed state, not just routed keys; a real fix is a
+  directory-concurrency change (causal ordering, or a single-writer discipline where the
+  CLI signals the daemon rather than writing disk itself — the SIGHUP reload is a step
+  toward that). Tracked separately, not in this branch.
+- **A keyless current record does not drop an approved routed key, deliberately.** If a
+  discovered record for a destination arrives with no sealing key, an already-approved key
+  is kept — because a relay can replay an *old* keyless record, and letting that drop an
+  approved key would be an availability lever (force-refuse). Retirement is handled by a
+  Tier-0 walk (which invalidates Tier 1), not by trusting a keyless record.
 
 ## The corrected spine — two independent roots
 
@@ -156,15 +191,21 @@ revocation than Tier 0.
   dest)` (or at least `sameKey`), **not raw string equality**. Signed, but no liveness.
 - **Tier 2 — gossip / unsigned / mismatched**: never seal.
 
-**Policy: default verified-only** for confidential routed content; Tier-1 is an explicit
-operator opt-in (`allow-record-carried`). When Tier-1 is used, surface *before*
-transmission — tier, sealing-key fingerprint, signed-record age, the path that supplied
-it, and the absence of a liveness proof — and **do not show the Tier-0 lock indicator**.
-State model and rules: keep `record-carried` and `record-conflict` distinct from the
-Tier-0 `verified`/`reverify`/`conflict` states; Tier 0 always wins over Tier 1; a
-matching Tier-1 record adds no authority; differing Tier-1 records cause Tier-1 refusal
-(not auto-selection); a later walk upgrades/replaces a Tier-1 key; two conflicting Tier-0
-keys keep the existing deliberate-resolution path. (Signed key epochs / short-lived
+**Policy (as implemented): confidential-by-default with per-key approval.** A discovered
+Tier-1 key is held **pending** and is not usable for sealing until a person **approves** it
+by fingerprint (`approveRoutedSeal` / the `/api/route/seal-approve` control endpoint) — the
+Tier-1 analogue of a walk, and what replaces the earlier global `allow-record-carried`
+opt-in. A confidential send with only a pending, conflicted, or absent key is **refused**,
+never sent clear. When approving or before a Tier-1 send, surface the tier, sealing-key
+fingerprint, and the absence of a liveness proof — and **do not show the Tier-0 lock**. (No
+record *age* is surfaced: a relay selects which past record it replays, so age would be an
+attacker-chosen value wearing a freshness label.)
+State model and rules: `record-approved` / `record-carried` (pending) / `record-conflict`
+are distinct from the Tier-0 `verified`/`reverify`/`conflict` states; Tier 0 always wins
+over Tier 1; a matching Tier-1 record adds no authority; differing Tier-1 records cause
+Tier-1 refusal (not auto-selection) and void any approval; a Tier-0 event (walk, accept,
+rotation, forget) invalidates the Tier-1 entry synchronously; two conflicting Tier-0 keys
+keep the existing deliberate-resolution path. (Signed key epochs / short-lived
 records reduce stale exposure but cannot fully solve first-observation revocation without
 an online authority, a transparency log, or a prior monotonic observation.)
 
@@ -176,9 +217,12 @@ record, replay an older one lacking the floor, or hide the current policy, yet c
 make the destination accept cleartext if the destination checks its **current local
 policy at delivery**:
 
-1. destination stores `requireSealedRouting` locally;
-2. the field rides its signed public record (advisory to honest senders);
-3. the signed manifest binds `payloadMode`;
+1. destination stores `requireSealedRouting` locally (**implemented**);
+2. the field rides its signed public record (advisory to honest senders) — **not yet
+   implemented**: the discovery record is key-only, so an honest sender cannot pre-flight
+   the floor and instead learns it from a `cleartext-refused` refusal (which now carries
+   the destination's key so the sender can retry sealed);
+3. the signed manifest binds `payloadMode` (**implemented**);
 4. the destination rejects `payloadMode = clear` whenever its local floor requires
    sealing — the local check wins over any record a sender presents;
 5. a relay cannot turn sealed content into valid cleartext (it cannot produce the
@@ -221,7 +265,15 @@ destination-side change; a replayed remote record never lowers local enforcement
 - **M3a — authenticated-origin capability seam.** The general durable observation API,
   with a request-scoped authenticated-origin proof (below). Built and testable *before*
   it is load-bearing.
-- **M3b — sealed routed payload.** Encrypt the exact payload bytes to a Tier-0 (or
+- **M3b — sealed routed payload. Implemented on `routing-m3b-sealed`.** `wrap` seals the
+  body to the destination's X25519 key signed by the origin identity; the manifest commits
+  to the ciphertext and `payloadMode:"sealed"`. `open` runs every M1 gate first, then
+  decrypts and binds the seal's signer to the authenticated manifest origin. `send`
+  resolves the seal target through the single `{tier,key,state}` resolver (Tier 0 wins,
+  Tier 1 opt-in, a conflict at either tier refuses — never cleartext), and the local floor
+  (`requireSealed`) refuses a clear delivery. F2 lands (a Tier-0 posture forgets Tier 1);
+  the seal key is validated at construction; a live A→B→D Tier-1 test proves relays carry
+  only ciphertext. Encrypt the exact payload bytes to a Tier-0 (or
   explicitly permitted Tier-1) key; **keep the manifest signature *outside* the seal,
   committing to the ciphertext** — moving it inside breaks verify-before-decrypt and is
   circular (it cannot commit to a ciphertext it is inside). Header privacy, if ever
@@ -244,12 +296,14 @@ destination-side change; a replayed remote record never lowers local enforcement
     a loud refusal is also a remote oracle — a relay replays a stale record and learns
     sealed-vs-refused; inherent to any fail-loud design, one line in the doc, low.)
   - **A single resolver, `{tier, key, state}`, so no call site can consult Tier-1 while a
-    Tier-0 key exists.** "Tier 0 always wins" is a comment today (the read side has no
-    consumers); M3b must make it code.
-  - **A successful Tier-0 `bindSealKey`/`acceptSealKey` must `routedKeyStore.forget(
-    keyId(peer.publicKey))`** so a stale Tier-1 conflict cannot shadow the now-verified
-    key. Session-scoped, so today a restart clears it; wire it when the composition layer
-    lands.
+    Tier-0 key exists.** Implemented (`src/routedSealResolver.js`); "Tier 0 always wins"
+    is now code, and an unrecognised state fails closed.
+  - **Tier-0 supersedes a Tier-1 entry.** Implemented *lazily*: `send` calls
+    `routedKeyStore.forget(destKeyId)` whenever Tier 0 has any posture
+    (`state !== "unverified"`). This is sufficient because the single resolver already
+    makes a stale Tier-1 entry unreadable once Tier 0 has posture — the forget is hygiene
+    (keeping the surface honest), not correctness. A walk-triggered forget would clear it
+    a send earlier but needs the store threaded into the walk path; deferred.
 - **M4+** — chunking, cached source routes, reassembly quotas, later anonymity.
 
 ## The observation seam (M3a)
@@ -279,6 +333,10 @@ Kimi's two-root split and the equality-bound record discovery stand — routed k
 discovery is a piggyback plus a check, not a lookup protocol. Sol's corrections keep it
 honest: authenticate the exact bytes first (M1), establish destination-key policy second
 (M2), then add confidentiality without conflating it with freshness, replay state, or
-anonymity (M3). M1's manifest and per-process replay discipline are implemented; the
-remaining genuinely-new work is the M2 tier/floor policy and M3 sealing — both bounded
-and specified above.
+anonymity (M3). **M0–M3b are implemented** — authenticated manifest + per-process replay
+(M1), Tier-1 key discovery (M2), and sealed payloads with confidential-by-default sends,
+per-key Tier-1 approval, identity-aggregated Tier-0, and the enforced floor (M3b), all
+hardened after Sol's integrated review. The remaining work is deferred and named where it
+arises above: durable (restart-safe) replay/Tier-1 and the M3a observation seam, signed
+response/refusal receipts, the signed floor *advertisement*, the `hail route` discovery/
+approval CLI subcommands, and the later M4+ chunking/anonymity.

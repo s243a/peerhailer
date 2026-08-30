@@ -25,7 +25,7 @@ import {
   publicRecord,
   TARGET_BINDING_VERSION,
 } from "./peerRecord.js";
-import { fingerprint, normalizeKey, sameKey } from "./identity.js";
+import { fingerprint, normalizeKey, sameCanonicalKey, sameKey } from "./identity.js";
 
 /**
  * What `blockPeer` did, honest about what it blocked and why — so a caller can
@@ -266,6 +266,24 @@ export function createDirectory(state = {}) {
   /** @type {Map<string, { record: import("./peerRecord.js").PeerRecord, heardFrom: string[] }>} */
   const candidates = new Map();
 
+  /** @type {((publicKey: string) => void) | null} Notified when a peer's Tier-0 seal
+   * posture changes (a walk binds/disputes a key, an operator accepts one, an identity
+   * rotates, or a peer is forgotten) — the hook a routed key store uses to drop a now-moot
+   * Tier-1 entry synchronously, before it can be sealed to a superseded key. */
+  let sealPostureListener = null;
+  /** Bumped on every `adopt` (the daemon's commit point), so an async caller can tell
+   * whether the state moved under it between reading a snapshot and committing. */
+  let adoptGeneration = 0;
+  /** @param {string | null | undefined} publicKey */
+  const notifySeal = (publicKey) => {
+    if (!publicKey || !sealPostureListener) return;
+    try {
+      sealPostureListener(publicKey);
+    } catch {
+      /* a listener fault must never break the directory mutation that triggered it */
+    }
+  };
+
   for (const peer of state.admitted ?? []) {
     const record = makePeerRecord(peer);
     if (record) {
@@ -425,7 +443,10 @@ export function createDirectory(state = {}) {
    * @param {string} name
    */
   function forget(name) {
-    return admitted.delete(name) || candidates.delete(name);
+    const record = admitted.get(name);
+    const removed = admitted.delete(name) || candidates.delete(name);
+    if (record) notifySeal(record.publicKey);
+    return removed;
   }
 
   /**
@@ -518,6 +539,7 @@ export function createDirectory(state = {}) {
     // the window before that walk — its seal state becomes `reverify`, which
     // fails sends closed until a key is verified again.
     const { conflicts: _dropped, sealPublicKey: _sk, sealSeen: _ss, sealConflict: _sc, ...rest } = record;
+    notifySeal(record.publicKey); // the OLD identity's routed Tier-1 entry is now moot
     return commit(name, { ...rest, publicKey: key });
   }
 
@@ -629,12 +651,14 @@ export function createDirectory(state = {}) {
       // disagreeing key does not replace it — an attacker alternating two
       // replayed old keys must not be able to flip what an operator would accept.
       if (record.sealConflict) return record;
+      notifySeal(record.publicKey);
       return commit(name, { ...record, sealConflict: key });
     }
     if (record.sealSeen && sameKey(record.sealPublicKey, key)) return record;
     // First verified key for this peer. `sealRequired` is set for good here: a
     // peer we have ever sealed to must never silently drop to cleartext again,
     // even if the key is later lost or a stale writer rolls it back.
+    notifySeal(record.publicKey); // a walk supersedes any discovered Tier-1 key
     return commit(name, { ...record, sealPublicKey: key, sealSeen: true, sealRequired: true });
   }
 
@@ -653,6 +677,7 @@ export function createDirectory(state = {}) {
     const chosen = normalizeKey(sealPublicKey) ?? normalizeKey(record.sealConflict) ?? normalizeKey(record.sealPublicKey);
     if (!chosen) return record;
     const { sealConflict: _resolved, ...rest } = record;
+    notifySeal(record.publicKey); // an operator decision supersedes any discovered Tier-1 key
     return commit(name, { ...rest, sealPublicKey: chosen, sealSeen: true, sealRequired: true });
   }
 
@@ -839,6 +864,48 @@ export function createDirectory(state = {}) {
      */
     getByKey: (publicKey) =>
       readView([...admitted.values()].find((record) => sameKey(record.publicKey, publicKey)) ?? null),
+    /** Register the seal-posture-change hook (see `notifySeal`). One listener; a later call
+     * replaces it. Used by the daemon to forget a routed Tier-1 key the moment a walk,
+     * accept, rotation, or forget supersedes it. @param {(publicKey: string) => void} fn */
+    setSealPostureListener: (fn) => {
+      sealPostureListener = typeof fn === "function" ? fn : null;
+    },
+    /**
+     * The Tier-0 sealing posture for an *identity key*, aggregated across every admitted
+     * name that proves it — a routed destination is a key, and one key may hold several
+     * names. Fails closed on ambiguity: any `conflict` or `reverify` alias dominates, and
+     * a verified key is returned only if every verified alias agrees on it (differing
+     * verified keys are a conflict). So a stale or unverified alias can neither hide a
+     * verified one nor slip a message past a conflict.
+     *
+     * @param {string} publicKey the destination identity key
+     * @returns {{ state: "verified" | "conflict" | "reverify" | "unverified", key: string | null }}
+     */
+    sealForIdentity: (publicKey) => {
+      // Match by the CANONICAL key (SPKI DER), not PEM text: a routing destination is a
+      // DER key id, and an admitted record wrapping the same key differently must still
+      // count — otherwise its verified Tier-0 posture would be missed and a retired Tier-1
+      // key selected for the same identity.
+      const aliases = [...admitted.values()].filter((record) => sameCanonicalKey(record.publicKey, publicKey));
+      if (aliases.length === 0) return { state: "unverified", key: null };
+      let sawReverify = false;
+      /** @type {string[]} */
+      const verifiedKeys = [];
+      for (const record of aliases) {
+        const st = sealState(record.name);
+        if (st === "conflict") return { state: "conflict", key: null };
+        if (st === "reverify") sawReverify = true;
+        else if (st === "verified") {
+          const k = sealKeyFor(record.name);
+          if (k) verifiedKeys.push(k);
+        }
+      }
+      if (sawReverify) return { state: "reverify", key: null };
+      if (verifiedKeys.length === 0) return { state: "unverified", key: null };
+      const first = /** @type {string} */ (verifiedKeys[0]);
+      if (verifiedKeys.every((k) => sameKey(k, first))) return { state: "verified", key: first };
+      return { state: "conflict", key: null }; // aliases verified to different keys
+    },
     /**
      * The profile a peer effectively has, and why.
      *
@@ -962,6 +1029,11 @@ export function createDirectory(state = {}) {
       const nextKeys = [...(state?.blocklist?.keys ?? [])];
       const incomingSelf = state?.self ? makePeerRecord(state.self) : null;
 
+      // Snapshot the identities we currently hold, so after the swap we can notify the
+      // ones that disappear (a forgotten or rotated-away peer) — its discovered Tier-1
+      // key must be invalidated too, not only when an identity *gains* a Tier-0 posture.
+      const beforeIdentities = new Set([...admitted.values()].map((r) => r.publicKey));
+
       // Everything normalised without throwing — apply it. Nothing below can throw,
       // so the directory moves from one consistent state to the next atomically.
       admitted.clear();
@@ -998,7 +1070,25 @@ export function createDirectory(state = {}) {
         trust.admitProfile = state.trust.admitProfile ?? trust.admitProfile;
         trust.candidateProfile = state.trust.candidateProfile ?? trust.candidateProfile;
       }
+      // The daemon commits EVERY runtime mutation through `adopt` (applyChange builds a
+      // fresh directory, mutates it, and adopts it here), so the per-mutator notifySeal
+      // calls above never fire in the live daemon — this is where Tier-1 invalidation has
+      // to happen. Notify (a) identities that DISAPPEARED — a forgotten or rotated-away
+      // peer, whose discovered Tier-1 key must go too — and (b) identities that now carry
+      // a Tier-0 seal posture (walked, disputed, or ever-sealed), which supersedes Tier 1.
+      // A peer that stays put with no Tier-0 posture is untouched, so an approved Tier-1
+      // key for an admitted-but-unwalked peer survives.
+      const afterIdentities = new Set([...admitted.values()].map((r) => r.publicKey));
+      for (const pk of beforeIdentities) if (!afterIdentities.has(pk)) notifySeal(pk);
+      for (const record of admitted.values()) {
+        if (record.sealSeen || record.sealConflict || record.sealRequired) notifySeal(record.publicKey);
+      }
+      adoptGeneration += 1;
     },
+    /** The adopt generation — a monotone counter a reload uses to detect that newer state
+     * committed while it was asynchronously building, so it never adopts a stale snapshot
+     * over it. */
+    generation: () => adoptGeneration,
     /**
      * Replace the profiles this directory resolves against.
      *

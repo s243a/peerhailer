@@ -23,6 +23,7 @@ import { keyId } from "../routeManifest.js";
 import { createRouteReplayGuard, DEFAULT_MAX_VALIDITY_MS } from "../routeReplayGuard.js";
 import { openRoutedMessage, wrapRoutedMessage } from "../routedMessage.js";
 import { createRoutedKeyStore } from "../routedKeyStore.js";
+import { resolveRoutedSeal } from "../routedSealResolver.js";
 import { signRecord } from "../peerRecord.js";
 import { createRouter } from "../routing.js";
 import { REFUSE } from "../plugins.js";
@@ -73,6 +74,9 @@ const isPlainObject = (v) => {
  *   now?: () => number,
  *   replayGuard?: ReturnType<typeof createRouteReplayGuard>,
  *   routedKeyStore?: ReturnType<typeof createRoutedKeyStore>,
+ *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); enables opening sealed
+ *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
+ *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
  *   newMessageId?: () => string,
  *   messageValidityMs?: number,
  * }} deps
@@ -100,6 +104,17 @@ export function createRoutePlugin(deps) {
   if (!Number.isSafeInteger(messageValidityMs) || messageValidityMs <= 0 || messageValidityMs > DEFAULT_MAX_VALIDITY_MS) {
     throw new Error(`route message validity must be 1..${DEFAULT_MAX_VALIDITY_MS} ms`);
   }
+  // Validate the sealing key once here, so a misconfigured key is a clear construction
+  // error rather than surfacing later as every sealed delivery failing to "open".
+  if (deps.sealPrivateKey !== undefined) {
+    let usable = false;
+    try {
+      usable = createPrivateKey(deps.sealPrivateKey).asymmetricKeyType === "x25519";
+    } catch {
+      usable = false;
+    }
+    if (!usable) throw new Error("route plugin sealPrivateKey must be an X25519 private key");
+  }
 
   const deliver = deps.deliver;
   const rawRouter = createRouter({
@@ -112,8 +127,19 @@ export function createRoutePlugin(deps) {
         selfKeyId,
         guard: replayGuard,
         authorizeOrigin: deps.authorizeOrigin,
+        ...(deps.sealPrivateKey !== undefined ? { sealPrivateKey: deps.sealPrivateKey } : {}),
+        requireSealed: deps.requireSealed === true,
       });
-      if (!opened.ok) return { [OPEN_REFUSAL]: opened.reason };
+      if (!opened.ok) {
+        // A floor refusal still teaches our sealing key, so a routed-only origin can
+        // learn it and retry sealed. Otherwise the floor deadlocks discovery: it
+        // demands sealing while refusing the clear probe that carries the key back.
+        if (opened.reason === "cleartext-refused") {
+          const record = signedDiscoveryRecord();
+          return record ? { [OPEN_REFUSAL]: opened.reason, [ROUTED_RECORD_FIELD]: record } : { [OPEN_REFUSAL]: opened.reason };
+        }
+        return { [OPEN_REFUSAL]: opened.reason };
+      }
       // Await the consumer before attaching: a consumer may return a promise, and
       // spreading that instead of its resolved response would corrupt the result.
       const response = await deliver(opened.body, {
@@ -126,24 +152,29 @@ export function createRoutePlugin(deps) {
   });
 
   /**
-   * Piggyback a signed, **key-only** self-record on a delivery response so the origin can
-   * learn our advertised sealing key (M2 Tier-1). Deliberately NOT our full record: it
-   * carries name, identity key, and sealing key — never our addresses. Discovery is *key*
-   * discovery; handing a routed origin (and every relay on the return path) our direct
-   * addresses would undercut F2F reachability.
-   *
-   * Attaches only to a plain-object response: spreading an array or a class instance (a
-   * consumer could return either, and the in-process self-delivery path never JSON-round-
-   * trips it) would corrupt it, so such a response is passed through unchanged.
+   * A signed, **key-only** self-record: name, identity key, and sealing key — never our
+   * addresses. Discovery is *key* discovery; handing a routed origin (and every relay on
+   * the return path) our direct addresses would undercut F2F reachability.
+   */
+  const signedDiscoveryRecord = () => {
+    const self = deps.selfRecord();
+    return signRecord(
+      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
+      deps.privateKey,
+    );
+  };
+
+  /**
+   * Piggyback the key-only self-record on a delivery response so the origin can learn our
+   * advertised sealing key (M2 Tier-1). Attaches only to a plain-object response:
+   * spreading an array or class instance (a consumer could return either, and the
+   * in-process self-delivery path never JSON-round-trips it) would corrupt it, so such a
+   * response is passed through unchanged.
    * @param {any} response
    */
   const attachDiscovery = (response) => {
     if (!isPlainObject(response)) return response;
-    const self = deps.selfRecord();
-    const signed = signRecord(
-      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
-      deps.privateKey,
-    );
+    const signed = signedDiscoveryRecord();
     return signed ? { ...response, [ROUTED_RECORD_FIELD]: signed } : response;
   };
 
@@ -173,13 +204,23 @@ export function createRoutePlugin(deps) {
     const refusalReason = typeof reason === "string" ? reason : publicReason;
     if (refusalReason === null) return result;
     const duplicate = refusalReason === "replay:duplicate" || result?.response?.duplicate === true;
+    // A floor refusal can carry the destination's key-only record (so discovery still
+    // works under the floor); preserve it when rebuilding the response, or the fix would
+    // hold multi-hop but be dropped on the single-hop/self-delivery path.
+    const record = result?.response?.[ROUTED_RECORD_FIELD];
     return {
       ...result,
       delivered: true,
       refused: true,
       ...(duplicate ? { duplicate: true } : {}),
       response: typeof reason === "string"
-        ? { received: false, refused: true, reason: refusalReason, ...(duplicate ? { duplicate: true } : {}) }
+        ? {
+            received: false,
+            refused: true,
+            reason: refusalReason,
+            ...(duplicate ? { duplicate: true } : {}),
+            ...(record ? { [ROUTED_RECORD_FIELD]: record } : {}),
+          }
         : result.response,
     };
   };
@@ -234,10 +275,11 @@ export function createRoutePlugin(deps) {
 
   /**
    * Host-only origin facade: sign the exact serialized body, then give the opaque
-   * wrapper to the engine. The outer id is deliberately null (see `relay`).
+   * wrapper to the engine. The outer id is deliberately null (see `relay`). Sealed by
+   * default; `opts.public` is the explicit opt-out that permits a cleartext send.
    * @param {string} dest
    * @param {any} payload
-   * @param {{ttl?: number, budget?: number}} [opts]
+   * @param {{ttl?: number, budget?: number, public?: boolean}} [opts]
    */
   const sendUnchecked = async (dest, payload, opts = {}) => {
     let destinationKeyId;
@@ -246,6 +288,25 @@ export function createRoutePlugin(deps) {
     } catch {
       return { delivered: false, reason: "invalid destination identity key", spent: 0 };
     }
+
+    // Decide confidentiality before wrapping. Application data is confidential by default:
+    // Tier 0 (walk-verified) wins, Tier 1 seals only to an *approved* key, and anything
+    // else REFUSES rather than leaking — a relay must not be able to strip a seal by
+    // forging a dispute or evicting a key. Cleartext needs an explicit `public` opt-out.
+    const tier0 = deps.tier0Seal ? deps.tier0Seal(dest) : { state: /** @type {"unverified"} */ ("unverified"), key: null };
+    const target = resolveRoutedSeal({
+      tier0,
+      tier1: { state: routedKeyStore.recordState(destinationKeyId), key: routedKeyStore.recordSealKey(destinationKeyId) },
+      publicOk: opts.public === true,
+    });
+    // Once Tier 0 knows this peer's sealing posture, its Tier-1 entry is moot — drop it so
+    // a stale key or conflict cannot linger (an authoritative walk supersedes discovery).
+    if (tier0.state !== "unverified") routedKeyStore.forget(destinationKeyId);
+    if (target.decision === "refuse") {
+      return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0, seal: { decision: target.decision, tier: target.tier, state: target.state } };
+    }
+    const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
+
     const wrapper = wrapRoutedMessage({
       self: deps.selfRecord(),
       privateKey: deps.privateKey,
@@ -254,13 +315,16 @@ export function createRoutePlugin(deps) {
       messageId: newMessageId(),
       now: now(),
       validityMs: messageValidityMs,
+      ...(sealTo ? { sealTo } : {}),
     });
     const routeOptions = /** @type {{ttl?: number, budget?: number, id?: any}} */ ({ id: null });
     if (opts.ttl !== undefined) routeOptions.ttl = opts.ttl;
     if (opts.budget !== undefined) routeOptions.budget = opts.budget;
     const result = normalizeOpenResult(await rawRouter.send(dest, wrapper, routeOptions));
     observeDiscovery(destinationKeyId, result);
-    return result;
+    // Surface the confidentiality decision so a caller sees whether it was sealed and at
+    // which tier — not just that it was delivered (the review's pre-send disclosure).
+    return { ...result, seal: { decision: target.decision, tier: target.tier, state: target.state } };
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as
@@ -268,7 +332,7 @@ export function createRoutePlugin(deps) {
   // network callers, which have a stable key to charge.)
   const relay = (/** @type {any} */ envelope, /** @type {string | null} */ from = null) =>
     withRelaySlot(null, () => relayUnchecked(envelope, from));
-  const send = (/** @type {string} */ dest, /** @type {any} */ payload, /** @type {{ttl?: number, budget?: number}} */ opts = {}) =>
+  const send = (/** @type {string} */ dest, /** @type {any} */ payload, /** @type {{ttl?: number, budget?: number, public?: boolean}} */ opts = {}) =>
     withRelaySlot(null, () => sendUnchecked(dest, payload, opts));
 
   /** The identity key id for a destination PEM, or null if it is not a usable key. */
@@ -299,6 +363,11 @@ export function createRoutePlugin(deps) {
     routedSealDetail: (/** @type {string} */ dest) => {
       const id = destKeyId(dest);
       return id ? routedKeyStore.recordDetail(id) : null;
+    },
+    /** Approve a discovered Tier-1 key for sealing (optionally pinned to a fingerprint). */
+    approveRoutedSeal: (/** @type {string} */ dest, /** @type {string} */ expectedSealKey) => {
+      const id = destKeyId(dest);
+      return id ? routedKeyStore.approve(id, expectedSealKey) : { ok: false, reason: "unknown" };
     },
   };
 
@@ -344,5 +413,9 @@ export function createRoutePlugin(deps) {
     /** Host-only: originate a routed message toward `dest`. */
     send,
     router,
+    // Host/control-facing routed-seal surfaces (the control endpoints call these).
+    routedSealState: router.routedSealState,
+    routedSealDetail: router.routedSealDetail,
+    approveRoutedSeal: router.approveRoutedSeal,
   };
 }

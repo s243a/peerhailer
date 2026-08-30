@@ -1,34 +1,30 @@
 /**
- * Tier-1 record-carried sealing keys for routed destinations — the discovery half of
- * milestone M2 (`docs/routing-security-roadmap.md`).
+ * Discovered sealing keys for routed destinations — the Tier-1 half of routing key trust
+ * (`docs/routing-security-roadmap.md`).
  *
  * A routed destination is an identity *key*, often a peer we have never walked to and
- * hold no local record for — so its sealing key cannot come from the name-keyed
- * directory (that is Tier 0, `directory.sealKeyFor`). Instead the destination's *signed*
- * self-record rides back on a route-discovery response or an earlier authenticated
- * cleartext delivery, and this store records the sealing key it carries — but only after
- * proving the record's identity **equals the routing target** (`keyId(record.publicKey)
- * === targetKeyId`, a second-preimage-hard binding), never on raw string trust.
+ * hold no local record for — so its sealing key cannot come from the name-keyed directory
+ * (that is Tier 0, `directory.sealKeyFor`). Instead the destination's *signed* self-record
+ * rides back on a **data-free discovery probe** (never on a message carrying application
+ * data), and this store records the sealing key it carries — but only after proving the
+ * record's identity **equals the routing target** (`keyId(record.publicKey) ===
+ * targetKeyId`, a second-preimage-hard binding), never on raw string trust.
  *
- * The guarantee is deliberately weaker than Tier 0 and deliberately quarantined:
+ * A discovered key is held **pending** and is **not usable for sealing until a person
+ * approves it** (by fingerprint) — the manual gate that makes Tier 1 safe. Approval is the
+ * Tier-1 analogue of a walk: it is what turns "signed hearsay with no liveness" into "a
+ * key this operator chose to trust". `recordSealKey` therefore returns a key only once it
+ * is approved; the resolver refuses (never falls back to cleartext) for a merely-pending
+ * or absent key.
+ *
  *  - **Signed, but no liveness.** A relay cannot forge or substitute the record for a
- *    *different* key, but it can preserve and replay an *older* signed record of the same
- *    destination (stale addresses, a retired sealing key). So Tier 1 beats a passive
- *    relay lacking the retired private key, but has weaker freshness/revocation than a
- *    walk — the caller must treat it as opt-in, surface it before sending, and never
- *    show the Tier-0 lock. Tier 0 always wins at the call site.
- *  - **Session-scoped, in-memory.** Like the replay guard, this holds no durable state:
- *    a record re-arrives whenever routing to that destination recurs, so nothing is lost
- *    by forgetting on restart, and a stale Tier-1 key never outlives the process. A
- *    durable variant is possible but is not built. Capacity eviction is safe for an
- *    ordinary record-carried entry (it is simply re-observed), but a *conflict* is
- *    security evidence — dropping it would let a relay replaying a single old record
- *    re-establish a stale key — so conflicts are evicted last, only if every slot is
- *    disputed at once (a pathological state a relay cannot reach on its own).
- *  - **Conflict is refusal, not selection.** Two *different* sealing keys observed for
- *    one target mark it `record-conflict`, and `recordSealKey` then returns null: the
- *    store never picks a winner from ambiguous hearsay. A later Tier-0 walk resolves it
- *    (the caller prefers Tier 0, and may `forget` the moot Tier-1 entry).
+ *    *different* key, but it can replay an *older* signed record (a retired sealing key).
+ *    Approval is the human check against that; two *different* keys for one target become a
+ *    sticky `record-conflict` (approval void) and the store refuses to pick a winner.
+ *  - **Session-scoped, in-memory.** Like the replay guard, this holds no durable state; a
+ *    record re-arrives on the next discovery, and a stale key never outlives the process.
+ *    Capacity eviction drops a *pending* entry first — never an *approved* key or a
+ *    *conflict* (both are operator/security state a relay must not be able to shed).
  *
  * @module routedKeyStore
  */
@@ -36,8 +32,8 @@ import { keyId } from "./routeManifest.js";
 import { verifyRecord } from "./peerRecord.js";
 import { sameKey } from "./identity.js";
 
-/** Ceiling on tracked destinations; the oldest non-conflicted entry is evicted when
- * full. Evicting a record-carried entry is safe (it is re-observed); conflicts are kept. */
+/** Ceiling on tracked destinations; the oldest *pending* entry is evicted when full.
+ * Approved keys and conflicts are never evicted (operator/security state). */
 export const DEFAULT_MAX_ENTRIES = 4096;
 
 const SHA256_B64URL_LEN = 43; // a keyId: SHA-256 of SPKI DER, base64url, unpadded
@@ -51,38 +47,40 @@ const isKeyId = (v) => typeof v === "string" && v.length === SHA256_B64URL_LEN &
 export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) {
   /**
    * @type {Map<string, {
-   *   sealKey: string | null,   // the record-carried X25519 sealing key (null once conflicted)
+   *   sealKey: string | null,   // the discovered X25519 sealing key (null once conflicted)
+   *   approved: boolean,        // a person has approved this key for sealing
    *   conflict: boolean,        // two differing sealing keys seen -> refuse to pick
    *   name: string,             // the destination's self-declared name, for surfacing
    * }>}
    */
   const entries = new Map();
 
-  /** Make room under the ceiling by dropping the oldest *non-conflicted* destination — a
-   * conflict is security evidence and must not be silently lost (its loss would let a
-   * replayed single record re-establish a stale key). Only if every slot is disputed
-   * does the oldest conflict go, and a relay cannot manufacture that state itself. Map
-   * iteration is insertion order, so the first match is the oldest of its kind. */
+  /** Make room under the ceiling by dropping the oldest *pending* destination, and report
+   * whether it could. An approved key (operator-blessed) and a conflict (security evidence
+   * — dropping it would let a replayed single record re-establish a stale key) are NEVER
+   * evicted; if every slot is one of those, no room is made and the new observation is
+   * dropped instead (retriable — it re-arrives on the next discovery). Map iteration is
+   * insertion order, so the first match is the oldest pending. @returns {boolean} evicted */
   const evictOldest = () => {
     for (const [k, e] of entries) {
-      if (!e.conflict) {
+      if (!e.approved && !e.conflict) {
         entries.delete(k);
-        return;
+        return true;
       }
     }
-    const oldest = entries.keys().next();
-    if (!oldest.done) entries.delete(oldest.value);
+    return false;
   };
 
   return {
     /**
      * Classify and record the sealing key a signed self-record carries for a routed
      * destination. The record must be self-consistent (`verifyRecord(_, null)`) and its
-     * identity must equal `targetKeyId`; otherwise nothing is stored.
+     * identity must equal `targetKeyId`; otherwise nothing is stored. A newly discovered
+     * key is **pending** (`record-carried`) — approval is a separate, deliberate step.
      *
      * @param {string} targetKeyId the routing target's identity key id (`keyId(dest)`)
      * @param {any} envelope a `{record, signature}` signed self-record
-     * @returns {"record-carried" | "record-conflict" | "no-seal-key" | "not-target" | "unverified"}
+     * @returns {"record-approved" | "record-carried" | "record-conflict" | "no-seal-key" | "not-target" | "unverified" | "at-capacity"}
      */
     observe(targetKeyId, envelope) {
       if (!isKeyId(targetKeyId)) return "unverified";
@@ -100,67 +98,99 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
       if (identityKeyId !== targetKeyId) return "not-target";
 
       const sealKey = rec.record.sealPublicKey ?? null;
-      if (!sealKey) return "no-seal-key"; // a record with no sealing key offers no Tier-1 key
+      if (!sealKey) return "no-seal-key"; // a record with no sealing key offers no key
 
       const existing = entries.get(targetKeyId);
       if (!existing) {
-        if (entries.size >= maxEntries) evictOldest();
-        entries.set(targetKeyId, { sealKey, conflict: false, name: rec.record.name });
+        // At capacity, evict a pending entry to make room; if every slot is an approved
+        // key or a conflict (never evicted), drop this new discovery rather than clobber
+        // one — it is retriable on the next probe.
+        if (entries.size >= maxEntries && !evictOldest()) return "at-capacity";
+        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name });
         return "record-carried";
       }
       if (existing.conflict) return "record-conflict"; // sticky within the session
-      if (sameKey(existing.sealKey, sealKey)) return "record-carried"; // adds no authority
-      // A different sealing key for the same target: ambiguous hearsay, refuse to pick.
+      if (sameKey(existing.sealKey, sealKey)) {
+        return existing.approved ? "record-approved" : "record-carried"; // adds no authority
+      }
+      // A different sealing key for the same target: ambiguous hearsay. Refuse to pick,
+      // and void any prior approval — a key we approved is no longer the only claim.
       existing.sealKey = null;
+      existing.approved = false;
       existing.conflict = true;
       return "record-conflict";
     },
 
     /**
-     * The Tier-1 record-carried sealing key for a destination, or null if none was
-     * observed or the observations conflict. Tier-0 resolution is the caller's job and
-     * always takes precedence over this.
+     * Approve the destination's currently-pending discovered key for sealing — the manual
+     * Tier-1 trust gate. Optionally require it to equal `expectedSealKey` (the fingerprint
+     * the operator reviewed), so an approval cannot race a key that changed underneath it.
+     *
+     * @param {string} targetKeyId
+     * @param {string} [expectedSealKey] approve only if the held key matches this
+     * @returns {{ ok: true, sealKey: string } | { ok: false, reason: "unknown" | "conflict" | "mismatch" }}
+     */
+    approve(targetKeyId, expectedSealKey) {
+      const e = entries.get(targetKeyId);
+      if (!e) return { ok: false, reason: "unknown" };
+      // Conflict first: a conflicted entry has a null key, so the key check below would
+      // otherwise misreport it as "unknown" rather than the real "conflict".
+      if (e.conflict) return { ok: false, reason: "conflict" };
+      if (!e.sealKey) return { ok: false, reason: "unknown" };
+      if (expectedSealKey !== undefined && !sameKey(e.sealKey, expectedSealKey)) {
+        return { ok: false, reason: "mismatch" };
+      }
+      e.approved = true;
+      return { ok: true, sealKey: e.sealKey };
+    },
+
+    /**
+     * The **approved** sealing key for a destination, or null if none is approved (pending,
+     * conflicted, or absent). This is the only key the send path may seal to at Tier 1;
+     * Tier-0 resolution is the caller's job and always takes precedence.
      *
      * @param {string} targetKeyId
      * @returns {string | null}
      */
     recordSealKey(targetKeyId) {
       const e = entries.get(targetKeyId);
-      return e && !e.conflict ? e.sealKey : null;
+      return e && e.approved && !e.conflict ? e.sealKey : null;
     },
 
     /**
-     * The Tier-1 view of a destination — for policy and for the pre-send surface. Never
-     * `verified`: that is a Tier-0 word and belongs to the directory, which the caller
-     * consults first.
+     * The Tier-1 view of a destination. `record-approved` is usable; `record-carried` is
+     * discovered-but-pending (awaiting approval); the rest are self-explanatory. Never
+     * `verified`: that is a Tier-0 word and belongs to the directory.
      *
      * @param {string} targetKeyId
-     * @returns {"record-carried" | "record-conflict" | "none"}
+     * @returns {"record-approved" | "record-carried" | "record-conflict" | "none"}
      */
     recordState(targetKeyId) {
       const e = entries.get(targetKeyId);
       if (!e) return "none";
-      return e.conflict ? "record-conflict" : "record-carried";
+      if (e.conflict) return "record-conflict";
+      return e.approved ? "record-approved" : "record-carried";
     },
 
     /**
-     * What to show a person before a Tier-1 send: the sealing key (to fingerprint) and
-     * the destination's declared name. Null when there is no usable Tier-1 key. No
-     * "freshness" is surfaced on purpose — Tier 1 carries no liveness proof, and any
-     * record age would be a value a relay selects by replaying whichever record it chose.
+     * What to show a person deciding whether to approve, or before a Tier-1 send: the
+     * sealing key (to fingerprint), the destination's declared name, and whether it is
+     * already approved. Null on a conflict or when nothing is held. No record "age" is
+     * surfaced — a relay selects which past record it replays, so age would be a value it
+     * chooses wearing a freshness label.
      *
      * @param {string} targetKeyId
-     * @returns {{ sealKey: string, name: string } | null}
+     * @returns {{ sealKey: string, name: string, approved: boolean } | null}
      */
     recordDetail(targetKeyId) {
       const e = entries.get(targetKeyId);
       if (!e || e.conflict || !e.sealKey) return null;
-      return { sealKey: e.sealKey, name: e.name };
+      return { sealKey: e.sealKey, name: e.name, approved: e.approved };
     },
 
     /**
-     * Drop a destination's Tier-1 entry — used when a Tier-0 walk supersedes it, so the
-     * moot record-carried key (and any conflict) no longer lingers.
+     * Drop a destination's Tier-1 entry — used when an authoritative Tier-0 event (a walk,
+     * a rotation, a forget) supersedes it, so a moot or retired key cannot linger.
      * @param {string} targetKeyId
      */
     forget(targetKeyId) {

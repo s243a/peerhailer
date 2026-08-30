@@ -1037,7 +1037,14 @@ export function createDaemon({
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
         try {
-          const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
+          // Confidential by default: a send with no usable key is refused, never sent in
+          // the clear. `public: true` is the explicit opt-out for non-sensitive payloads
+          // (and the way a data-free discovery probe is sent).
+          const result = await router.send(String(body.dest), body.payload, {
+            ttl: body?.ttl,
+            budget: body?.budget,
+            public: body?.public === true,
+          });
           if (result?.reason === "invalid destination identity key") return send(response, 400, { error: result.reason });
           return send(response, 200, result);
         } catch (error) {
@@ -1049,6 +1056,44 @@ export function createDaemon({
           if (error instanceof RoutedMessageInputError) return send(response, 400, { error: error.message });
           throw error;
         }
+      }
+
+      // Discover a routed destination's sealing key with a DATA-FREE public probe (no
+      // application data leaves this node), then report the pending fingerprint to approve.
+      // The routed key store is in-memory in this daemon, so discovery/approval are live
+      // control operations, not state-file edits like Tier-0 `hail seal accept`.
+      if (scope === "control" && (url.pathname === "/api/route/discover" || url.pathname === "/api/route/seal") && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = await readJson(request);
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        const dest = String(body.dest);
+        if (url.pathname === "/api/route/discover") {
+          try {
+            await router.send(dest, null, { public: true });
+          } catch (error) {
+            if (error instanceof RoutedMessageInputError) return send(response, 400, { error: error.message });
+            throw error;
+          }
+        }
+        return send(response, 200, { state: router.routedSealState(dest), detail: router.routedSealDetail(dest) });
+      }
+
+      // Approve a discovered Tier-1 key for sealing — the manual gate. Optionally pinned to
+      // the fingerprint the operator reviewed, so an approval cannot race a changed key.
+      if (scope === "control" && url.pathname === "/api/route/seal-approve" && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = await readJson(request);
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        // A pin, if given, must be a real PEM string. Reject a non-string rather than
+        // silently treating it as no pin — an intended pin becoming an unpinned approval
+        // of whatever key is currently held is a footgun.
+        if (body.sealKey !== undefined && typeof body.sealKey !== "string") {
+          return send(response, 400, { error: "sealKey must be a PEM string" });
+        }
+        const result = router.approveRoutedSeal(String(body.dest), typeof body.sealKey === "string" ? body.sealKey : undefined);
+        return send(response, result.ok ? 200 : 409, result);
       }
 
       // What this machine offers, as it knows itself. Locally sourced: nothing
@@ -1256,13 +1301,21 @@ export function createDaemon({
       // half-swapped route table. The caller does the async work (rebuilding
       // plugins) *before* calling this; an await moved inside here would reopen
       // exactly that window.
+      // Do ALL the potentially-throwing directory work FIRST — a malformed profile set or
+      // a malformed `adopt` state both throw — so a bad reload leaves the OLD plugin set
+      // (and its policy, e.g. the confidentiality floor) whole, rather than installing a
+      // possibly-weaker new set and only then failing. `useProfiles` runs before `adopt`,
+      // so malformed profiles are rejected before the directory is touched at all. The
+      // plugin swap below cannot throw (collectRoutes logs-and-skips), so once past this
+      // block the reload commits cleanly.
+      if (nextProfiles) directory.useProfiles(nextProfiles);
+      if (state) directory.adopt(state);
+      if (nextProfiles) profiles = nextProfiles;
       if (Array.isArray(nextPlugins)) {
-        // Build the replacement into a temporary *before* touching any live
-        // reference, then swap both at once — so a future validation that could
-        // reject the new set leaves the old one whole rather than half-swapped.
-        // Only after the swap are the replaced plugins stopped, best-effort and
-        // fire-and-forget (a sync throw or a rejected async stop() must not tear
-        // the reload, and awaiting here would break the no-await invariant above).
+        // Build the replacement into a temporary *before* touching any live reference,
+        // then swap both at once. Only after the swap are the replaced plugins stopped,
+        // best-effort and fire-and-forget (a sync throw or a rejected async stop() must
+        // not tear the reload, and awaiting here would break the no-await invariant).
         const nextRoutes = collectRoutes(nextPlugins, { log });
         const oldPlugins = plugins;
         plugins = nextPlugins;
@@ -1274,11 +1327,6 @@ export function createDaemon({
         const retired = oldPlugins.filter((plugin) => !nextPlugins.includes(plugin));
         Promise.allSettled(retired.map((plugin) => Promise.resolve().then(() => plugin.stop?.()))).catch(() => {});
       }
-      if (nextProfiles) {
-        profiles = nextProfiles;
-        directory.useProfiles(nextProfiles);
-      }
-      if (state) directory.adopt(state);
       log(`[daemon] reloaded: ${pluginRoutes.size} routes, ${Object.keys(profiles).length} profiles`);
       // A reload rebuilds plugin instances, so instance-owned state is reset — most
       // notably chat's replay nonce cache and command history. State a host injects

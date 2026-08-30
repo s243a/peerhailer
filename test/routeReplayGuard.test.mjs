@@ -109,3 +109,10 @@ test("size reports live entries and garbage-collects an expired reservation", ()
   clock = T + 1001;
   assert.equal(g.size(), 0);
 });
+
+test("a misconfigured guard fails loudly at construction rather than silently disabling replay", () => {
+  // clockSkewMs:NaN would make exp NaN and `existing.exp >= t` always false -> replays admitted.
+  assert.throws(() => createRouteReplayGuard({ clockSkewMs: NaN }), /clockSkewMs/);
+  assert.throws(() => createRouteReplayGuard({ maxValidityMs: Infinity }), /maxValidityMs/);
+  assert.throws(() => createRouteReplayGuard({ maxEntries: -1 }), /maxEntries/);
+});

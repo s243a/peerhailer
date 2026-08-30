@@ -585,14 +585,41 @@ switch (command) {
     // Likewise one Tier-1 discovery store for the process: a config reload must not
     // forget the sealing keys learned from routed responses this session.
     const routedKeyStore = createRoutedKeyStore();
-    // The routing plugin's deps read the *live* directory and identity, not stored
-    // config, so one builder serves both the start and reload plugin arrays.
-    const routeDeps = () => ({
+    // A Tier-0 event (walk, accept, rotation, forget) supersedes any discovered Tier-1
+    // key for that identity — drop it synchronously so a stale/retired key can never be
+    // sealed to in the window before the next send would lazily clear it.
+    directory.setSealPostureListener?.((/** @type {string} */ publicKey) => {
+      try {
+        routedKeyStore.forget(routeKeyId(publicKey));
+      } catch {
+        /* a non-key input cannot have a routed entry to forget */
+      }
+    });
+    // The routing plugin's deps read the *live* directory and identity; policy keys read
+    // from the *fresh* `state` buildRuntime passes (not the startup snapshot), so a reload
+    // honors an edited floor/opt-in like every other runtime input. One builder serves
+    // both the start and reload plugin arrays.
+    const routeDeps = (/** @type {any} */ state) => ({
       self: identity.publicKey,
       privateKey: identity.privateKey,
       selfRecord: () => directory.self,
       replayGuard: routeReplayGuard,
       routedKeyStore,
+      // M3b confidentiality. `send` seals to a routed destination's key when it has one;
+      // `deliver` opens a sealed block with this machine's X25519 key.
+      sealPrivateKey: /** @type {string} */ (identity.sealPrivateKey),
+      // Tier-0 (walk-verified) sealing posture for a routed destination, aggregated across
+      // EVERY admitted name that proves this identity key — so a stale or unverified alias
+      // cannot hide a verified one, and a conflict among aliases fails closed.
+      tier0Seal: (/** @type {string} */ destKey) =>
+        directory.sealForIdentity
+          ? directory.sealForIdentity(destKey)
+          : { state: /** @type {"unverified"} */ ("unverified"), key: null },
+      // Operator policy: refuse a clear delivery (the confidentiality floor). The
+      // `--require-sealed` flag (hyphenated, as the parser keys them) can only turn it on;
+      // otherwise it reads from the fresh state, so a reload picks up an edited value.
+      // Tier-1 keys become usable through explicit per-key approval, not a global opt-in.
+      requireSealed: flags["require-sealed"] === true || state?.requireSealedRouting === true,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {
@@ -686,10 +713,40 @@ switch (command) {
      * the result (advancing the closure `plugins`) only after `daemon.reload`
      * accepts it, so a failed build or reload leaves the old runtime serving.
      */
-    const rebuild = async () => {
-      const fresh = loadState(statePath);
-      const { plugins: nextPlugins } = await buildRuntime(fresh, runtimeDeps);
-      return { plugins: nextPlugins };
+    // Reload as one transaction over a SINGLE state snapshot: plugins, profiles, and the
+    // directory adopt all derive from the same generation, so a change landing mid-build
+    // cannot split the runtime. Two further guards make it safe under concurrency:
+    //  - a *generation fence*: `adopt` bumps `directory.generation()`, and if state
+    //    committed while we were asynchronously building, we re-snapshot and rebuild
+    //    rather than adopt a stale snapshot over the newer live state;
+    //  - *serialization*: reloads run one at a time on a promise chain, so overlapping
+    //    API/SIGHUP reloads cannot interleave their commits.
+    // Build (async, unlocked), then commit (synchronous — no await between the fence check
+    // and `daemon.reload`), advancing `plugins` only after reload accepts, so a throw
+    // leaves the old set serving.
+    const doReload = async () => {
+      let gen = directory.generation ? directory.generation() : 0;
+      let snapshot = loadState(statePath);
+      let built = await buildRuntime(snapshot, runtimeDeps);
+      while (directory.generation && directory.generation() !== gen) {
+        gen = directory.generation();
+        snapshot = loadState(statePath);
+        built = await buildRuntime(snapshot, runtimeDeps);
+      }
+      const result = daemon.reload({ plugins: built.plugins, profiles: mergeProfiles(built.plugins, snapshot), state: snapshot });
+      plugins = built.plugins;
+      if (built.plugins.some((plugin) => plugin.name === "route")) {
+        log(`[route] replay guard retained across reload`);
+      }
+      return result;
+    };
+    /** @type {Promise<any>} */
+    let reloadChain = Promise.resolve();
+    const applyReload = () => {
+      // Run even if a prior reload rejected (both handlers are doReload), so one failure
+      // does not wedge the chain.
+      reloadChain = reloadChain.then(doReload, doReload);
+      return reloadChain;
     };
 
     const daemon = createDaemon({
@@ -720,22 +777,7 @@ switch (command) {
         command: process.execPath,
         args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
       }),
-      onReload: async () => {
-        // Build (async, unlocked) then commit (synchronous). Re-read state at
-        // commit so a profile change that landed during the build is reflected —
-        // deriving profiles from the build-time state would resurrect a just-
-        // removed one (fail open). Advance the closure `plugins` only after
-        // `daemon.reload` accepts, in the same call stack, so a throw leaves it
-        // on the old set and no handler observes a half-swapped runtime.
-        const { plugins: nextPlugins } = await rebuild();
-        const freshState = loadState(statePath);
-        const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, freshState), state: freshState });
-        plugins = nextPlugins;
-        if (nextPlugins.some((plugin) => plugin.name === "route")) {
-          log(`[route] replay guard retained across reload`);
-        }
-        return result;
-      },
+      onReload: () => applyReload(),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
       // so a change made at a terminal is not discarded by the next save here.
@@ -865,6 +907,21 @@ switch (command) {
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+    // Headless reload: a standalone `hail block/forget/rotate/seal accept/...` mutates the
+    // state file in a *separate* process, and without this a daemon with no control
+    // listener (no --ui) would keep serving its startup directory — still granting a
+    // blocked peer or sealing to a superseded key until a restart (which also crosses the
+    // session replay/Tier-1 boundary). `kill -HUP <pid>` reloads in place, no restart.
+    let reloading = false;
+    process.on("SIGHUP", () => {
+      if (reloading) return; // coalesce a burst of signals into one reload
+      reloading = true;
+      Promise.resolve()
+        .then(applyReload)
+        .then((r) => log(`[daemon] reloaded on SIGHUP: ${r.routes} routes, ${r.profiles} profiles`))
+        .catch((error) => log(`[daemon] SIGHUP reload failed (old runtime kept serving): ${error?.message ?? error}`))
+        .finally(() => { reloading = false; });
+    });
     break;
   }
 

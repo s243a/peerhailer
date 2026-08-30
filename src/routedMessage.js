@@ -7,9 +7,12 @@
  * It rides *inside* the routing payload, opaque to the pure engine and to every
  * relay — a relay cannot forge the origin, redirect the message, or swap the body
  * (all of that is under the manifest signature) without the destination refusing it.
- * At M1 the body is **cleartext** (signed, not private): relays still read it, and
- * `open` refuses any manifest whose `payloadMode` is not `"clear"`. Confidentiality
- * (a sealed body under `payloadMode:"sealed"`) is M3; multi-block reassembly is later.
+ * A **clear** body is signed but not private (relays read it); a **sealed** body (M3b,
+ * `payloadMode:"sealed"`) is encrypted to the destination's X25519 key, and the manifest
+ * commits to the ciphertext — so relays read nothing while the signature still lives
+ * outside the seal (verify-before-decrypt). The signed `payloadMode` records which, so a
+ * relay can neither reinterpret one as the other nor downgrade a sealed send.
+ * Multi-block reassembly is later.
  *
  * Two limits worth stating precisely:
  *  - **The attached origin record is bound only by its *key*, not by this message.**
@@ -34,6 +37,7 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 
 import { buildManifest, keyId, manifestProblem, payloadDigest, signManifest, verifyManifest } from "./routeManifest.js";
 import { signRecord, verifyRecord } from "./peerRecord.js";
+import { seal, openSigned } from "./sealing.js";
 
 /** Serialized body ceiling before base64 expansion. */
 export const MAX_ROUTED_BODY_BYTES = 700_000;
@@ -118,7 +122,13 @@ const bodyToBytes = (body) => {
 
 /**
  * Origin side: build the signed, self-describing wrapper for `body` addressed to the
- * destination key `destinationKeyId` (`keyId(destPublicKey)`). Single-block only at M1.
+ * destination key `destinationKeyId` (`keyId(destPublicKey)`). Single-block only.
+ *
+ * With `sealTo`, the body is **sealed** (M3b): the serialized bytes are encrypted to the
+ * destination's X25519 key and signed by the origin's identity key (seal-then-sign), and
+ * the manifest commits to the *ciphertext* — so a relay reads nothing, and the manifest
+ * signature stays outside the seal (verify-before-decrypt). Without it, the body is
+ * cleartext (signed, not private) as at M1/M2. The signed `payloadMode` records which.
  *
  * @param {{
  *   self: any,               // this machine's own record ({name, publicKey, ...})
@@ -128,10 +138,11 @@ const bodyToBytes = (body) => {
  *   messageId: string,       // exactly 16 random bytes as 22-char base64url
  *   now: number,
  *   validityMs: number,
+ *   sealTo?: { recipientKey: string },  // the destination's X25519 sealing key; seals when present
  * }} input
  * @returns {{ manifest: any, manifestSignature: string, originRecord: any, payload: string }}
  */
-export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, messageId, now, validityMs }) {
+export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, messageId, now, validityMs, sealTo }) {
   let originKeyId;
   let signingKeyId;
   try {
@@ -146,23 +157,57 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
   }
   if (originKeyId !== signingKeyId) throw new Error("origin private key does not match self.publicKey");
 
-  const originRecord = signRecord(self, privateKey);
+  // Attach a KEY-ONLY origin record — name, identity key, sealing key, no addresses.
+  // Nothing on the receive path reads the origin's addresses (open exposes only body and
+  // originKeyId), so signing the full record would only leak our direct addresses to
+  // every relay, the same asymmetry M2 already closed on the destination side.
+  const originRecord = signRecord(
+    { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
+    privateKey,
+  );
   if (!originRecord) throw new Error("cannot sign the origin record");
-  const bytes = bodyToBytes(body);
+  const bodyBytes = bodyToBytes(body);
+
+  // The exact bytes the manifest commits to and the wire carries: the plaintext for a
+  // clear send, or the serialized sealed object for a sealed one. The digest is over
+  // these — the ciphertext at the sealed milestone, never the plaintext.
+  let transported = bodyBytes;
+  let payloadMode = /** @type {"clear" | "sealed"} */ ("clear");
+  if (sealTo) {
+    let sealed;
+    try {
+      // Sign with the origin *identity* key, so the sealed `from` equals the manifest
+      // origin the destination already authenticated — the two are bound at open.
+      sealed = seal(bodyBytes, sealTo.recipientKey, { signer: { publicKey: self.publicKey, privateKey } });
+    } catch (cause) {
+      throw new RoutedMessageInputError("cannot seal to the destination key", { cause });
+    }
+    transported = Buffer.from(JSON.stringify(sealed), "utf8");
+    payloadMode = "sealed";
+  }
+
+  // The destination gates the *transported* bytes at MAX_ROUTED_BODY_BYTES, and sealing
+  // expands the plaintext (~4/3, base64 ciphertext inside the sealed JSON). Enforce that
+  // same ceiling on the transported form here so a body that would always be refused at
+  // open fails loudly at *send* instead of wrapping successfully and never arriving.
+  if (transported.length > MAX_ROUTED_BODY_BYTES) {
+    throw new RoutedMessageInputError(`sealed payload exceeds the ${MAX_ROUTED_BODY_BYTES}-byte transported limit`);
+  }
+
   const manifest = buildManifest({
     originKeyId,
     destinationKeyId,
     messageId,
     issuedAt: now,
     expiresAt: now + validityMs,
-    payloadMode: "clear",
-    payloadDigest: payloadDigest(bytes),
+    payloadMode,
+    payloadDigest: payloadDigest(transported),
   });
   const wrapper = {
     manifest,
     manifestSignature: signManifest(manifest, privateKey),
     originRecord,
-    payload: bytes.toString("base64"),
+    payload: transported.toString("base64"),
   };
   const wireBytes = Buffer.byteLength(JSON.stringify(wrapper), "utf8");
   if (wireBytes > MAX_ROUTED_WRAPPER_BYTES) {
@@ -188,6 +233,14 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
  * work. Any failure returns
  * `{ ok: false, reason }`; a malformed wrapper is a refusal, never a throw.
  *
+ * A **sealed** wrapper (M3b) is decrypted after all the same gates: the ciphertext is
+ * what the manifest committed to, so integrity/replay are checked first, then the block
+ * is opened with `sealPrivateKey` and its signed sender is bound to the authenticated
+ * manifest origin (the sealer must be the origin). Sealing requires `sealPrivateKey`; a
+ * sealed wrapper without one is refused. `requireSealed` is the local confidentiality
+ * floor: with it set, a *clear* wrapper is refused — a relay can suppress the record that
+ * advertises the floor but cannot forge the origin's signature over a sealed mode+digest.
+ *
  * @param {any} wrapper the `{ manifest, manifestSignature, originRecord, payload }` shape
  * @param {{
  *   selfKeyId: string,       // keyId(this machine's public key)
@@ -196,11 +249,13 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
  *     admit: (m: any) => { ok: true } | { ok: false, reason: string },
  *   },
  *   authorizeOrigin: (origin: {originKeyId: string}) => boolean,
+ *   sealPrivateKey?: string, // this machine's X25519 private key (PEM); required for sealed
+ *   requireSealed?: boolean, // local floor: refuse a clear wrapper
  * }} deps
  * @returns {{ ok: true, body: any, originKeyId: string }
  *   | { ok: false, reason: string }}
  */
-export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin }) {
+export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, sealPrivateKey, requireSealed }) {
   if (!hasExactly(wrapper, WRAPPER_FIELDS)) return { ok: false, reason: "malformed" };
   const { manifest, manifestSignature, originRecord, payload } = wrapper;
 
@@ -218,7 +273,16 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin }
   // can make a valid message for us pass; a relay that changes one earns refusal.
   if (manifestProblem(manifest) !== null) return { ok: false, reason: "manifest" };
   if (manifest.destinationKeyId !== selfKeyId) return { ok: false, reason: "not-for-me" };
-  if (manifest.payloadMode !== "clear") return { ok: false, reason: "unsupported-mode" };
+  // Mode + local floor. `payloadMode` is a signed field, so these are safe pre-crypto
+  // rejections a relay cannot leverage: it can neither downgrade sealed→clear nor
+  // upgrade clear→sealed without breaking the manifest signature checked below.
+  if (manifest.payloadMode === "clear") {
+    if (requireSealed) return { ok: false, reason: "cleartext-refused" };
+  } else if (manifest.payloadMode === "sealed") {
+    if (!sealPrivateKey) return { ok: false, reason: "unsupported-mode" };
+  } else {
+    return { ok: false, reason: "unsupported-mode" };
+  }
   if (manifest.blockCount !== 1) return { ok: false, reason: "multi-block" };
   if (typeof payload !== "string") return { ok: false, reason: "payload" };
   if (payload.length > MAX_ROUTED_BODY_BASE64_LENGTH) return { ok: false, reason: "payload-too-large" };
@@ -279,13 +343,43 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin }
   if (bytes.toString("base64") !== payload) return { ok: false, reason: "payload" };
   if (payloadDigest(bytes) !== manifest.payloadDigest) return { ok: false, reason: "payload-digest" };
 
-  // Strict UTF-8 avoids Node's replacement-character decoding of malformed bytes.
-  // JSON may still parse `1e400` to Infinity, so enforce representability afterward.
+  // Recover the body. Clear: strict-UTF-8 JSON of the committed bytes. Sealed: the
+  // committed bytes are the sealed object; open it (verify-before-decrypt inside), then
+  // bind its signed sender to the authenticated manifest origin — the sealer must be the
+  // origin, not merely *some* key. Strict UTF-8 avoids replacement-character decoding;
+  // JSON may still parse `1e400` to Infinity, so representability is enforced after.
   let body;
-  try {
-    body = JSON.parse(UTF8.decode(bytes));
-  } catch {
-    return { ok: false, reason: "body" };
+  if (manifest.payloadMode === "sealed") {
+    let sealed;
+    try {
+      sealed = JSON.parse(UTF8.decode(bytes));
+    } catch {
+      return { ok: false, reason: "sealed" };
+    }
+    let opened;
+    try {
+      opened = openSigned(sealed, /** @type {string} */ (sealPrivateKey));
+    } catch {
+      return { ok: false, reason: "seal" };
+    }
+    let sealerKeyId;
+    try {
+      sealerKeyId = keyId(opened.from);
+    } catch {
+      return { ok: false, reason: "seal" };
+    }
+    if (sealerKeyId !== manifest.originKeyId) return { ok: false, reason: "seal-origin-mismatch" };
+    try {
+      body = JSON.parse(UTF8.decode(opened.plaintext));
+    } catch {
+      return { ok: false, reason: "body" };
+    }
+  } else {
+    try {
+      body = JSON.parse(UTF8.decode(bytes));
+    } catch {
+      return { ok: false, reason: "body" };
+    }
   }
   if (containsNonFiniteNumber(body)) return { ok: false, reason: "body" };
 
