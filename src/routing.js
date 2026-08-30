@@ -124,9 +124,15 @@ export function createRouter({
   async function relay(envelope, from = null) {
     const { payload } = envelope;
     const dest = N(envelope.dest);
+    // Outer routing fields arrive from an admitted-but-untrusted peer. Reject a
+    // non-string `dest` as a clean refusal here — otherwise it would reach the policy's
+    // distance hash and throw, turning a malformed envelope into an exception/log path.
+    if (typeof dest !== "string" || dest.length === 0) return { delivered: false, reason: "invalid dest", spent: 0 };
     const fromKey = from == null ? null : N(from);
-    const visited = (Array.isArray(envelope.visited) ? envelope.visited : []).map(N);
-    const origin = N(envelope.origin ?? visited[0] ?? self);
+    // Keep only string visited entries (a non-string would poison the path/distance too).
+    const visited = (Array.isArray(envelope.visited) ? envelope.visited : []).map(N).filter((v) => typeof v === "string");
+    const rawOrigin = N(envelope.origin ?? visited[0] ?? self);
+    const origin = typeof rawOrigin === "string" ? rawOrigin : self;
     const path = [...visited, self];
 
     if (dest === self) {

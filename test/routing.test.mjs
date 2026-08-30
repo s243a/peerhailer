@@ -239,3 +239,20 @@ test("a relayed message replayed with the same id is delivered once, not twice (
   await nodes.get("a").send("d", "hi", { id: "msg-1" }); // same id, replayed
   assert.equal(deliveries, 1, "the destination acted on the message once; the relayed replay was deduped");
 });
+
+test("a malformed outer envelope (non-string dest, junk visited) is refused, not thrown", async () => {
+  // A production-shaped greedy policy whose distance hashes the key: a non-string dest
+  // would throw inside it if it were ever reached. The engine must refuse first.
+  const { createHash } = await import("node:crypto");
+  const policy = greedyPolicy({ distance: xorDistanceOver((k) => createHash("sha256").update(k).digest("hex")) });
+  const { nodes } = net({ a: ["b"], b: ["a"] }, { policy });
+  const a = nodes.get("a");
+
+  assert.deepEqual(
+    await a.relay({ dest: { evil: true }, ttl: 4, budget: 8, visited: [], payload: "x" }),
+    { delivered: false, reason: "invalid dest", spent: 0 },
+  );
+  // A junk visited entry does not poison the path either — it routes as if absent.
+  const withJunkVisited = await a.relay({ dest: "b", ttl: 4, budget: 8, visited: [{ not: "a key" }], payload: "x" });
+  assert.equal(withJunkVisited.delivered, true, "the message still reaches b");
+});

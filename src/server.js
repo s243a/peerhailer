@@ -1263,13 +1263,21 @@ export function createDaemon({
       // half-swapped route table. The caller does the async work (rebuilding
       // plugins) *before* calling this; an await moved inside here would reopen
       // exactly that window.
+      // Do the potentially-throwing directory work FIRST — `adopt` rejects malformed
+      // state — so a bad reload leaves the OLD plugin set (and its policy, e.g. the
+      // confidentiality floor) whole, rather than installing a possibly-weaker new set
+      // and only then failing. The plugin swap below cannot throw (collectRoutes
+      // logs-and-skips), so once we are past adopt the reload commits cleanly.
+      if (state) directory.adopt(state);
+      if (nextProfiles) {
+        profiles = nextProfiles;
+        directory.useProfiles(nextProfiles);
+      }
       if (Array.isArray(nextPlugins)) {
-        // Build the replacement into a temporary *before* touching any live
-        // reference, then swap both at once — so a future validation that could
-        // reject the new set leaves the old one whole rather than half-swapped.
-        // Only after the swap are the replaced plugins stopped, best-effort and
-        // fire-and-forget (a sync throw or a rejected async stop() must not tear
-        // the reload, and awaiting here would break the no-await invariant above).
+        // Build the replacement into a temporary *before* touching any live reference,
+        // then swap both at once. Only after the swap are the replaced plugins stopped,
+        // best-effort and fire-and-forget (a sync throw or a rejected async stop() must
+        // not tear the reload, and awaiting here would break the no-await invariant).
         const nextRoutes = collectRoutes(nextPlugins, { log });
         const oldPlugins = plugins;
         plugins = nextPlugins;
@@ -1281,11 +1289,6 @@ export function createDaemon({
         const retired = oldPlugins.filter((plugin) => !nextPlugins.includes(plugin));
         Promise.allSettled(retired.map((plugin) => Promise.resolve().then(() => plugin.stop?.()))).catch(() => {});
       }
-      if (nextProfiles) {
-        profiles = nextProfiles;
-        directory.useProfiles(nextProfiles);
-      }
-      if (state) directory.adopt(state);
       log(`[daemon] reloaded: ${pluginRoutes.size} routes, ${Object.keys(profiles).length} profiles`);
       // A reload rebuilds plugin instances, so instance-owned state is reset — most
       // notably chat's replay nonce cache and command history. State a host injects

@@ -48,6 +48,18 @@ test("reload() swaps to the new plugins and stops the replaced ones", async () =
   await daemon.close();
 });
 
+test("a reload whose directory adopt throws leaves the old plugin set serving (not swapped)", async () => {
+  const stopped = [];
+  const daemon = daemonWith([{ name: "old", routes: [], stop: () => stopped.push("old") }]);
+  await daemon.listen({ port: 0 });
+  // Malformed state -> directory.adopt throws. Because adopt now runs BEFORE the plugin
+  // swap, the new (possibly weaker) plugin is never installed and the old one never retired.
+  assert.throws(() => daemon.reload({ plugins: [{ name: "new-weaker", routes: [] }], state: { admitted: 5 } }));
+  await tick();
+  assert.deepEqual(stopped, [], "the old plugin was neither swapped out nor stopped by the failed reload");
+  await daemon.close();
+});
+
 test("reload() stops only retired plugins — an instance carried into the new set keeps serving", async () => {
   const stopped = [];
   const shared = { name: "shared", routes: [], stop: () => stopped.push("shared") };

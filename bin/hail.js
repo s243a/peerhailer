@@ -712,10 +712,21 @@ switch (command) {
      * the result (advancing the closure `plugins`) only after `daemon.reload`
      * accepts it, so a failed build or reload leaves the old runtime serving.
      */
-    const rebuild = async () => {
-      const fresh = loadState(statePath);
-      const { plugins: nextPlugins } = await buildRuntime(fresh, runtimeDeps);
-      return { plugins: nextPlugins };
+    // Reload as one transaction over a SINGLE state snapshot: plugins, profiles, and the
+    // directory adopt all derive from the same generation, so a change landing mid-build
+    // cannot split the runtime (plugins built from one state, directory from another) —
+    // that change triggers its own reload. Build (async, unlocked), then commit
+    // (synchronous), advancing the closure `plugins` only after `daemon.reload` accepts,
+    // so a throw leaves the old set serving.
+    const applyReload = async () => {
+      const snapshot = loadState(statePath);
+      const { plugins: nextPlugins } = await buildRuntime(snapshot, runtimeDeps);
+      const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, snapshot), state: snapshot });
+      plugins = nextPlugins;
+      if (nextPlugins.some((plugin) => plugin.name === "route")) {
+        log(`[route] replay guard retained across reload`);
+      }
+      return result;
     };
 
     const daemon = createDaemon({
@@ -746,22 +757,7 @@ switch (command) {
         command: process.execPath,
         args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
       }),
-      onReload: async () => {
-        // Build (async, unlocked) then commit (synchronous). Re-read state at
-        // commit so a profile change that landed during the build is reflected —
-        // deriving profiles from the build-time state would resurrect a just-
-        // removed one (fail open). Advance the closure `plugins` only after
-        // `daemon.reload` accepts, in the same call stack, so a throw leaves it
-        // on the old set and no handler observes a half-swapped runtime.
-        const { plugins: nextPlugins } = await rebuild();
-        const freshState = loadState(statePath);
-        const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, freshState), state: freshState });
-        plugins = nextPlugins;
-        if (nextPlugins.some((plugin) => plugin.name === "route")) {
-          log(`[route] replay guard retained across reload`);
-        }
-        return result;
-      },
+      onReload: () => applyReload(),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,
       // so a change made at a terminal is not discarded by the next save here.
@@ -891,6 +887,21 @@ switch (command) {
     };
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
+    // Headless reload: a standalone `hail block/forget/rotate/seal accept/...` mutates the
+    // state file in a *separate* process, and without this a daemon with no control
+    // listener (no --ui) would keep serving its startup directory — still granting a
+    // blocked peer or sealing to a superseded key until a restart (which also crosses the
+    // session replay/Tier-1 boundary). `kill -HUP <pid>` reloads in place, no restart.
+    let reloading = false;
+    process.on("SIGHUP", () => {
+      if (reloading) return; // coalesce a burst of signals into one reload
+      reloading = true;
+      Promise.resolve()
+        .then(applyReload)
+        .then((r) => log(`[daemon] reloaded on SIGHUP: ${r.routes} routes, ${r.profiles} profiles`))
+        .catch((error) => log(`[daemon] SIGHUP reload failed (old runtime kept serving): ${error?.message ?? error}`))
+        .finally(() => { reloading = false; });
+    });
     break;
   }
 
