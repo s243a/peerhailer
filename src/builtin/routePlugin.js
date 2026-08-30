@@ -116,6 +116,11 @@ export function createRoutePlugin(deps) {
     }
     if (!usable) throw new Error("route plugin sealPrivateKey must be an X25519 private key");
   }
+  // Opting into the weaker Tier-1 key without a Tier-0 lookup would mean Tier 0 could
+  // never win — the opposite of the trust model. Require the lookup when Tier 1 is on.
+  if (deps.allowRecordCarried === true && typeof deps.tier0Seal !== "function") {
+    throw new Error("route plugin allowRecordCarried requires tier0Seal so Tier 0 can win");
+  }
 
   const deliver = deps.deliver;
   const rawRouter = createRouter({
@@ -131,7 +136,16 @@ export function createRoutePlugin(deps) {
         ...(deps.sealPrivateKey !== undefined ? { sealPrivateKey: deps.sealPrivateKey } : {}),
         requireSealed: deps.requireSealed === true,
       });
-      if (!opened.ok) return { [OPEN_REFUSAL]: opened.reason };
+      if (!opened.ok) {
+        // A floor refusal still teaches our sealing key, so a routed-only origin can
+        // learn it and retry sealed. Otherwise the floor deadlocks discovery: it
+        // demands sealing while refusing the clear probe that carries the key back.
+        if (opened.reason === "cleartext-refused") {
+          const record = signedDiscoveryRecord();
+          return record ? { [OPEN_REFUSAL]: opened.reason, [ROUTED_RECORD_FIELD]: record } : { [OPEN_REFUSAL]: opened.reason };
+        }
+        return { [OPEN_REFUSAL]: opened.reason };
+      }
       // Await the consumer before attaching: a consumer may return a promise, and
       // spreading that instead of its resolved response would corrupt the result.
       const response = await deliver(opened.body, {
@@ -144,24 +158,29 @@ export function createRoutePlugin(deps) {
   });
 
   /**
-   * Piggyback a signed, **key-only** self-record on a delivery response so the origin can
-   * learn our advertised sealing key (M2 Tier-1). Deliberately NOT our full record: it
-   * carries name, identity key, and sealing key — never our addresses. Discovery is *key*
-   * discovery; handing a routed origin (and every relay on the return path) our direct
-   * addresses would undercut F2F reachability.
-   *
-   * Attaches only to a plain-object response: spreading an array or a class instance (a
-   * consumer could return either, and the in-process self-delivery path never JSON-round-
-   * trips it) would corrupt it, so such a response is passed through unchanged.
+   * A signed, **key-only** self-record: name, identity key, and sealing key — never our
+   * addresses. Discovery is *key* discovery; handing a routed origin (and every relay on
+   * the return path) our direct addresses would undercut F2F reachability.
+   */
+  const signedDiscoveryRecord = () => {
+    const self = deps.selfRecord();
+    return signRecord(
+      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
+      deps.privateKey,
+    );
+  };
+
+  /**
+   * Piggyback the key-only self-record on a delivery response so the origin can learn our
+   * advertised sealing key (M2 Tier-1). Attaches only to a plain-object response:
+   * spreading an array or class instance (a consumer could return either, and the
+   * in-process self-delivery path never JSON-round-trips it) would corrupt it, so such a
+   * response is passed through unchanged.
    * @param {any} response
    */
   const attachDiscovery = (response) => {
     if (!isPlainObject(response)) return response;
-    const self = deps.selfRecord();
-    const signed = signRecord(
-      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
-      deps.privateKey,
-    );
+    const signed = signedDiscoveryRecord();
     return signed ? { ...response, [ROUTED_RECORD_FIELD]: signed } : response;
   };
 
@@ -191,13 +210,23 @@ export function createRoutePlugin(deps) {
     const refusalReason = typeof reason === "string" ? reason : publicReason;
     if (refusalReason === null) return result;
     const duplicate = refusalReason === "replay:duplicate" || result?.response?.duplicate === true;
+    // A floor refusal can carry the destination's key-only record (so discovery still
+    // works under the floor); preserve it when rebuilding the response, or the fix would
+    // hold multi-hop but be dropped on the single-hop/self-delivery path.
+    const record = result?.response?.[ROUTED_RECORD_FIELD];
     return {
       ...result,
       delivered: true,
       refused: true,
       ...(duplicate ? { duplicate: true } : {}),
       response: typeof reason === "string"
-        ? { received: false, refused: true, reason: refusalReason, ...(duplicate ? { duplicate: true } : {}) }
+        ? {
+            received: false,
+            refused: true,
+            reason: refusalReason,
+            ...(duplicate ? { duplicate: true } : {}),
+            ...(record ? { [ROUTED_RECORD_FIELD]: record } : {}),
+          }
         : result.response,
     };
   };

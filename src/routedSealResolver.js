@@ -24,6 +24,10 @@
  * @module routedSealResolver
  */
 
+/** The exact states each tier reports; anything else is a wiring bug and fails closed. */
+const TIER0_STATES = new Set(["verified", "conflict", "reverify", "unverified"]);
+const TIER1_STATES = new Set(["record-carried", "record-conflict", "none"]);
+
 /**
  * @param {{
  *   tier0: { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
@@ -34,10 +38,16 @@
  *   decision: "seal" | "refuse" | "cleartext",
  *   tier: 0 | 1 | null,
  *   key: string | null,
- *   state: "verified" | "record-carried" | "tier0-conflict" | "tier0-reverify" | "tier1-conflict" | "unverified",
+ *   state: "verified" | "record-carried" | "tier0-conflict" | "tier0-reverify" | "tier1-conflict" | "unverified" | "resolver-unknown",
  * }}
  */
 export function resolveRoutedSeal({ tier0, tier1, allowRecordCarried = false }) {
+  // Fail closed on any state this function does not recognise. Unreachable today
+  // (`sealState`/the store return exactly the known sets), but a future wiring bug at the
+  // one place that decides confidentiality must refuse, never fall through to cleartext.
+  if (!TIER0_STATES.has(tier0?.state)) {
+    return { decision: "refuse", tier: null, key: null, state: "resolver-unknown" };
+  }
   // Tier 0 wins outright when it holds a verified key.
   if (tier0.state === "verified" && tier0.key) {
     return { decision: "seal", tier: 0, key: tier0.key, state: "verified" };
@@ -55,6 +65,9 @@ export function resolveRoutedSeal({ tier0, tier1, allowRecordCarried = false }) 
   // consulted only on an explicit opt-in — a weaker, no-liveness key is never used by
   // default, and it never overrides Tier 0 (which we already handled above).
   if (allowRecordCarried) {
+    if (!TIER1_STATES.has(tier1?.state)) {
+      return { decision: "refuse", tier: null, key: null, state: "resolver-unknown" };
+    }
     if (tier1.state === "record-carried" && tier1.key) {
       return { decision: "seal", tier: 1, key: tier1.key, state: "record-carried" };
     }

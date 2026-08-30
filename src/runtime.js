@@ -65,7 +65,7 @@ export function hasControllerOffer(commands, tunnels) {
  *   identity: any,
  *   diagnostics: any,
  *   port?: number,
- *   routeDeps: () => any,
+ *   routeDeps: (state: any) => any,
  *   flags?: { chat?: boolean, route?: boolean },
  *   log?: (message: string) => void,
  * }} deps
@@ -88,7 +88,7 @@ export async function buildRuntime(state, { identity, diagnostics, port, routeDe
     ...(Object.keys(tunnels).length ? [createTunnelPlugin({ endpoints: tunnels, ownPorts: [ownPort] })] : []),
     ...(chat ? [createChatPlugin({ identity })] : []),
     ...(Object.keys(shares).length ? [createFilesPlugin({ shares })] : []),
-    ...(route ? [createRoutePlugin(routeDeps())] : []),
+    ...(route ? [createRoutePlugin(routeDeps(state))] : []),
     ...(Object.keys(services).length ? [createServicePlugin({ services })] : []),
     ...(hasLaunchableOffer(services, tunnels) || hasControllerOffer(commands, tunnels)
       ? [createOffersPlugin({ services, tunnels, commands })]

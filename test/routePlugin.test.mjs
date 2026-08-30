@@ -521,6 +521,7 @@ test("a Tier-1 conflict refuses the send rather than falling back to cleartext",
     forward: async () => assert.fail("a refused send must not forward"),
     routedKeyStore: store,
     allowRecordCarried: true,
+    tier0Seal: () => ({ state: "unverified", key: null }), // no walk to bob; Tier 1 in play
   }));
   assert.deepEqual(await pluginA.send(b.identity.publicKey, { x: 1 }), {
     delivered: false,
@@ -555,4 +556,40 @@ test("a misconfigured (non-X25519) sealPrivateKey is rejected at construction", 
     () => createRoutePlugin(cryptoDeps(a, { sealPrivateKey: a.identity.privateKey })), // Ed25519, not X25519
     /X25519/,
   );
+});
+
+test("a floored destination still teaches its key on refusal, so a routed origin can then seal", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  let deliveredBody;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+    allowRecordCarried: true,
+    tier0Seal: () => ({ state: "unverified", key: null }), // A never walked B
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    requireSealed: true, // the floor: B refuses cleartext
+    deliver: (body) => { deliveredBody = body; return { received: true }; },
+  }));
+
+  // A has no key for B, so the first send is clear — B refuses it, but the refusal
+  // still carries B's key-only record (otherwise the floor would deadlock discovery).
+  const refused = await pluginA.send(b.identity.publicKey, { probe: 1 });
+  assert.equal(refused.refused, true);
+  assert.equal(refused.response.reason, "cleartext-refused");
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried", "A learned B's key from the refusal");
+
+  // Now A holds B's key and, opted into Tier 1, seals the retry — which B accepts.
+  const sealed = await pluginA.send(b.identity.publicKey, { secret: "ok" });
+  assert.equal(sealed.delivered, true, `sealed retry delivered (${sealed.reason ?? ""})`);
+  assert.deepEqual(deliveredBody, { secret: "ok" });
+});
+
+test("opting into Tier 1 without a Tier-0 lookup is rejected at construction", () => {
+  const a = machine("alice");
+  assert.throws(() => createRoutePlugin(cryptoDeps(a, { allowRecordCarried: true })), /tier0Seal/);
 });

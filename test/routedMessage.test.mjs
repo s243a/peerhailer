@@ -236,7 +236,9 @@ test("wrap rejects a mismatched keypair and every non-serialisable top-level bod
 test("the total wrapper ceiling also bounds an unusually large signed self-record", () => {
   const a = machine("alice");
   const b = machine("bob");
-  const oversizedRecord = { ...a.self, note: "n".repeat(MAX_ROUTED_WRAPPER_BYTES) };
+  // The origin record is key-only, so a huge `note`/`addresses` are dropped — only the
+  // required `name` can bloat it, and the wrapper ceiling still catches that.
+  const oversizedRecord = { ...a.self, name: "n".repeat(MAX_ROUTED_WRAPPER_BYTES) };
   assert.throws(
     () => wrapRoutedMessage({
       self: oversizedRecord,
@@ -253,11 +255,11 @@ test("the total wrapper ceiling also bounds an unusually large signed self-recor
   // Edge of the classifier: the record with an empty payload field still fits,
   // but no JSON body can encode to fewer than four base64 characters. That is a
   // host-record fault, not a caller body error/HTTP 400.
-  const oneNote = wrap(a, b, 0, { self: { ...a.self, note: "n" } });
-  const oneNoteBytes = Buffer.byteLength(JSON.stringify(oneNote), "utf8");
-  const justImpossibleNoteLength = 1 + (MAX_ROUTED_WRAPPER_BYTES - oneNoteBytes) + 1;
+  const oneName = wrap(a, b, 0, { self: { ...a.self, name: "n" } });
+  const oneNameBytes = Buffer.byteLength(JSON.stringify(oneName), "utf8");
+  const justImpossibleNameLength = 1 + (MAX_ROUTED_WRAPPER_BYTES - oneNameBytes) + 1;
   assert.throws(
-    () => wrap(a, b, 0, { self: { ...a.self, note: "n".repeat(justImpossibleNoteLength) } }),
+    () => wrap(a, b, 0, { self: { ...a.self, name: "n".repeat(justImpossibleNameLength) } }),
     (error) => !(error instanceof RoutedMessageInputError) && /origin record exceeds/.test(error.message),
   );
 

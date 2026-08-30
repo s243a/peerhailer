@@ -157,7 +157,14 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
   }
   if (originKeyId !== signingKeyId) throw new Error("origin private key does not match self.publicKey");
 
-  const originRecord = signRecord(self, privateKey);
+  // Attach a KEY-ONLY origin record — name, identity key, sealing key, no addresses.
+  // Nothing on the receive path reads the origin's addresses (open exposes only body and
+  // originKeyId), so signing the full record would only leak our direct addresses to
+  // every relay, the same asymmetry M2 already closed on the destination side.
+  const originRecord = signRecord(
+    { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
+    privateKey,
+  );
   if (!originRecord) throw new Error("cannot sign the origin record");
   const bodyBytes = bodyToBytes(body);
 

@@ -585,9 +585,11 @@ switch (command) {
     // Likewise one Tier-1 discovery store for the process: a config reload must not
     // forget the sealing keys learned from routed responses this session.
     const routedKeyStore = createRoutedKeyStore();
-    // The routing plugin's deps read the *live* directory and identity, not stored
-    // config, so one builder serves both the start and reload plugin arrays.
-    const routeDeps = () => ({
+    // The routing plugin's deps read the *live* directory and identity; policy keys read
+    // from the *fresh* `state` buildRuntime passes (not the startup snapshot), so a reload
+    // honors an edited floor/opt-in like every other runtime input. One builder serves
+    // both the start and reload plugin arrays.
+    const routeDeps = (/** @type {any} */ state) => ({
       self: identity.publicKey,
       privateKey: identity.privateKey,
       selfRecord: () => directory.self,
@@ -605,9 +607,10 @@ switch (command) {
         return { state, key: directory.sealKeyFor(peer.name) };
       },
       // Operator policy: refuse a clear delivery (floor), and opt in to sealing to a
-      // weaker Tier-1 record-carried key. Both default off.
-      requireSealed: stored.requireSealedRouting === true || flags.requireSealed === true,
-      allowRecordCarried: stored.allowRecordCarried === true || flags.allowRecordCarried === true,
+      // weaker Tier-1 record-carried key. Both default off, read from the fresh state
+      // (flag can only turn on), so a reload picks up an edited value.
+      requireSealed: flags.requireSealed === true || state?.requireSealedRouting === true,
+      allowRecordCarried: flags.allowRecordCarried === true || state?.allowRecordCarried === true,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {

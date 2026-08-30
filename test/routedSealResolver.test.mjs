@@ -64,6 +64,20 @@ test("no key and no dispute is the only path to cleartext", () => {
   );
 });
 
+test("an unrecognised tier state fails closed — never cleartext", () => {
+  // A future wiring bug that produces an unknown state must refuse, not fall open.
+  assert.deepEqual(
+    resolveRoutedSeal({ tier0: t0("bogus"), tier1: t1("none"), allowRecordCarried: true }),
+    { decision: "refuse", tier: null, key: null, state: "resolver-unknown" },
+  );
+  assert.equal(resolveRoutedSeal({ tier0: {}, tier1: t1("none"), allowRecordCarried: true }).decision, "refuse");
+  // An unknown Tier-1 state under opt-in also refuses (Tier 0 unverified so Tier 1 is read).
+  assert.equal(
+    resolveRoutedSeal({ tier0: t0("unverified"), tier1: t1("weird"), allowRecordCarried: true }).state,
+    "resolver-unknown",
+  );
+});
+
 test("Tier 0 wins even when Tier 1 also holds a (different) key — no consult past Tier 0", () => {
   // The point of the single resolver: Tier 0 verified short-circuits before Tier 1 is read.
   const r = resolveRoutedSeal({

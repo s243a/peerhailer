@@ -32,9 +32,20 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
 - Endpoint rollout is a flag day until route-version negotiation exists. Old and new
   intermediate relays carry the opaque wrapper, but old/new destination behavior is
   not interoperable; upgrade destinations before originating M1 messages.
-- The threaded response is still unsigned. `delivered`, acknowledgements, and refusal
-  reasons are routing feedback, **not cryptographic proof that the destination acted**;
-  an intermediary can forge, alter, or suppress them. Signed receipts are later work.
+- The threaded response is still unsigned **and unsealed**. `delivered`, acknowledgements,
+  and refusal reasons are routing feedback, **not cryptographic proof that the destination
+  acted**; an intermediary can forge, alter, or suppress them. And M3b seals only the
+  *request* body — the consumer's response travels back through the same relays in the
+  clear. Today's consumer only acks, but the first content-returning consumer (a routed
+  `files get`) would send its payload back cleartext through the very relays the sealed
+  request bypassed; it must seal its own response. Signed/sealed receipts are later work.
+- Sealing to a **Tier-1** destination does not survive a restart. The record-carried key
+  store is session-scoped, so after a restart the first send to a Tier-1-only destination
+  resolves `cleartext` (no key, no dispute) — and that first send is also the
+  re-discovery vehicle, so the payload that was sealed pre-restart goes out clear once.
+  Tier-0 peers are protected by `sealRequired`'s durable floor; Tier-1 peers have no
+  equivalent until durable observation (M3a). The destination's own floor is the only
+  restart-safe backstop today.
 
 ## The corrected spine — two independent roots
 
@@ -158,8 +169,10 @@ revocation than Tier 0.
 
 **Policy: default verified-only** for confidential routed content; Tier-1 is an explicit
 operator opt-in (`allow-record-carried`). When Tier-1 is used, surface *before*
-transmission — tier, sealing-key fingerprint, signed-record age, the path that supplied
-it, and the absence of a liveness proof — and **do not show the Tier-0 lock indicator**.
+transmission — tier, sealing-key fingerprint, and the absence of a liveness proof — and
+**do not show the Tier-0 lock indicator**. (No record *age* is surfaced: a relay selects
+which past record it replays, so the age would be an attacker-chosen value wearing a
+freshness label.)
 State model and rules: keep `record-carried` and `record-conflict` distinct from the
 Tier-0 `verified`/`reverify`/`conflict` states; Tier 0 always wins over Tier 1; a
 matching Tier-1 record adds no authority; differing Tier-1 records cause Tier-1 refusal
@@ -176,9 +189,12 @@ record, replay an older one lacking the floor, or hide the current policy, yet c
 make the destination accept cleartext if the destination checks its **current local
 policy at delivery**:
 
-1. destination stores `requireSealedRouting` locally;
-2. the field rides its signed public record (advisory to honest senders);
-3. the signed manifest binds `payloadMode`;
+1. destination stores `requireSealedRouting` locally (**implemented**);
+2. the field rides its signed public record (advisory to honest senders) — **not yet
+   implemented**: the discovery record is key-only, so an honest sender cannot pre-flight
+   the floor and instead learns it from a `cleartext-refused` refusal (which now carries
+   the destination's key so the sender can retry sealed);
+3. the signed manifest binds `payloadMode` (**implemented**);
 4. the destination rejects `payloadMode = clear` whenever its local floor requires
    sealing — the local check wins over any record a sender presents;
 5. a relay cannot turn sealed content into valid cleartext (it cannot produce the
@@ -252,12 +268,14 @@ destination-side change; a replayed remote record never lowers local enforcement
     a loud refusal is also a remote oracle — a relay replays a stale record and learns
     sealed-vs-refused; inherent to any fail-loud design, one line in the doc, low.)
   - **A single resolver, `{tier, key, state}`, so no call site can consult Tier-1 while a
-    Tier-0 key exists.** "Tier 0 always wins" is a comment today (the read side has no
-    consumers); M3b must make it code.
-  - **A successful Tier-0 `bindSealKey`/`acceptSealKey` must `routedKeyStore.forget(
-    keyId(peer.publicKey))`** so a stale Tier-1 conflict cannot shadow the now-verified
-    key. Session-scoped, so today a restart clears it; wire it when the composition layer
-    lands.
+    Tier-0 key exists.** Implemented (`src/routedSealResolver.js`); "Tier 0 always wins"
+    is now code, and an unrecognised state fails closed.
+  - **Tier-0 supersedes a Tier-1 entry.** Implemented *lazily*: `send` calls
+    `routedKeyStore.forget(destKeyId)` whenever Tier 0 has any posture
+    (`state !== "unverified"`). This is sufficient because the single resolver already
+    makes a stale Tier-1 entry unreadable once Tier 0 has posture — the forget is hygiene
+    (keeping the surface honest), not correctness. A walk-triggered forget would clear it
+    a send earlier but needs the store threaded into the walk path; deferred.
 - **M4+** — chunking, cached source routes, reassembly quotas, later anonymity.
 
 ## The observation seam (M3a)
