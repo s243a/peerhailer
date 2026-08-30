@@ -221,7 +221,15 @@ destination-side change; a replayed remote record never lowers local enforcement
 - **M3a — authenticated-origin capability seam.** The general durable observation API,
   with a request-scoped authenticated-origin proof (below). Built and testable *before*
   it is load-bearing.
-- **M3b — sealed routed payload.** Encrypt the exact payload bytes to a Tier-0 (or
+- **M3b — sealed routed payload. Implemented on `routing-m3b-sealed`.** `wrap` seals the
+  body to the destination's X25519 key signed by the origin identity; the manifest commits
+  to the ciphertext and `payloadMode:"sealed"`. `open` runs every M1 gate first, then
+  decrypts and binds the seal's signer to the authenticated manifest origin. `send`
+  resolves the seal target through the single `{tier,key,state}` resolver (Tier 0 wins,
+  Tier 1 opt-in, a conflict at either tier refuses — never cleartext), and the local floor
+  (`requireSealed`) refuses a clear delivery. F2 lands (a Tier-0 posture forgets Tier 1);
+  the seal key is validated at construction; a live A→B→D Tier-1 test proves relays carry
+  only ciphertext. Encrypt the exact payload bytes to a Tier-0 (or
   explicitly permitted Tier-1) key; **keep the manifest signature *outside* the seal,
   committing to the ciphertext** — moving it inside breaks verify-before-decrypt and is
   circular (it cannot commit to a ciphertext it is inside). Header privacy, if ever
