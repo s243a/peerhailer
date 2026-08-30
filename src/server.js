@@ -1058,6 +1058,38 @@ export function createDaemon({
         }
       }
 
+      // Discover a routed destination's sealing key with a DATA-FREE public probe (no
+      // application data leaves this node), then report the pending fingerprint to approve.
+      // The routed key store is in-memory in this daemon, so discovery/approval are live
+      // control operations, not state-file edits like Tier-0 `hail seal accept`.
+      if (scope === "control" && (url.pathname === "/api/route/discover" || url.pathname === "/api/route/seal") && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = await readJson(request);
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        const dest = String(body.dest);
+        if (url.pathname === "/api/route/discover") {
+          try {
+            await router.send(dest, null, { public: true });
+          } catch (error) {
+            if (error instanceof RoutedMessageInputError) return send(response, 400, { error: error.message });
+            throw error;
+          }
+        }
+        return send(response, 200, { state: router.routedSealState(dest), detail: router.routedSealDetail(dest) });
+      }
+
+      // Approve a discovered Tier-1 key for sealing — the manual gate. Optionally pinned to
+      // the fingerprint the operator reviewed, so an approval cannot race a changed key.
+      if (scope === "control" && url.pathname === "/api/route/seal-approve" && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = await readJson(request);
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        const result = router.approveRoutedSeal(String(body.dest), typeof body.sealKey === "string" ? body.sealKey : undefined);
+        return send(response, result.ok ? 200 : 409, result);
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.

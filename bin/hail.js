@@ -615,10 +615,11 @@ switch (command) {
         directory.sealForIdentity
           ? directory.sealForIdentity(destKey)
           : { state: /** @type {"unverified"} */ ("unverified"), key: null },
-      // Operator policy: refuse a clear delivery (the confidentiality floor). Read from
-      // the fresh state (flag can only turn on), so a reload picks up an edited value.
+      // Operator policy: refuse a clear delivery (the confidentiality floor). The
+      // `--require-sealed` flag (hyphenated, as the parser keys them) can only turn it on;
+      // otherwise it reads from the fresh state, so a reload picks up an edited value.
       // Tier-1 keys become usable through explicit per-key approval, not a global opt-in.
-      requireSealed: flags.requireSealed === true || state?.requireSealedRouting === true,
+      requireSealed: flags["require-sealed"] === true || state?.requireSealedRouting === true,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {

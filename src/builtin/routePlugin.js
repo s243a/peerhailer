@@ -320,7 +320,9 @@ export function createRoutePlugin(deps) {
     if (opts.budget !== undefined) routeOptions.budget = opts.budget;
     const result = normalizeOpenResult(await rawRouter.send(dest, wrapper, routeOptions));
     observeDiscovery(destinationKeyId, result);
-    return result;
+    // Surface the confidentiality decision so a caller sees whether it was sealed and at
+    // which tier — not just that it was delivered (the review's pre-send disclosure).
+    return { ...result, seal: { decision: target.decision, tier: target.tier, state: target.state } };
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as
@@ -409,5 +411,9 @@ export function createRoutePlugin(deps) {
     /** Host-only: originate a routed message toward `dest`. */
     send,
     router,
+    // Host/control-facing routed-seal surfaces (the control endpoints call these).
+    routedSealState: router.routedSealState,
+    routedSealDetail: router.routedSealDetail,
+    approveRoutedSeal: router.approveRoutedSeal,
   };
 }
