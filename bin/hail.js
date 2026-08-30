@@ -585,6 +585,16 @@ switch (command) {
     // Likewise one Tier-1 discovery store for the process: a config reload must not
     // forget the sealing keys learned from routed responses this session.
     const routedKeyStore = createRoutedKeyStore();
+    // A Tier-0 event (walk, accept, rotation, forget) supersedes any discovered Tier-1
+    // key for that identity — drop it synchronously so a stale/retired key can never be
+    // sealed to in the window before the next send would lazily clear it.
+    directory.setSealPostureListener?.((/** @type {string} */ publicKey) => {
+      try {
+        routedKeyStore.forget(routeKeyId(publicKey));
+      } catch {
+        /* a non-key input cannot have a routed entry to forget */
+      }
+    });
     // The routing plugin's deps read the *live* directory and identity; policy keys read
     // from the *fresh* `state` buildRuntime passes (not the startup snapshot), so a reload
     // honors an edited floor/opt-in like every other runtime input. One builder serves
@@ -598,14 +608,13 @@ switch (command) {
       // M3b confidentiality. `send` seals to a routed destination's key when it has one;
       // `deliver` opens a sealed block with this machine's X25519 key.
       sealPrivateKey: /** @type {string} */ (identity.sealPrivateKey),
-      // Tier-0 (walk-verified) sealing key for a routed destination, by its identity key.
-      // Routed destinations are keys, not names, so find the admitted peer that proved it.
-      tier0Seal: (/** @type {string} */ destKey) => {
-        const peer = directory.getByKey?.(destKey);
-        if (!peer) return { state: /** @type {"unverified"} */ ("unverified"), key: null };
-        const state = /** @type {"verified" | "conflict" | "reverify" | "unverified"} */ (directory.sealState(peer.name));
-        return { state, key: directory.sealKeyFor(peer.name) };
-      },
+      // Tier-0 (walk-verified) sealing posture for a routed destination, aggregated across
+      // EVERY admitted name that proves this identity key — so a stale or unverified alias
+      // cannot hide a verified one, and a conflict among aliases fails closed.
+      tier0Seal: (/** @type {string} */ destKey) =>
+        directory.sealForIdentity
+          ? directory.sealForIdentity(destKey)
+          : { state: /** @type {"unverified"} */ ("unverified"), key: null },
       // Operator policy: refuse a clear delivery (the confidentiality floor). Read from
       // the fresh state (flag can only turn on), so a reload picks up an edited value.
       // Tier-1 keys become usable through explicit per-key approval, not a global opt-in.
