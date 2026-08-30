@@ -15,10 +15,15 @@ import {
 } from "../src/builtin/routePlugin.js";
 import { generateIdentity, normalizeKey } from "../src/identity.js";
 import { signRecord } from "../src/peerRecord.js";
+import { createRoutedKeyStore } from "../src/routedKeyStore.js";
 import { REFUSE } from "../src/plugins.js";
 import { keyId } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { wrapRoutedMessage } from "../src/routedMessage.js";
+
+/** A signed key-only record for `m` advertising `sealPublicKey` (default its own). */
+const recordOf = (m, sealPublicKey = m.identity.sealPublicKey) =>
+  signRecord({ name: m.name, publicKey: m.identity.publicKey, sealPublicKey, addresses: [], lastSeen: null }, m.identity.privateKey);
 
 const T = 1_700_000_000_000;
 const machine = (name) => {
@@ -469,4 +474,85 @@ test("recursive route searches have per-caller and global in-flight ceilings", a
 
   const afterRelease = await host.plugin.send(destination.identity.publicKey, { host: "after" });
   assert.doesNotMatch(afterRelease.reason ?? "", /in flight/, "finally releases capacity after work settles");
+});
+
+test("send seals to a Tier-0 verified key and the destination decrypts it", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  let deliveredBody;
+  let forwarded;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => {
+      forwarded = envelope;
+      return pluginB.router.relay(envelope, a.identity.publicKey);
+    },
+    // A holds a walk-verified Tier-0 sealing key for bob.
+    tier0Seal: (dest) =>
+      keyId(dest) === keyId(b.identity.publicKey)
+        ? { state: "verified", key: b.identity.sealPublicKey }
+        : { state: "unverified", key: null },
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    deliver: (body) => { deliveredBody = body; return { received: true }; },
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { secret: "s" });
+  assert.equal(res.delivered, true);
+  assert.deepEqual(deliveredBody, { secret: "s" }, "bob decrypted the sealed body");
+  assert.equal(forwarded.payload.manifest.payloadMode, "sealed", "the wrapper on the wire was sealed");
+});
+
+test("a Tier-1 conflict refuses the send rather than falling back to cleartext", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const stale = generateIdentity();
+  const store = createRoutedKeyStore();
+  const bKeyId = keyId(b.identity.publicKey);
+  store.observe(bKeyId, recordOf(b)); // bob's real key
+  store.observe(bKeyId, recordOf(b, stale.sealPublicKey)); // a second, different key -> conflict
+  assert.equal(store.recordState(bKeyId), "record-conflict");
+
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async () => assert.fail("a refused send must not forward"),
+    routedKeyStore: store,
+    allowRecordCarried: true,
+  }));
+  assert.deepEqual(await pluginA.send(b.identity.publicKey, { x: 1 }), {
+    delivered: false,
+    reason: "seal-refused:tier1-conflict",
+    spent: 0,
+  });
+});
+
+test("the destination floor refuses a clear routed delivery", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+  }));
+  // Bob requires sealing; A has no key for bob, so the send is clear and bob refuses it.
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    requireSealed: true,
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 });
+  assert.equal(res.refused, true);
+  assert.equal(res.response.reason, "cleartext-refused");
+});
+
+test("a misconfigured (non-X25519) sealPrivateKey is rejected at construction", () => {
+  const a = machine("alice");
+  assert.throws(
+    () => createRoutePlugin(cryptoDeps(a, { sealPrivateKey: a.identity.privateKey })), // Ed25519, not X25519
+    /X25519/,
+  );
 });

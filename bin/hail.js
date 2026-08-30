@@ -593,6 +593,21 @@ switch (command) {
       selfRecord: () => directory.self,
       replayGuard: routeReplayGuard,
       routedKeyStore,
+      // M3b confidentiality. `send` seals to a routed destination's key when it has one;
+      // `deliver` opens a sealed block with this machine's X25519 key.
+      sealPrivateKey: /** @type {string} */ (identity.sealPrivateKey),
+      // Tier-0 (walk-verified) sealing key for a routed destination, by its identity key.
+      // Routed destinations are keys, not names, so find the admitted peer that proved it.
+      tier0Seal: (/** @type {string} */ destKey) => {
+        const peer = directory.getByKey?.(destKey);
+        if (!peer) return { state: /** @type {"unverified"} */ ("unverified"), key: null };
+        const state = /** @type {"verified" | "conflict" | "reverify" | "unverified"} */ (directory.sealState(peer.name));
+        return { state, key: directory.sealKeyFor(peer.name) };
+      },
+      // Operator policy: refuse a clear delivery (floor), and opt in to sealing to a
+      // weaker Tier-1 record-carried key. Both default off.
+      requireSealed: stored.requireSealedRouting === true || flags.requireSealed === true,
+      allowRecordCarried: stored.allowRecordCarried === true || flags.allowRecordCarried === true,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {

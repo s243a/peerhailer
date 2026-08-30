@@ -23,6 +23,7 @@ import { keyId } from "../routeManifest.js";
 import { createRouteReplayGuard, DEFAULT_MAX_VALIDITY_MS } from "../routeReplayGuard.js";
 import { openRoutedMessage, wrapRoutedMessage } from "../routedMessage.js";
 import { createRoutedKeyStore } from "../routedKeyStore.js";
+import { resolveRoutedSeal } from "../routedSealResolver.js";
 import { signRecord } from "../peerRecord.js";
 import { createRouter } from "../routing.js";
 import { REFUSE } from "../plugins.js";
@@ -73,6 +74,10 @@ const isPlainObject = (v) => {
  *   now?: () => number,
  *   replayGuard?: ReturnType<typeof createRouteReplayGuard>,
  *   routedKeyStore?: ReturnType<typeof createRoutedKeyStore>,
+ *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); enables opening sealed
+ *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
+ *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
+ *   allowRecordCarried?: boolean, // opt in to sealing to a Tier-1 record-carried key
  *   newMessageId?: () => string,
  *   messageValidityMs?: number,
  * }} deps
@@ -100,6 +105,17 @@ export function createRoutePlugin(deps) {
   if (!Number.isSafeInteger(messageValidityMs) || messageValidityMs <= 0 || messageValidityMs > DEFAULT_MAX_VALIDITY_MS) {
     throw new Error(`route message validity must be 1..${DEFAULT_MAX_VALIDITY_MS} ms`);
   }
+  // Validate the sealing key once here, so a misconfigured key is a clear construction
+  // error rather than surfacing later as every sealed delivery failing to "open".
+  if (deps.sealPrivateKey !== undefined) {
+    let usable = false;
+    try {
+      usable = createPrivateKey(deps.sealPrivateKey).asymmetricKeyType === "x25519";
+    } catch {
+      usable = false;
+    }
+    if (!usable) throw new Error("route plugin sealPrivateKey must be an X25519 private key");
+  }
 
   const deliver = deps.deliver;
   const rawRouter = createRouter({
@@ -112,6 +128,8 @@ export function createRoutePlugin(deps) {
         selfKeyId,
         guard: replayGuard,
         authorizeOrigin: deps.authorizeOrigin,
+        ...(deps.sealPrivateKey !== undefined ? { sealPrivateKey: deps.sealPrivateKey } : {}),
+        requireSealed: deps.requireSealed === true,
       });
       if (!opened.ok) return { [OPEN_REFUSAL]: opened.reason };
       // Await the consumer before attaching: a consumer may return a promise, and
@@ -246,6 +264,22 @@ export function createRoutePlugin(deps) {
     } catch {
       return { delivered: false, reason: "invalid destination identity key", spent: 0 };
     }
+
+    // Decide confidentiality before wrapping: Tier 0 (walk-verified) wins, Tier 1
+    // (record-carried) is opt-in, and a conflict at either tier REFUSES rather than
+    // sending cleartext — a relay must not be able to strip a seal by forging a dispute.
+    const tier0 = deps.tier0Seal ? deps.tier0Seal(dest) : { state: /** @type {"unverified"} */ ("unverified"), key: null };
+    const target = resolveRoutedSeal({
+      tier0,
+      tier1: { state: routedKeyStore.recordState(destinationKeyId), key: routedKeyStore.recordSealKey(destinationKeyId) },
+      allowRecordCarried: deps.allowRecordCarried === true,
+    });
+    // F2: once Tier 0 knows this peer's sealing posture, its record-carried Tier-1 entry
+    // is moot — drop it so a stale conflict cannot linger on the surface or in a resolver.
+    if (tier0.state !== "unverified") routedKeyStore.forget(destinationKeyId);
+    if (target.decision === "refuse") return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0 };
+    const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
+
     const wrapper = wrapRoutedMessage({
       self: deps.selfRecord(),
       privateKey: deps.privateKey,
@@ -254,6 +288,7 @@ export function createRoutePlugin(deps) {
       messageId: newMessageId(),
       now: now(),
       validityMs: messageValidityMs,
+      ...(sealTo ? { sealTo } : {}),
     });
     const routeOptions = /** @type {{ttl?: number, budget?: number, id?: any}} */ ({ id: null });
     if (opts.ttl !== undefined) routeOptions.ttl = opts.ttl;
