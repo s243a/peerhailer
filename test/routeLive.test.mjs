@@ -79,7 +79,7 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
   dir.d.admit({ name: "b", publicKey: id.b.publicKey }, { profile: "r" });
 
   // A cannot reach D directly — B is A's only neighbour, and B knows D.
-  const res = await plugin.a.send(norm(id.d.publicKey), "across the graph");
+  const res = await plugin.a.send(norm(id.d.publicKey), "across the graph", { public: true });
   assert.equal(res.delivered, true, `delivered (${res.reason ?? ""})`);
   assert.equal(res.response.at, "d", "delivered at D");
   assert.equal(res.response.echo, "across the graph", "D got the payload");
@@ -90,19 +90,19 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
   // M2 Tier-1 discovery: D piggybacked its signed self-record on the response, so A —
   // which never walked to D — now holds D's advertised sealing key, record-carried.
   assert.equal(plugin.a.router.routedSealState(norm(id.d.publicKey)), "record-carried");
-  assert.equal(plugin.a.router.routedSealKey(norm(id.d.publicKey)), norm(id.d.sealPublicKey), "A learned D's Tier-1 seal key");
+  assert.equal(plugin.a.router.routedSealDetail(norm(id.d.publicKey))?.sealKey, norm(id.d.sealPublicKey), "A discovered D's Tier-1 seal key (pending)");
 
   // The advertised maximum serialized body fits through the actual signed hail
   // request (whose own limit is 1 MB), not only through an in-memory wrapper.
   const emptyShapeBytes = Buffer.byteLength(JSON.stringify({ blob: "" }), "utf8");
   const nearLimit = { blob: "x".repeat(MAX_ROUTED_BODY_BYTES - emptyShapeBytes) };
   assert.equal(Buffer.byteLength(JSON.stringify(nearLimit), "utf8"), MAX_ROUTED_BODY_BYTES);
-  const large = await plugin.a.send(norm(id.d.publicKey), nearLimit);
+  const large = await plugin.a.send(norm(id.d.publicKey), nearLimit, { public: true });
   assert.equal(large.delivered, true, `maximum-size body crossed A -> B -> D (${large.reason ?? ""})`);
   assert.equal(large.response.echo.blob.length, nearLimit.blob.length);
 
   // And a message to an unreachable key fails cleanly rather than looping.
   const gone = generateIdentity();
-  const miss = await plugin.a.send(norm(gone.publicKey), "nowhere", { ttl: 5 });
+  const miss = await plugin.a.send(norm(gone.publicKey), "nowhere", { ttl: 5, public: true });
   assert.equal(miss.delivered, false, "no route to an unknown key");
 });

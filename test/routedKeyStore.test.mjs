@@ -1,9 +1,10 @@
 /**
- * Tier-1 record-carried sealing keys (M2 discovery). What matters: a signed self-record
- * whose identity equals the routing target contributes its sealing key; a record for a
- * different identity, one with no sealing key, or a malformed one contributes nothing;
- * two differing keys for one target become a sticky conflict that refuses to pick; and
- * the store stays session-bounded (evicts, forgets) without ever claiming Tier-0 trust.
+ * Discovered sealing keys for routed destinations. What matters: a signed self-record
+ * whose identity equals the routing target contributes a PENDING key that is not usable
+ * for sealing until approved; a record for a different identity, one with no sealing key,
+ * or a malformed one contributes nothing; two differing keys become a sticky conflict
+ * that refuses to pick (and voids approval); and the store stays session-bounded, keeping
+ * approved keys and conflicts under capacity pressure while evicting pending entries.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -38,13 +39,49 @@ const recordOf = (m, { sealPublicKey = m.sealPublicKey, lastSeen } = {}) =>
     m.id.privateKey,
   );
 
-test("a signed record whose identity is the target contributes its sealing key", () => {
+test("a discovered key is pending until approved, then usable", () => {
   const store = createRoutedKeyStore();
   const d = machine("dest");
   assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
-  assert.equal(store.recordSealKey(d.keyId), d.sealPublicKey);
   assert.equal(store.recordState(d.keyId), "record-carried");
-  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest" });
+  assert.equal(store.recordSealKey(d.keyId), null, "a pending key is not usable for sealing");
+  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest", approved: false });
+  // Approve it -> now usable, and re-observing keeps it approved.
+  assert.deepEqual(store.approve(d.keyId), { ok: true, sealKey: d.sealPublicKey });
+  assert.equal(store.recordState(d.keyId), "record-approved");
+  assert.equal(store.recordSealKey(d.keyId), d.sealPublicKey);
+  assert.equal(store.observe(d.keyId, recordOf(d)), "record-approved");
+});
+
+test("approval needs a matching fingerprint and is void on conflict or an unknown target", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  const other = generateIdentity();
+  assert.deepEqual(store.approve(d.keyId), { ok: false, reason: "unknown" }); // nothing discovered
+  store.observe(d.keyId, recordOf(d));
+  assert.deepEqual(store.approve(d.keyId, normalizeKey(other.sealPublicKey)), { ok: false, reason: "mismatch" });
+  assert.equal(store.recordState(d.keyId), "record-carried", "a mismatched approval does not take");
+  assert.deepEqual(store.approve(d.keyId, d.sealPublicKey), { ok: true, sealKey: d.sealPublicKey });
+  // A later differing record voids the approval and cannot be re-approved past the conflict.
+  const stale = generateIdentity();
+  store.observe(d.keyId, recordOf(d, { sealPublicKey: stale.sealPublicKey }));
+  assert.equal(store.recordState(d.keyId), "record-conflict");
+  assert.deepEqual(store.approve(d.keyId), { ok: false, reason: "conflict" });
+  assert.equal(store.recordSealKey(d.keyId), null);
+});
+
+test("an approved key survives capacity pressure, like a conflict", () => {
+  const store = createRoutedKeyStore({ maxEntries: 2 });
+  const t = machine("t");
+  const u = machine("u");
+  const v = machine("v");
+  store.observe(t.keyId, recordOf(t));
+  store.approve(t.keyId); // approved -> sticky
+  store.observe(u.keyId, recordOf(u)); // pending
+  store.observe(v.keyId, recordOf(v)); // full: evicts u (pending), keeps approved t
+  assert.equal(store.recordState(t.keyId), "record-approved", "the approved key was preserved");
+  assert.equal(store.recordState(u.keyId), "none", "the pending entry was evicted instead");
+  assert.equal(store.recordState(v.keyId), "record-carried");
 });
 
 test("a record for a different identity than the target is not stored", () => {
@@ -85,7 +122,7 @@ test("the same sealing key observed again adds no authority and no second entry"
   assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
   assert.equal(store.observe(d.keyId, recordOf(d)), "record-carried");
   assert.equal(store.size(), 1);
-  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest" });
+  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest", approved: false });
 });
 
 test("a malformed or unsigned envelope contributes nothing", () => {

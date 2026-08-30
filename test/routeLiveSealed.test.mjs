@@ -41,8 +41,7 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
       neighbors: () => dir[k].listAdmitted().map((p) => norm(p.publicKey)),
       isBlocked: () => false,
       authorizeOrigin: () => true,
-      // A opts into Tier-1 sealing; D can open sealed blocks with its X25519 key.
-      ...(k === "a" ? { allowRecordCarried: true } : {}),
+      // D can open sealed blocks with its X25519 key.
       ...(k === "d" ? { sealPrivateKey: id.d.sealPrivateKey } : {}),
       // Tier-0 lookup by identity (none of these peers has walked D's sealing key).
       tier0Seal: (destKey) => {
@@ -80,13 +79,17 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
   dir.b.admit({ name: "d", publicKey: id.d.publicKey, addresses: [{ value: `https://127.0.0.1:${hail.d[0].port}` }] }, { profile: "r" });
   dir.d.admit({ name: "b", publicKey: id.b.publicKey }, { profile: "r" });
 
-  // Round 1 (clear): A cannot address D and has no key for it, so this goes cleartext —
-  // and A learns D's sealing key from the record D piggybacks on the response (M2).
-  const probe = await plugin.a.send(norm(id.d.publicKey), "clear probe");
-  assert.equal(probe.delivered, true, `clear probe delivered (${probe.reason ?? ""})`);
-  assert.equal(plugin.a.router.routedSealState(norm(id.d.publicKey)), "record-carried", "A learned D's Tier-1 key");
+  // A confidential send would refuse (no key). An explicit PUBLIC, data-free probe carries
+  // no application data and discovers D's sealing key from the record D piggybacks back.
+  const probe = await plugin.a.send(norm(id.d.publicKey), null, { public: true });
+  assert.equal(probe.delivered, true, `discovery probe delivered (${probe.reason ?? ""})`);
+  assert.equal(plugin.a.router.routedSealState(norm(id.d.publicKey)), "record-carried", "A discovered D's key (pending)");
 
-  // Round 2 (sealed): now that A holds D's key and opted into Tier 1, the send seals.
+  // A confidential send still refuses until the operator approves the discovered key.
+  assert.equal((await plugin.a.send(norm(id.d.publicKey), { secret: 1 })).reason, "seal-refused:tier1-pending");
+  assert.equal(plugin.a.router.approveRoutedSeal(norm(id.d.publicKey)).ok, true, "operator approves D's key");
+
+  // Round 2 (sealed): now that A holds an APPROVED key, the confidential send seals.
   const marker = "top-secret-plaintext-marker";
   relayedToD = null;
   const sealedRes = await plugin.a.send(norm(id.d.publicKey), { secret: marker });

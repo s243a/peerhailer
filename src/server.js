@@ -1037,7 +1037,14 @@ export function createDaemon({
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
         try {
-          const result = await router.send(String(body.dest), body.payload, { ttl: body?.ttl, budget: body?.budget });
+          // Confidential by default: a send with no usable key is refused, never sent in
+          // the clear. `public: true` is the explicit opt-out for non-sensitive payloads
+          // (and the way a data-free discovery probe is sent).
+          const result = await router.send(String(body.dest), body.payload, {
+            ttl: body?.ttl,
+            budget: body?.budget,
+            public: body?.public === true,
+          });
           if (result?.reason === "invalid destination identity key") return send(response, 400, { error: result.reason });
           return send(response, 200, result);
         } catch (error) {

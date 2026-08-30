@@ -606,11 +606,10 @@ switch (command) {
         const state = /** @type {"verified" | "conflict" | "reverify" | "unverified"} */ (directory.sealState(peer.name));
         return { state, key: directory.sealKeyFor(peer.name) };
       },
-      // Operator policy: refuse a clear delivery (floor), and opt in to sealing to a
-      // weaker Tier-1 record-carried key. Both default off, read from the fresh state
-      // (flag can only turn on), so a reload picks up an edited value.
+      // Operator policy: refuse a clear delivery (the confidentiality floor). Read from
+      // the fresh state (flag can only turn on), so a reload picks up an edited value.
+      // Tier-1 keys become usable through explicit per-key approval, not a global opt-in.
       requireSealed: flags.requireSealed === true || state?.requireSealedRouting === true,
-      allowRecordCarried: flags.allowRecordCarried === true || state?.allowRecordCarried === true,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {

@@ -104,7 +104,7 @@ test("send wraps once, relays opaquely, and delivers only the authenticated orig
     },
   }));
 
-  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" });
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
   assert.equal(result.delivered, true);
   assert.deepEqual(responseBody(result.response), { received: true, echo: { hello: "graph" } });
   assert.deepEqual(delivered.body, { hello: "graph" });
@@ -114,7 +114,7 @@ test("send wraps once, relays opaquely, and delivers only the authenticated orig
   assert.match(wire.payload.manifest.messageId, /^[A-Za-z0-9_-]{22}$/, "16 random bytes, base64url");
   assert.equal(typeof wire.payload.payload, "string", "the engine carries the signed wrapper opaquely");
 
-  const local = await pluginB.send(b.identity.publicKey, { hello: "self" });
+  const local = await pluginB.send(b.identity.publicKey, { hello: "self" }, { public: true });
   assert.equal(local.delivered, true, "self-send passes through the same wrap/open gates");
   assert.equal(delivered.meta.originKeyId, keyId(b.identity.publicKey));
 });
@@ -132,13 +132,15 @@ test("the origin learns the destination's Tier-1 sealing key from its piggybacke
   // Before any exchange, alice holds no routed sealing key for bob.
   assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "none");
 
-  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" });
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
   assert.equal(result.delivered, true);
   assert.ok(result.response[ROUTED_RECORD_FIELD], "bob piggybacked his signed record");
 
-  // Alice now holds bob's advertised sealing key at Tier 1 (record-carried, not verified).
+  // Alice now holds bob's advertised sealing key at Tier 1, PENDING approval: its
+  // fingerprint is visible, but it is not usable for sealing (recordSealKey) until approved.
   assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried");
-  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), normalizeKey(b.identity.sealPublicKey));
+  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), null, "a pending key is not usable yet");
+  assert.equal(pluginA.router.routedSealDetail(b.identity.publicKey)?.sealKey, normalizeKey(b.identity.sealPublicKey));
   assert.equal(pluginA.router.routedSealDetail(b.identity.publicKey)?.name, "bob");
 });
 
@@ -166,9 +168,9 @@ test("a relay that swaps in an older record of the destination causes a Tier-1 c
   }));
   pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey] }));
 
-  await pluginA.send(b.identity.publicKey, { n: 1 }); // honest: learns bob's real key
-  assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), normalizeKey(b.identity.sealPublicKey));
-  await pluginA.send(b.identity.publicKey, { n: 2 }); // tampered: a second, different key
+  await pluginA.send(b.identity.publicKey, { n: 1 }, { public: true }); // honest: learns bob's real key
+  assert.equal(pluginA.router.routedSealDetail(b.identity.publicKey)?.sealKey, normalizeKey(b.identity.sealPublicKey));
+  await pluginA.send(b.identity.publicKey, { n: 2 }, { public: true }); // tampered: a second, different key
   assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-conflict");
   assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), null, "a disputed target seals to nothing");
 });
@@ -194,7 +196,7 @@ test("a relay substituting its own valid record teaches the origin nothing about
   }));
   pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey] }));
 
-  await pluginA.send(b.identity.publicKey, { n: 1 });
+  await pluginA.send(b.identity.publicKey, { n: 1 }, { public: true });
   // The foreign record is filed under bob's target key and rejected as not-target.
   assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "none");
   assert.equal(pluginA.router.routedSealKey(b.identity.publicKey), null);
@@ -212,7 +214,7 @@ test("a non-plain-object response is delivered intact and carries no discovery r
   // discovery attach must pass it through untouched, never spread it into an object.
   pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey], deliver: () => [1, 2, 3] }));
 
-  const result = await pluginA.send(b.identity.publicKey, { n: 1 });
+  const result = await pluginA.send(b.identity.publicKey, { n: 1 }, { public: true });
   assert.deepEqual(result.response, [1, 2, 3], "the array response is intact, not flattened to indexed keys");
   assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "none", "no record rode a non-object response");
 });
@@ -229,7 +231,7 @@ test("a refused delivery carries no discovery record", async () => {
   // record is attached, so the origin learns nothing from a rejected delivery.
   pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey], authorizeOrigin: () => false }));
 
-  const result = await pluginA.send(b.identity.publicKey, { n: 1 });
+  const result = await pluginA.send(b.identity.publicKey, { n: 1 }, { public: true });
   assert.equal(result.refused, true);
   assert.equal(result.response?.reason, "origin-unauthorized");
   assert.equal(result.response?.[ROUTED_RECORD_FIELD], undefined, "a refusal attaches no record");
@@ -318,7 +320,7 @@ test("legacy raw payloads fail closed and the exposed router has no raw-send byp
   assert.equal(deliveries, 0);
 
   assert.equal((await pluginA.send("not a public key", {})).reason, "invalid destination identity key");
-  const throughFacade = await pluginA.router.send(b.identity.publicKey, { secure: true });
+  const throughFacade = await pluginA.router.send(b.identity.publicKey, { secure: true }, { public: true });
   assert.equal(throughFacade.delivered, true);
   assert.equal(deliveries, 1, "router.send is the secure facade, not the raw engine");
 });
@@ -376,7 +378,7 @@ test("multi-hop refusal and duplicate status survive every pure-engine hop", asy
     authorizeOrigin: () => false,
   }));
 
-  const refused = await pluginA.send(d.identity.publicKey, { action: "denied" });
+  const refused = await pluginA.send(d.identity.publicKey, { action: "denied" }, { public: true });
   assert.equal(refused.delivered, true, "the destination was reached, so search is terminal");
   assert.equal(refused.refused, true, "the public sender sees refusal at top level");
   assert.equal(refused.response.reason, "origin-unauthorized");
@@ -464,15 +466,15 @@ test("recursive route searches have per-caller and global in-flight ceilings", a
 
   const host = buildBlocked();
   const hostHeld = Array.from({ length: MAX_IN_FLIGHT_RELAYS }, (_, i) =>
-    host.plugin.send(destination.identity.publicKey, { host: i }));
+    host.plugin.send(destination.identity.publicKey, { host: i }, { public: true }));
   assert.equal(host.started(), MAX_IN_FLIGHT_RELAYS, "host sends share the plugin-wide ceiling");
-  const hostOverflow = await host.plugin.send(destination.identity.publicKey, { host: "overflow" });
+  const hostOverflow = await host.plugin.send(destination.identity.publicKey, { host: "overflow" }, { public: true });
   assert.equal(hostOverflow.delivered, false);
   assert.match(hostOverflow.reason, /in flight/);
   host.release();
   await Promise.all(hostHeld);
 
-  const afterRelease = await host.plugin.send(destination.identity.publicKey, { host: "after" });
+  const afterRelease = await host.plugin.send(destination.identity.publicKey, { host: "after" }, { public: true });
   assert.doesNotMatch(afterRelease.reason ?? "", /in flight/, "finally releases capacity after work settles");
 });
 
@@ -520,7 +522,6 @@ test("a Tier-1 conflict refuses the send rather than falling back to cleartext",
     neighbors: () => [b.identity.publicKey],
     forward: async () => assert.fail("a refused send must not forward"),
     routedKeyStore: store,
-    allowRecordCarried: true,
     tier0Seal: () => ({ state: "unverified", key: null }), // no walk to bob; Tier 1 in play
   }));
   assert.deepEqual(await pluginA.send(b.identity.publicKey, { x: 1 }), {
@@ -545,7 +546,7 @@ test("the destination floor refuses a clear routed delivery", async () => {
     requireSealed: true,
   }));
 
-  const res = await pluginA.send(b.identity.publicKey, { x: 1 });
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
   assert.equal(res.refused, true);
   assert.equal(res.response.reason, "cleartext-refused");
 });
@@ -558,7 +559,7 @@ test("a misconfigured (non-X25519) sealPrivateKey is rejected at construction", 
   );
 });
 
-test("a floored destination still teaches its key on refusal, so a routed origin can then seal", async () => {
+test("a floored destination teaches its key on a public probe; after approval the origin can seal", async () => {
   const a = machine("alice");
   const b = machine("bob");
   let pluginB;
@@ -566,7 +567,6 @@ test("a floored destination still teaches its key on refusal, so a routed origin
   const pluginA = createRoutePlugin(cryptoDeps(a, {
     neighbors: () => [b.identity.publicKey],
     forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
-    allowRecordCarried: true,
     tier0Seal: () => ({ state: "unverified", key: null }), // A never walked B
   }));
   pluginB = createRoutePlugin(cryptoDeps(b, {
@@ -576,20 +576,21 @@ test("a floored destination still teaches its key on refusal, so a routed origin
     deliver: (body) => { deliveredBody = body; return { received: true }; },
   }));
 
-  // A has no key for B, so the first send is clear — B refuses it, but the refusal
-  // still carries B's key-only record (otherwise the floor would deadlock discovery).
-  const refused = await pluginA.send(b.identity.publicKey, { probe: 1 });
+  // A confidential send would refuse locally (no key); an explicit PUBLIC probe goes clear,
+  // B refuses it under the floor, but the refusal still carries B's key-only record — so a
+  // routed origin can discover the key even behind a floor.
+  const refused = await pluginA.send(b.identity.publicKey, { probe: 1 }, { public: true });
   assert.equal(refused.refused, true);
   assert.equal(refused.response.reason, "cleartext-refused");
-  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried", "A learned B's key from the refusal");
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried", "A discovered B's key (pending)");
 
-  // Now A holds B's key and, opted into Tier 1, seals the retry — which B accepts.
+  // A pending key is not yet usable — a confidential send still refuses until approval.
+  const stillRefused = await pluginA.send(b.identity.publicKey, { secret: "no" });
+  assert.equal(stillRefused.reason, "seal-refused:tier1-pending");
+
+  // The operator approves the discovered key; now the confidential send seals and B accepts.
+  assert.equal(pluginA.router.approveRoutedSeal(b.identity.publicKey).ok, true);
   const sealed = await pluginA.send(b.identity.publicKey, { secret: "ok" });
   assert.equal(sealed.delivered, true, `sealed retry delivered (${sealed.reason ?? ""})`);
   assert.deepEqual(deliveredBody, { secret: "ok" });
-});
-
-test("opting into Tier 1 without a Tier-0 lookup is rejected at construction", () => {
-  const a = machine("alice");
-  assert.throws(() => createRoutePlugin(cryptoDeps(a, { allowRecordCarried: true })), /tier0Seal/);
 });

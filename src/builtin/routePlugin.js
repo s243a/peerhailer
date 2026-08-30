@@ -77,7 +77,6 @@ const isPlainObject = (v) => {
  *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); enables opening sealed
  *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
  *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
- *   allowRecordCarried?: boolean, // opt in to sealing to a Tier-1 record-carried key
  *   newMessageId?: () => string,
  *   messageValidityMs?: number,
  * }} deps
@@ -115,11 +114,6 @@ export function createRoutePlugin(deps) {
       usable = false;
     }
     if (!usable) throw new Error("route plugin sealPrivateKey must be an X25519 private key");
-  }
-  // Opting into the weaker Tier-1 key without a Tier-0 lookup would mean Tier 0 could
-  // never win — the opposite of the trust model. Require the lookup when Tier 1 is on.
-  if (deps.allowRecordCarried === true && typeof deps.tier0Seal !== "function") {
-    throw new Error("route plugin allowRecordCarried requires tier0Seal so Tier 0 can win");
   }
 
   const deliver = deps.deliver;
@@ -281,10 +275,11 @@ export function createRoutePlugin(deps) {
 
   /**
    * Host-only origin facade: sign the exact serialized body, then give the opaque
-   * wrapper to the engine. The outer id is deliberately null (see `relay`).
+   * wrapper to the engine. The outer id is deliberately null (see `relay`). Sealed by
+   * default; `opts.public` is the explicit opt-out that permits a cleartext send.
    * @param {string} dest
    * @param {any} payload
-   * @param {{ttl?: number, budget?: number}} [opts]
+   * @param {{ttl?: number, budget?: number, public?: boolean}} [opts]
    */
   const sendUnchecked = async (dest, payload, opts = {}) => {
     let destinationKeyId;
@@ -294,17 +289,18 @@ export function createRoutePlugin(deps) {
       return { delivered: false, reason: "invalid destination identity key", spent: 0 };
     }
 
-    // Decide confidentiality before wrapping: Tier 0 (walk-verified) wins, Tier 1
-    // (record-carried) is opt-in, and a conflict at either tier REFUSES rather than
-    // sending cleartext — a relay must not be able to strip a seal by forging a dispute.
+    // Decide confidentiality before wrapping. Application data is confidential by default:
+    // Tier 0 (walk-verified) wins, Tier 1 seals only to an *approved* key, and anything
+    // else REFUSES rather than leaking — a relay must not be able to strip a seal by
+    // forging a dispute or evicting a key. Cleartext needs an explicit `public` opt-out.
     const tier0 = deps.tier0Seal ? deps.tier0Seal(dest) : { state: /** @type {"unverified"} */ ("unverified"), key: null };
     const target = resolveRoutedSeal({
       tier0,
       tier1: { state: routedKeyStore.recordState(destinationKeyId), key: routedKeyStore.recordSealKey(destinationKeyId) },
-      allowRecordCarried: deps.allowRecordCarried === true,
+      publicOk: opts.public === true,
     });
-    // F2: once Tier 0 knows this peer's sealing posture, its record-carried Tier-1 entry
-    // is moot — drop it so a stale conflict cannot linger on the surface or in a resolver.
+    // Once Tier 0 knows this peer's sealing posture, its Tier-1 entry is moot — drop it so
+    // a stale key or conflict cannot linger (an authoritative walk supersedes discovery).
     if (tier0.state !== "unverified") routedKeyStore.forget(destinationKeyId);
     if (target.decision === "refuse") return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0 };
     const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
@@ -332,7 +328,7 @@ export function createRoutePlugin(deps) {
   // network callers, which have a stable key to charge.)
   const relay = (/** @type {any} */ envelope, /** @type {string | null} */ from = null) =>
     withRelaySlot(null, () => relayUnchecked(envelope, from));
-  const send = (/** @type {string} */ dest, /** @type {any} */ payload, /** @type {{ttl?: number, budget?: number}} */ opts = {}) =>
+  const send = (/** @type {string} */ dest, /** @type {any} */ payload, /** @type {{ttl?: number, budget?: number, public?: boolean}} */ opts = {}) =>
     withRelaySlot(null, () => sendUnchecked(dest, payload, opts));
 
   /** The identity key id for a destination PEM, or null if it is not a usable key. */
@@ -363,6 +359,11 @@ export function createRoutePlugin(deps) {
     routedSealDetail: (/** @type {string} */ dest) => {
       const id = destKeyId(dest);
       return id ? routedKeyStore.recordDetail(id) : null;
+    },
+    /** Approve a discovered Tier-1 key for sealing (optionally pinned to a fingerprint). */
+    approveRoutedSeal: (/** @type {string} */ dest, /** @type {string} */ expectedSealKey) => {
+      const id = destKeyId(dest);
+      return id ? routedKeyStore.approve(id, expectedSealKey) : { ok: false, reason: "unknown" };
     },
   };
 

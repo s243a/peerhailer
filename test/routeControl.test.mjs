@@ -44,15 +44,16 @@ test("route/send returns 400 only for routed input errors; internal failures sta
   const oversized = await post(port, {
     dest: identity.publicKey,
     payload: "x".repeat(MAX_ROUTED_BODY_BYTES - 1),
+    public: true,
   });
   assert.equal(oversized.status, 400);
   assert.match(oversized.json.error, /byte limit/);
 
-  const valid = await post(port, { dest: identity.publicKey, payload: { ok: true } });
+  const valid = await post(port, { dest: identity.publicKey, payload: { ok: true }, public: true });
   assert.equal(valid.status, 200);
   assert.equal(valid.json.response.received, true);
 
-  const internal = await post(port, { dest: identity.publicKey, payload: { boom: true } });
+  const internal = await post(port, { dest: identity.publicKey, payload: { boom: true }, public: true });
   assert.equal(internal.status, 500);
   assert.deepEqual(internal.json, { error: "internal error" }, "implementation details are not exposed");
   assert.ok(logs.some((line) => line.includes("sensitive internal failure")), "the operator still gets the cause");
