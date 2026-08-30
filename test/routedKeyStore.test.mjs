@@ -70,6 +70,23 @@ test("approval needs a matching fingerprint and is void on conflict or an unknow
   assert.equal(store.recordSealKey(d.keyId), null);
 });
 
+test("a store full of approved keys and conflicts refuses a new observation, never evicting one", () => {
+  const store = createRoutedKeyStore({ maxEntries: 2 });
+  const a = machine("a");
+  const b = machine("b");
+  const c = machine("c");
+  const stale = generateIdentity();
+  store.observe(a.keyId, recordOf(a));
+  store.approve(a.keyId); // approved (non-evictable)
+  store.observe(b.keyId, recordOf(b));
+  store.observe(b.keyId, recordOf(b, { sealPublicKey: stale.sealPublicKey })); // conflict (non-evictable)
+
+  assert.equal(store.observe(c.keyId, recordOf(c)), "at-capacity", "a new discovery is dropped, not stored");
+  assert.equal(store.recordState(c.keyId), "none");
+  assert.equal(store.recordState(a.keyId), "record-approved", "the approved key was kept");
+  assert.equal(store.recordState(b.keyId), "record-conflict", "the conflict was kept");
+});
+
 test("an approved key survives capacity pressure, like a conflict", () => {
   const store = createRoutedKeyStore({ maxEntries: 2 });
   const t = machine("t");

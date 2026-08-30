@@ -71,8 +71,7 @@ export function resolveRoutedSeal({ tier0, tier1, publicOk = false }) {
   // and confidential data is not sent in the clear in the meantime.
   if (tier1.state === "record-carried") return { decision: "refuse", tier: null, key: null, state: "tier1-pending" };
 
-  // No key at all. Confidential by default: refuse. Cleartext only for explicitly-public
-  // data (and even then the destination's own floor may still reject it).
-  if (publicOk) return { decision: "cleartext", tier: null, key: null, state: "public" };
+  // No key at all. Confidential by default: refuse. (Explicitly-public data already
+  // short-circuited to cleartext at the top, so there is no publicOk case to handle here.)
   return { decision: "refuse", tier: null, key: null, state: "no-key" };
 }

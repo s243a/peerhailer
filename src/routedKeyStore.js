@@ -55,19 +55,20 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
    */
   const entries = new Map();
 
-  /** Make room under the ceiling by dropping the oldest *pending* destination. An approved
-   * key (operator-blessed) and a conflict (security evidence — dropping it would let a
-   * replayed single record re-establish a stale key) are both kept; only if every slot is
-   * one of those does the oldest go. Map iteration is insertion order. */
+  /** Make room under the ceiling by dropping the oldest *pending* destination, and report
+   * whether it could. An approved key (operator-blessed) and a conflict (security evidence
+   * — dropping it would let a replayed single record re-establish a stale key) are NEVER
+   * evicted; if every slot is one of those, no room is made and the new observation is
+   * dropped instead (retriable — it re-arrives on the next discovery). Map iteration is
+   * insertion order, so the first match is the oldest pending. @returns {boolean} evicted */
   const evictOldest = () => {
     for (const [k, e] of entries) {
       if (!e.approved && !e.conflict) {
         entries.delete(k);
-        return;
+        return true;
       }
     }
-    const oldest = entries.keys().next();
-    if (!oldest.done) entries.delete(oldest.value);
+    return false;
   };
 
   return {
@@ -79,7 +80,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
      *
      * @param {string} targetKeyId the routing target's identity key id (`keyId(dest)`)
      * @param {any} envelope a `{record, signature}` signed self-record
-     * @returns {"record-approved" | "record-carried" | "record-conflict" | "no-seal-key" | "not-target" | "unverified"}
+     * @returns {"record-approved" | "record-carried" | "record-conflict" | "no-seal-key" | "not-target" | "unverified" | "at-capacity"}
      */
     observe(targetKeyId, envelope) {
       if (!isKeyId(targetKeyId)) return "unverified";
@@ -101,7 +102,10 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
 
       const existing = entries.get(targetKeyId);
       if (!existing) {
-        if (entries.size >= maxEntries) evictOldest();
+        // At capacity, evict a pending entry to make room; if every slot is an approved
+        // key or a conflict (never evicted), drop this new discovery rather than clobber
+        // one — it is retriable on the next probe.
+        if (entries.size >= maxEntries && !evictOldest()) return "at-capacity";
         entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name });
         return "record-carried";
       }

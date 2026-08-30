@@ -1058,6 +1058,17 @@ export function createDirectory(state = {}) {
         trust.admitProfile = state.trust.admitProfile ?? trust.admitProfile;
         trust.candidateProfile = state.trust.candidateProfile ?? trust.candidateProfile;
       }
+      // The daemon commits EVERY runtime mutation through `adopt` (applyChange builds a
+      // fresh directory, mutates it, and adopts it here), so the per-mutator notifySeal
+      // calls above never fire in the live daemon — this is where Tier-1 invalidation has
+      // to happen. Notify for exactly the identities that now carry a Tier-0 seal posture
+      // (walked, disputed, or ever-sealed): a routed key store drops their discovered
+      // Tier-1 key, so a walk/accept/rotation can no longer leave a stale key sealable.
+      // Peers with no Tier-0 seal posture are untouched, so an approved Tier-1 key for an
+      // admitted-but-unwalked peer survives.
+      for (const record of admitted.values()) {
+        if (record.sealSeen || record.sealConflict || record.sealRequired) notifySeal(record.publicKey);
+      }
     },
     /**
      * Replace the profiles this directory resolves against.
