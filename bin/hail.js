@@ -29,6 +29,7 @@ import hailPlugin from "../src/builtin/hailPlugin.js";
 import { greedyPolicy, xorDistanceOver } from "../src/routing.js";
 import { keyId as routeKeyId } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
+import { createRoutedKeyStore } from "../src/routedKeyStore.js";
 import { createHash } from "node:crypto";
 import { listFiles, getFile, putFile } from "../src/filesClient.js";
 
@@ -581,6 +582,9 @@ switch (command) {
     // config reload reconstructs the route plugin but must not reopen every still-
     // valid signed envelope. A process restart remains the documented M1 boundary.
     const routeReplayGuard = createRouteReplayGuard();
+    // Likewise one Tier-1 discovery store for the process: a config reload must not
+    // forget the sealing keys learned from routed responses this session.
+    const routedKeyStore = createRoutedKeyStore();
     // The routing plugin's deps read the *live* directory and identity, not stored
     // config, so one builder serves both the start and reload plugin arrays.
     const routeDeps = () => ({
@@ -588,6 +592,7 @@ switch (command) {
       privateKey: identity.privateKey,
       selfRecord: () => directory.self,
       replayGuard: routeReplayGuard,
+      routedKeyStore,
       normalize: (/** @type {string} */ k) => normalizeKey(k) ?? k,
       neighbors: () => directory.listAdmitted().map((peer) => peer.publicKey),
       isBlocked: (/** @type {string} */ key) => {

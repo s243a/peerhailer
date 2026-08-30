@@ -23,9 +23,9 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
   // Identities and directories first.
   const id = { a: generateIdentity(), b: generateIdentity(), d: generateIdentity() };
   const dir = {
-    a: createDirectory({ self: { name: "a", publicKey: id.a.publicKey } }),
-    b: createDirectory({ self: { name: "b", publicKey: id.b.publicKey } }),
-    d: createDirectory({ self: { name: "d", publicKey: id.d.publicKey } }),
+    a: createDirectory({ self: { name: "a", publicKey: id.a.publicKey, sealPublicKey: id.a.sealPublicKey } }),
+    b: createDirectory({ self: { name: "b", publicKey: id.b.publicKey, sealPublicKey: id.b.sealPublicKey } }),
+    d: createDirectory({ self: { name: "d", publicKey: id.d.publicKey, sealPublicKey: id.d.sealPublicKey } }),
   };
   for (const k of ["a", "b", "d"]) dir[k].useProfiles({ r: { name: "r", allows: ["hail", "route"] } });
 
@@ -86,6 +86,11 @@ test("A reaches D through B: multi-hop relay + delivery + response, over real pe
   assert.equal(delivered.d?.payload, "across the graph", "D's inbox recorded it");
   assert.equal(delivered.d?.origin, keyId(id.a.publicKey), "D attributes the signed origin, not last hop B");
   assert.deepEqual(res.via.map((k) => Object.keys(id).find((n) => norm(id[n].publicKey) === k)), ["a", "b", "d"], "route was A -> B -> D");
+
+  // M2 Tier-1 discovery: D piggybacked its signed self-record on the response, so A —
+  // which never walked to D — now holds D's advertised sealing key, record-carried.
+  assert.equal(plugin.a.router.routedSealState(norm(id.d.publicKey)), "record-carried");
+  assert.equal(plugin.a.router.routedSealKey(norm(id.d.publicKey)), norm(id.d.sealPublicKey), "A learned D's Tier-1 seal key");
 
   // The advertised maximum serialized body fits through the actual signed hail
   // request (whose own limit is 1 MB), not only through an in-memory wrapper.

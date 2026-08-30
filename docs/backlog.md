@@ -263,8 +263,19 @@ roadmap is shared, not scattered across PR threads.
   legacy refusal, self-send, reload persistence, concurrent replay, the full wire-size boundary,
   and multi-hop refusal propagation. Final adversarial review also added global/per-caller in-flight
   search ceilings and fail-closed accounting for untrusted downstream `spent`; the threaded response
-  remains explicitly unauthenticated. **Next:** M2 (record-piggyback key discovery +
-  tier model), then M3 (sealed payload + shared observation seam).
+  remains explicitly unauthenticated. **M1 MERGED (#55, `2a66485`).** **M2 (Tier-1 key discovery)
+  implemented on `routing-m2-tier1`, awaiting broad review:** `src/routedKeyStore.js` — a session,
+  identity-key-indexed store for record-carried sealing keys, quarantined from Tier-0's persisted
+  model; `observe` stores a key only if the record is self-signed AND its identity hashes to the
+  routing target AND it carries a sealing key; two differing keys → sticky conflict (survives
+  eviction), never a selection. `routePlugin` wiring: the destination piggybacks a **key-only** signed
+  record (no addresses — F2F reachability) on delivery responses; the origin observes it on `send`;
+  read side `router.routedSealKey/State/Detail`. One store per daemon (survives reload). Live A→B→D
+  proves an origin learns a destination's key without walking to it; Fable confirms folded (plain-object
+  attach guard, key-only record, no manipulable age surface). **Next in M2/M3:** M3b (seal the routed
+  payload to a Tier-0 or opted-in Tier-1 key; manifest stays outside the seal) which also activates the
+  destination confidentiality floor (`requireSealedRouting`), and M3a (authenticated-origin observation
+  seam).
 - **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
   identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
   (not the direct-chat `from === caller` binding). See `docs/routing.md`.

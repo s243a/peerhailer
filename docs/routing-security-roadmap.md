@@ -205,11 +205,19 @@ destination-side change; a replayed remote record never lowers local enforcement
   recursive searches are capped globally/per caller, downstream work claims cannot
   replenish budget, and malformed/oversized encodings fail closed. **Signed ≠ private** — relays still
   read payloads at this milestone.
-- **M2 — destination record discovery.** Verify the destination record against the
-  routing target; introduce Tier-1 state and policy; add the signed floor advertisement;
-  define Tier-1 replacement/conflict rules. Piggybacks on a route-discovery
-  response/probe or an earlier authenticated *clear* delivery — **not** on the first
-  confidential delivery (the origin needs the key *before* producing that).
+- **M2 — destination record discovery. Implemented (Tier-1 store + discovery wiring) on
+  `routing-m2-tier1`.** Verify the destination record against the routing target; introduce
+  Tier-1 state and policy; define Tier-1 replacement/conflict rules. Piggybacks on a
+  route-discovery response/probe or an earlier authenticated *clear* delivery — **not** on
+  the first confidential delivery (the origin needs the key *before* producing that). The
+  destination attaches a **key-only** signed record (name + identity key + sealing key,
+  *no addresses*): discovery is key discovery, and handing direct addresses to return-path
+  relays would undercut F2F reachability. The store is session-scoped and identity-key-
+  indexed, quarantined from Tier-0's persisted model; two differing keys for one target are
+  a sticky conflict, not a selection; conflicts survive capacity eviction. No record "age"
+  is surfaced — a Tier-1 record carries no liveness, and any age would be a value a relay
+  selects. The **signed floor advertisement** folds into M3b, where it is enforceable (a
+  destination rejecting `clear` needs a sealed alternative to exist first).
 - **M3a — authenticated-origin capability seam.** The general durable observation API,
   with a request-scoped authenticated-origin proof (below). Built and testable *before*
   it is load-bearing.
@@ -220,6 +228,28 @@ destination-side change; a replayed remote record never lowers local enforcement
   wanted, is a later nested/versioned format that accepts decrypt-before-auth — a
   metadata/anonymity change, not this. Enforce the local destination floor; arm the
   routed downgrade observation *before* accepting delivery.
+
+  **Acceptance criteria carried from the M2 review (Kimi), where the design can silently
+  go wrong:**
+  - **A Tier-1 `record-conflict` must refuse the sealed send, never fall through to
+    cleartext.** A relay replaying an older signed record manufactures the conflict; if
+    the send policy reads "no usable Tier-1 key → send clear," the relay has a downgrade
+    lever. The rule: conflict → refuse; any cleartext fallback is operator opt-in, loud,
+    never automatic — and the **destination floor is the actual lever-closer** (a relay
+    can suppress the record but cannot make a floored destination accept `clear`). This
+    extends "refusal, not selection" from the key-selection layer down to the *send
+    decision*. Where the origin had *no* Tier-0 key to begin with, conflict-refusal costs
+    availability, not confidentiality — the message was never going to be sealed; the
+    invariant bites only when a conflict displaces a key the origin already had. (Aside:
+    a loud refusal is also a remote oracle — a relay replays a stale record and learns
+    sealed-vs-refused; inherent to any fail-loud design, one line in the doc, low.)
+  - **A single resolver, `{tier, key, state}`, so no call site can consult Tier-1 while a
+    Tier-0 key exists.** "Tier 0 always wins" is a comment today (the read side has no
+    consumers); M3b must make it code.
+  - **A successful Tier-0 `bindSealKey`/`acceptSealKey` must `routedKeyStore.forget(
+    keyId(peer.publicKey))`** so a stale Tier-1 conflict cannot shadow the now-verified
+    key. Session-scoped, so today a restart clears it; wire it when the composition layer
+    lands.
 - **M4+** — chunking, cached source routes, reassembly quotas, later anonymity.
 
 ## The observation seam (M3a)

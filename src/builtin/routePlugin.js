@@ -22,6 +22,8 @@ import { createPrivateKey, randomBytes } from "node:crypto";
 import { keyId } from "../routeManifest.js";
 import { createRouteReplayGuard, DEFAULT_MAX_VALIDITY_MS } from "../routeReplayGuard.js";
 import { openRoutedMessage, wrapRoutedMessage } from "../routedMessage.js";
+import { createRoutedKeyStore } from "../routedKeyStore.js";
+import { signRecord } from "../peerRecord.js";
 import { createRouter } from "../routing.js";
 import { REFUSE } from "../plugins.js";
 
@@ -38,6 +40,24 @@ export const ROUTED_MESSAGE_VALIDITY_MS = 60_000;
 const OPEN_REFUSAL = Symbol("route.open-refusal");
 
 /**
+ * Wire field: the destination piggybacks its *signed* self-record on a routed response
+ * so the origin can learn its advertised sealing key (M2 Tier-1 discovery). It crosses
+ * JSON, so it is a reserved string key, not a symbol. Public and self-signed: a relay
+ * may drop it (the origin simply gets no Tier-1 key) or replay an older one (the store
+ * catches the identity match and flags a conflict), but cannot forge a new key.
+ */
+export const ROUTED_RECORD_FIELD = "__routedRecord";
+
+/** A JSON-object response we can safely add a field to — not an array, Buffer, or class
+ * instance, which spreading would flatten into indexed/own properties.
+ * @param {any} v */
+const isPlainObject = (v) => {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+};
+
+/**
  * @param {{
  *   self: string,
  *   privateKey: string,
@@ -52,6 +72,7 @@ const OPEN_REFUSAL = Symbol("route.open-refusal");
  *   budgetMax?: number,
  *   now?: () => number,
  *   replayGuard?: ReturnType<typeof createRouteReplayGuard>,
+ *   routedKeyStore?: ReturnType<typeof createRoutedKeyStore>,
  *   newMessageId?: () => string,
  *   messageValidityMs?: number,
  * }} deps
@@ -59,6 +80,7 @@ const OPEN_REFUSAL = Symbol("route.open-refusal");
 export function createRoutePlugin(deps) {
   const now = deps.now ?? Date.now;
   const replayGuard = deps.replayGuard ?? createRouteReplayGuard({ now });
+  const routedKeyStore = deps.routedKeyStore ?? createRoutedKeyStore();
   const newMessageId = deps.newMessageId ?? (() => randomBytes(16).toString("base64url"));
   const messageValidityMs = deps.messageValidityMs ?? ROUTED_MESSAGE_VALIDITY_MS;
 
@@ -85,20 +107,57 @@ export function createRoutePlugin(deps) {
     // The pure engine invokes this only after its outer destination equals self.
     // Discard its advisory outer origin and hand consumers only the authenticated
     // key recovered from the signed manifest.
-    deliver: (wrapper, meta) => {
+    deliver: async (wrapper, meta) => {
       const opened = openRoutedMessage(wrapper, {
         selfKeyId,
         guard: replayGuard,
         authorizeOrigin: deps.authorizeOrigin,
       });
       if (!opened.ok) return { [OPEN_REFUSAL]: opened.reason };
-      return deliver(opened.body, {
+      // Await the consumer before attaching: a consumer may return a promise, and
+      // spreading that instead of its resolved response would corrupt the result.
+      const response = await deliver(opened.body, {
         ...meta,
         origin: opened.originKeyId,
         originKeyId: opened.originKeyId,
       });
+      return attachDiscovery(response);
     },
   });
+
+  /**
+   * Piggyback a signed, **key-only** self-record on a delivery response so the origin can
+   * learn our advertised sealing key (M2 Tier-1). Deliberately NOT our full record: it
+   * carries name, identity key, and sealing key — never our addresses. Discovery is *key*
+   * discovery; handing a routed origin (and every relay on the return path) our direct
+   * addresses would undercut F2F reachability.
+   *
+   * Attaches only to a plain-object response: spreading an array or a class instance (a
+   * consumer could return either, and the in-process self-delivery path never JSON-round-
+   * trips it) would corrupt it, so such a response is passed through unchanged.
+   * @param {any} response
+   */
+  const attachDiscovery = (response) => {
+    if (!isPlainObject(response)) return response;
+    const self = deps.selfRecord();
+    const signed = signRecord(
+      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
+      deps.privateKey,
+    );
+    return signed ? { ...response, [ROUTED_RECORD_FIELD]: signed } : response;
+  };
+
+  /**
+   * Learn a destination's advertised sealing key from the self-record it piggybacked on
+   * the response. The store verifies the record against `destKeyId`, so a dropped,
+   * swapped, or replayed record cannot install a wrong key here.
+   * @param {string} destKeyId
+   * @param {any} result
+   */
+  const observeDiscovery = (destKeyId, result) => {
+    const record = result?.response?.[ROUTED_RECORD_FIELD];
+    if (record) routedKeyStore.observe(destKeyId, record);
+  };
 
   /**
    * Reaching the outer destination and refusing the authenticated message is
@@ -199,7 +258,9 @@ export function createRoutePlugin(deps) {
     const routeOptions = /** @type {{ttl?: number, budget?: number, id?: any}} */ ({ id: null });
     if (opts.ttl !== undefined) routeOptions.ttl = opts.ttl;
     if (opts.budget !== undefined) routeOptions.budget = opts.budget;
-    return normalizeOpenResult(await rawRouter.send(dest, wrapper, routeOptions));
+    const result = normalizeOpenResult(await rawRouter.send(dest, wrapper, routeOptions));
+    observeDiscovery(destinationKeyId, result);
+    return result;
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as
@@ -210,9 +271,36 @@ export function createRoutePlugin(deps) {
   const send = (/** @type {string} */ dest, /** @type {any} */ payload, /** @type {{ttl?: number, budget?: number}} */ opts = {}) =>
     withRelaySlot(null, () => sendUnchecked(dest, payload, opts));
 
+  /** The identity key id for a destination PEM, or null if it is not a usable key. */
+  const destKeyId = (/** @type {string} */ dest) => {
+    try {
+      return keyId(dest);
+    } catch {
+      return null;
+    }
+  };
+
   // Expose only the secure facade. Returning `rawRouter` would leave a public path
-  // that bypasses wrap/open and silently restores the unsigned Stage-1 posture.
-  const router = { relay, send, self: rawRouter.self };
+  // that bypasses wrap/open and silently restores the unsigned Stage-1 posture. The
+  // routed-key queries are the read side of M2 Tier-1 discovery; Tier-0 (walk-verified)
+  // resolution belongs to the directory and always takes precedence over these.
+  const router = {
+    relay,
+    send,
+    self: rawRouter.self,
+    routedSealKey: (/** @type {string} */ dest) => {
+      const id = destKeyId(dest);
+      return id ? routedKeyStore.recordSealKey(id) : null;
+    },
+    routedSealState: (/** @type {string} */ dest) => {
+      const id = destKeyId(dest);
+      return id ? routedKeyStore.recordState(id) : "none";
+    },
+    routedSealDetail: (/** @type {string} */ dest) => {
+      const id = destKeyId(dest);
+      return id ? routedKeyStore.recordDetail(id) : null;
+    },
+  };
 
   // Per-caller token bucket. peerhailer has no framework rate limiter — command and
   // shell each hand-roll one — so routing does too: one receipt can trigger up to
