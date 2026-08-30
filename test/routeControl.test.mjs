@@ -116,3 +116,33 @@ test("route seal-approve / seal endpoints gate a discovered Tier-1 key behind ma
   assert.equal(after.json.state, "record-approved");
   assert.equal(after.json.detail.approved, true);
 });
+
+test("route seal-approve rejects a non-string pin instead of approving unpinned", async (t) => {
+  const { keyId } = await import("../src/routeManifest.js");
+  const { signRecord } = await import("../src/peerRecord.js");
+  const { createRoutedKeyStore } = await import("../src/routedKeyStore.js");
+
+  const self = generateIdentity();
+  const peer = generateIdentity();
+  const store = createRoutedKeyStore();
+  store.observe(keyId(peer.publicKey), signRecord(
+    { name: "peer", publicKey: peer.publicKey, sealPublicKey: peer.sealPublicKey, addresses: [], lastSeen: null },
+    peer.privateKey,
+  ));
+  const directory = createDirectory({ self: { name: "self", publicKey: self.publicKey } });
+  const route = createRoutePlugin({
+    self: self.publicKey, privateKey: self.privateKey, selfRecord: () => directory.self,
+    authorizeOrigin: () => true, neighbors: () => [], forward: async () => ({ delivered: false, spent: 0 }),
+    deliver: () => ({ received: true }), routedKeyStore: store, tier0Seal: () => ({ state: "unverified", key: null }),
+  });
+  const daemon = createDaemon({ directory, identity: self, plugins: [route] });
+  const { port } = await daemon.listen({ port: 0 });
+  t.after(() => daemon.close());
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/route/seal-approve`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ dest: peer.publicKey, sealKey: {} }), // a non-string "pin"
+  }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  assert.equal(res.status, 400, "a malformed pin is rejected, not silently unpinned");
+  assert.equal(store.recordState(keyId(peer.publicKey)), "record-carried", "still pending, not approved");
+});

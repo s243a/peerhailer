@@ -40,6 +40,14 @@ test("an unknown identity is unverified", () => {
   assert.deepEqual(dir().sealForIdentity(generateIdentity().publicKey), { state: "unverified", key: null });
 });
 
+test("adopt bumps the generation counter — a reload's staleness fence", () => {
+  const d = dir();
+  const g0 = d.generation();
+  d.adopt({ admitted: [] });
+  d.adopt({ admitted: [] });
+  assert.equal(d.generation(), g0 + 2, "each adopt advances the generation");
+});
+
 test("aggregation matches a differently-wrapped PEM of the same key (canonical, not PEM text)", () => {
   // Re-wrap the same key at a different line width: same DER, different text.
   const rewrap = (pem) => {

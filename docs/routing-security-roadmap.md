@@ -56,6 +56,20 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   Tier-0 peers are protected by `sealRequired`'s durable floor; Tier-1 peers have no
   equivalent until durable observation (M3a). The destination's own floor is the only
   restart-safe backstop today.
+- **Multi-writer state can restore a retired Tier-0 sealing key (pre-existing, out of
+  routing scope).** The directory merges concurrent state via a per-record monotone `rev`
+  (higher wins). That is not a causal clock: a process that loaded a stale snapshot and
+  made several mutations reaches a higher `rev` than another process's newer one-step
+  identity rotation, and its OLD identity/sealing key wins the merge. This predates the
+  routing work and affects all sealed state, not just routed keys; a real fix is a
+  directory-concurrency change (causal ordering, or a single-writer discipline where the
+  CLI signals the daemon rather than writing disk itself — the SIGHUP reload is a step
+  toward that). Tracked separately, not in this branch.
+- **A keyless current record does not drop an approved routed key, deliberately.** If a
+  discovered record for a destination arrives with no sealing key, an already-approved key
+  is kept — because a relay can replay an *old* keyless record, and letting that drop an
+  approved key would be an availability lever (force-refuse). Retirement is handled by a
+  Tier-0 walk (which invalidates Tier 1), not by trusting a keyless record.
 
 ## The corrected spine — two independent roots
 
