@@ -228,6 +228,28 @@ destination-side change; a replayed remote record never lowers local enforcement
   wanted, is a later nested/versioned format that accepts decrypt-before-auth — a
   metadata/anonymity change, not this. Enforce the local destination floor; arm the
   routed downgrade observation *before* accepting delivery.
+
+  **Acceptance criteria carried from the M2 review (Kimi), where the design can silently
+  go wrong:**
+  - **A Tier-1 `record-conflict` must refuse the sealed send, never fall through to
+    cleartext.** A relay replaying an older signed record manufactures the conflict; if
+    the send policy reads "no usable Tier-1 key → send clear," the relay has a downgrade
+    lever. The rule: conflict → refuse; any cleartext fallback is operator opt-in, loud,
+    never automatic — and the **destination floor is the actual lever-closer** (a relay
+    can suppress the record but cannot make a floored destination accept `clear`). This
+    extends "refusal, not selection" from the key-selection layer down to the *send
+    decision*. Where the origin had *no* Tier-0 key to begin with, conflict-refusal costs
+    availability, not confidentiality — the message was never going to be sealed; the
+    invariant bites only when a conflict displaces a key the origin already had. (Aside:
+    a loud refusal is also a remote oracle — a relay replays a stale record and learns
+    sealed-vs-refused; inherent to any fail-loud design, one line in the doc, low.)
+  - **A single resolver, `{tier, key, state}`, so no call site can consult Tier-1 while a
+    Tier-0 key exists.** "Tier 0 always wins" is a comment today (the read side has no
+    consumers); M3b must make it code.
+  - **A successful Tier-0 `bindSealKey`/`acceptSealKey` must `routedKeyStore.forget(
+    keyId(peer.publicKey))`** so a stale Tier-1 conflict cannot shadow the now-verified
+    key. Session-scoped, so today a restart clears it; wire it when the composition layer
+    lands.
 - **M4+** — chunking, cached source routes, reassembly quotas, later anonymity.
 
 ## The observation seam (M3a)
