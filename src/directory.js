@@ -130,7 +130,11 @@ export function reconcilePersist(onDisk, baseline, current) {
   const baselineNames = new Set((baseline?.admitted ?? []).map((/** @type {any} */ p) => p.name));
   const currentNames = new Set((current?.admitted ?? []).map((/** @type {any} */ p) => p.name));
   const forgotten = new Set([...baselineNames].filter((n) => !currentNames.has(n)));
-  const admitted = mergeByRevision(onDisk?.admitted ?? [], current?.admitted ?? [], { forgotten, baselineNames });
+  // The baseline records (this writer's common ancestor) let the merge tell a *causal*
+  // change from a merely locally-higher `rev`: a concurrent identity rotation on disk that
+  // this writer never saw must not be undone by its stale snapshot's inflated revision.
+  const baselineByName = new Map((baseline?.admitted ?? []).map((/** @type {any} */ p) => [p.name, p]));
+  const admitted = mergeByRevision(onDisk?.admitted ?? [], current?.admitted ?? [], { forgotten, baselineNames, baselineByName });
   // Only materialise `admitted` if any side actually had it, so a state that
   // never carried the key round-trips unchanged rather than gaining an empty [].
   if (admitted.length || has(onDisk, "admitted") || has(current, "admitted") || has(baseline, "admitted")) {
@@ -189,10 +193,10 @@ export function reconcileBaseline(stored, snapshot) {
  *
  * @param {any[]} onDisk current on-disk admitted records
  * @param {any[]} snap this writer's admitted snapshot
- * @param {{forgotten?: Set<string>, baselineNames?: Set<string>}} [intent]
+ * @param {{forgotten?: Set<string>, baselineNames?: Set<string>, baselineByName?: Map<string, any>}} [intent]
  * @returns {any[]} the reconciled admitted set
  */
-export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineNames = new Set() } = {}) {
+export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineNames = new Set(), baselineByName = new Map() } = {}) {
   /** @type {Map<string, any>} */
   const byName = new Map();
   for (const p of onDisk ?? []) {
@@ -208,7 +212,39 @@ export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineN
       if (!baselineNames.has(p.name)) byName.set(p.name, p);
       continue;
     }
-    const winner = (Number(p.rev) || 0) > (Number(was.rev) || 0) ? p : was;
+    // Causal guard on the identity key. `rev` is a local op-count, not a causal clock, so a
+    // stale writer that made several mutations can reach a higher `rev` than a concurrent
+    // one-step identity rotation. Using the baseline (this writer's common ancestor) as a
+    // reference: if the ON-DISK record advanced past this writer's baseline AND holds a
+    // DIFFERENT identity than the writer's baseline while the writer did NOT itself rotate,
+    // then disk carries a rotation the writer never saw — keep it (identity and its sealing
+    // posture, which is only valid for that identity) rather than let a stale, higher-`rev`
+    // snapshot restore the retired identity. Without a baseline the classic higher-rev-wins
+    // holds, so direct callers are unaffected.
+    const base = baselineByName.get(p.name);
+    let winner = (Number(p.rev) || 0) > (Number(was.rev) || 0) ? p : was;
+    /** @type {any} */
+    let sealOverride = null;
+    if (base && base.publicKey) {
+      const diskAdvanced = (Number(was.rev) || 0) > (Number(base.rev) || 0);
+      const diskRotated = Boolean(was.publicKey) && !sameCanonicalKey(was.publicKey, base.publicKey);
+      const iRotated = Boolean(p.publicKey) && !sameCanonicalKey(p.publicKey, base.publicKey);
+      if (diskAdvanced && diskRotated && !iRotated) winner = was;
+
+      // Same idea, one field down: the *sealing key* is causal too. When the identity is
+      // unchanged on both sides (no rotation), 3-way merge the seal against the baseline so
+      // a stale higher-`rev` snapshot cannot restore a retired key. If disk changed the seal
+      // and this writer did not, adopt disk's seal; if both changed it to DIFFERENT keys,
+      // fail closed to a conflict (never silently pick one).
+      if (!diskRotated && !iRotated) {
+        const diskSealChanged = !sameSeal(was, base);
+        const iSealChanged = !sameSeal(p, base);
+        if (diskSealChanged && !iSealChanged) sealOverride = sealUnit(was);
+        else if (diskSealChanged && iSealChanged && !sameCanonicalKey(was.sealPublicKey, p.sealPublicKey)) {
+          sealOverride = { ...sealUnit(was), sealSeen: true, sealConflict: normalizeKey(p.sealPublicKey) ?? was.sealConflict ?? null };
+        }
+      }
+    }
     const loser = winner === p ? was : p;
     // Floors are raised from the loser too, so even a disk-winning tie can differ
     // from the disk record if the snapshot carried a higher floor — that is the
@@ -216,13 +252,43 @@ export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineN
     // floor change bumps `rev`, so the winner already holds it.
     const bindingSeen = Math.max(Number(winner.bindingSeen) || 0, Number(loser.bindingSeen) || 0);
     const sealRequired = Boolean(winner.sealRequired || loser.sealRequired);
-    byName.set(p.name, {
-      ...winner,
-      ...(bindingSeen > 0 ? { bindingSeen } : {}),
-      ...(sealRequired ? { sealRequired: true } : {}),
-    });
+    // Start from the winner, then replace the seal unit coherently if the 3-way merge chose
+    // a different one (a plain spread cannot *remove* a field, so strip then re-apply).
+    const merged = { ...winner };
+    if (sealOverride) {
+      delete merged.sealPublicKey;
+      delete merged.sealSeen;
+      delete merged.sealConflict;
+      Object.assign(merged, sealOverride);
+    }
+    if (bindingSeen > 0) merged.bindingSeen = bindingSeen;
+    if (sealRequired) merged.sealRequired = true;
+    byName.set(p.name, merged);
   }
   return [...byName.values()];
+}
+
+/** The seal-relevant fields of a record, present-only (for a coherent add-or-remove).
+ * @param {any} record */
+function sealUnit(record) {
+  /** @type {any} */
+  const unit = {};
+  if (record.sealPublicKey) unit.sealPublicKey = record.sealPublicKey;
+  if (record.sealSeen) unit.sealSeen = record.sealSeen;
+  if (record.sealConflict) unit.sealConflict = record.sealConflict;
+  return unit;
+}
+
+/** Whether two records carry the same sealing posture (key by canonical DER, seen, conflict).
+ * @param {any} a @param {any} b */
+function sameSeal(a, b) {
+  const ak = a.sealPublicKey ?? null;
+  const bk = b.sealPublicKey ?? null;
+  const keysEqual = ak === null && bk === null ? true : Boolean(ak) && Boolean(bk) && sameCanonicalKey(ak, bk);
+  const conflictsEqual =
+    (a.sealConflict ?? null) === (b.sealConflict ?? null) ||
+    (Boolean(a.sealConflict) && Boolean(b.sealConflict) && sameCanonicalKey(a.sealConflict, b.sealConflict));
+  return keysEqual && Boolean(a.sealSeen) === Boolean(b.sealSeen) && conflictsEqual;
 }
 
 /**
