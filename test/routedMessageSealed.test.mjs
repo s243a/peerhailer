@@ -13,7 +13,7 @@ import { buildManifest, keyId, payloadDigest, signManifest } from "../src/routeM
 import { signRecord } from "../src/peerRecord.js";
 import { seal } from "../src/sealing.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
-import { wrapRoutedMessage, openRoutedMessage } from "../src/routedMessage.js";
+import { RoutedMessageInputError, wrapRoutedMessage, openRoutedMessage } from "../src/routedMessage.js";
 
 const T = 1_700_000_000_000;
 const MSG_ID = "_9_dyjXkLPnraDMak3Jg0w"; // 16 bytes, canonical base64url
@@ -55,6 +55,26 @@ const openAt = (wrapper, dest, { guard = guardAt(), ...rest } = {}) =>
     sealPrivateKey: dest.sealPrivateKey,
     ...rest,
   });
+
+/** Hand-build a sealed wrapper carrying `sealedObj`, with the manifest signed by `origin`. */
+const sealedForge = (origin, dest, sealedObj) => {
+  const transported = Buffer.from(JSON.stringify(sealedObj), "utf8");
+  const manifest = buildManifest({
+    originKeyId: origin.keyId,
+    destinationKeyId: dest.keyId,
+    messageId: MSG_ID,
+    issuedAt: T,
+    expiresAt: T + 60_000,
+    payloadMode: "sealed",
+    payloadDigest: payloadDigest(transported),
+  });
+  return {
+    manifest,
+    manifestSignature: signManifest(manifest, origin.id.privateKey),
+    originRecord: signRecord(origin.self, origin.id.privateKey),
+    payload: transported.toString("base64"),
+  };
+};
 
 test("a sealed wrapper round-trips; the plaintext never appears on the wire", () => {
   const a = machine("alice");
@@ -161,4 +181,55 @@ test("a sealed wrapper is delivered once; a replay is refused", () => {
   const guard = guardAt();
   assert.equal(openAt(w, b, { guard }).ok, true);
   assert.deepEqual(openAt(w, b, { guard }), { ok: false, reason: "replay:duplicate" });
+});
+
+test("a sealed body whose ciphertext would exceed the transported limit is refused at wrap", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  // ~600 KB plaintext fits the plaintext cap, but its ciphertext exceeds the transported one.
+  assert.throws(() => sealedWrap(a, b, { d: "x".repeat(600_000) }), RoutedMessageInputError);
+});
+
+test("a failed decrypt burns no replay reservation; a good copy with the same id still opens", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const carol = machine("carol");
+  const guard = guardAt();
+  const bytes = Buffer.from(JSON.stringify({ x: 1 }), "utf8");
+  // Bad copy: sealed to carol (bob cannot decrypt), sharing the good copy's messageId.
+  const bad = sealedForge(a, b, seal(bytes, carol.sealPublicKey, { signer: { publicKey: a.id.publicKey, privateKey: a.id.privateKey } }));
+  assert.deepEqual(openAt(bad, b, { guard }), { ok: false, reason: "seal" });
+  assert.equal(openAt(sealedWrap(a, b, { x: 1 }), b, { guard }).ok, true, "the good copy still opens — the failure reserved nothing");
+});
+
+test("an unsigned sealed block is refused — authentication is required", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const unsigned = seal(Buffer.from(JSON.stringify({ x: 1 }), "utf8"), b.sealPublicKey); // no signer
+  assert.deepEqual(openAt(sealedForge(a, b, unsigned), b), { ok: false, reason: "seal" });
+});
+
+test("a non-sealed-object or non-JSON sealed payload with a matching digest is refused, never thrown", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  // A valid JSON object that is not a sealed block -> openSigned rejects the suite -> "seal".
+  assert.deepEqual(openAt(sealedForge(a, b, { not: "a sealed block" }), b), { ok: false, reason: "seal" });
+  // Non-JSON transported bytes with a matching digest -> the sealed-branch parse fails -> "sealed".
+  const transported = Buffer.from("not json{", "utf8");
+  const manifest = buildManifest({
+    originKeyId: a.keyId,
+    destinationKeyId: b.keyId,
+    messageId: MSG_ID,
+    issuedAt: T,
+    expiresAt: T + 60_000,
+    payloadMode: "sealed",
+    payloadDigest: payloadDigest(transported),
+  });
+  const w = {
+    manifest,
+    manifestSignature: signManifest(manifest, a.id.privateKey),
+    originRecord: signRecord(a.self, a.id.privateKey),
+    payload: transported.toString("base64"),
+  };
+  assert.deepEqual(openAt(w, b), { ok: false, reason: "sealed" });
 });

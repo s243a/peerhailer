@@ -7,9 +7,12 @@
  * It rides *inside* the routing payload, opaque to the pure engine and to every
  * relay — a relay cannot forge the origin, redirect the message, or swap the body
  * (all of that is under the manifest signature) without the destination refusing it.
- * At M1 the body is **cleartext** (signed, not private): relays still read it, and
- * `open` refuses any manifest whose `payloadMode` is not `"clear"`. Confidentiality
- * (a sealed body under `payloadMode:"sealed"`) is M3; multi-block reassembly is later.
+ * A **clear** body is signed but not private (relays read it); a **sealed** body (M3b,
+ * `payloadMode:"sealed"`) is encrypted to the destination's X25519 key, and the manifest
+ * commits to the ciphertext — so relays read nothing while the signature still lives
+ * outside the seal (verify-before-decrypt). The signed `payloadMode` records which, so a
+ * relay can neither reinterpret one as the other nor downgrade a sealed send.
+ * Multi-block reassembly is later.
  *
  * Two limits worth stating precisely:
  *  - **The attached origin record is bound only by its *key*, not by this message.**
@@ -174,6 +177,14 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
     }
     transported = Buffer.from(JSON.stringify(sealed), "utf8");
     payloadMode = "sealed";
+  }
+
+  // The destination gates the *transported* bytes at MAX_ROUTED_BODY_BYTES, and sealing
+  // expands the plaintext (~4/3, base64 ciphertext inside the sealed JSON). Enforce that
+  // same ceiling on the transported form here so a body that would always be refused at
+  // open fails loudly at *send* instead of wrapping successfully and never arriving.
+  if (transported.length > MAX_ROUTED_BODY_BYTES) {
+    throw new RoutedMessageInputError(`sealed payload exceeds the ${MAX_ROUTED_BODY_BYTES}-byte transported limit`);
   }
 
   const manifest = buildManifest({
