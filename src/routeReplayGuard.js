@@ -52,6 +52,16 @@ export function createRouteReplayGuard({
   maxEntries = DEFAULT_MAX_ENTRIES,
   maxPerOrigin = DEFAULT_MAX_PER_ORIGIN,
 } = {}) {
+  // Validate the numeric options up front. A NaN (e.g. `clockSkewMs: NaN`) would flow
+  // into `exp = expiresAt + clockSkewMs` as NaN, and `existing.exp >= t` is false for
+  // NaN — so identical manifests would be admitted repeatedly instead of deduped. A
+  // misconfigured guard must fail loudly at construction, not silently disable replay.
+  for (const [name, value] of Object.entries({ maxValidityMs, clockSkewMs, maxEntries, maxPerOrigin })) {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      throw new Error(`route replay guard ${name} must be a finite, non-negative number`);
+    }
+  }
+  if (typeof now !== "function") throw new Error("route replay guard now must be a function");
   /** @type {Map<string, { exp: number, origin: string }>} dedup key -> reservation */
   const entries = new Map();
   /** @type {Map<string, number>} originKeyId -> live count */
