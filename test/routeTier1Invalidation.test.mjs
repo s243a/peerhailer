@@ -65,6 +65,24 @@ test("adopt (the daemon's real commit path) invalidates a Tier-1 key for a Tier-
   assert.equal(store.recordState(okid), "record-approved", "an unwalked peer's approved key survives adopt");
 });
 
+test("adopt invalidates a Tier-1 key when its peer is forgotten (disappears from the map)", () => {
+  const d = dir();
+  const store = createRoutedKeyStore();
+  d.setSealPostureListener((pk) => store.forget(keyId(pk)));
+  const peer = generateIdentity();
+  const kid = keyId(peer.publicKey);
+
+  // Admitted (no Tier-0 seal posture) with an approved Tier-1 key.
+  d.adopt({ admitted: [{ name: "peer", publicKey: peer.publicKey, profile: "trusted" }] });
+  store.observe(kid, recordOf(peer));
+  store.approve(kid);
+  assert.equal(store.recordState(kid), "record-approved");
+
+  // Forget the peer (adopt without it): it disappears -> its Tier-1 key is invalidated.
+  d.adopt({ admitted: [] });
+  assert.equal(store.recordState(kid), "none", "a forgotten peer's approved Tier-1 key is dropped");
+});
+
 test("a walk invalidates an approved Tier-1 key — no sealing to a superseded key", () => {
   const d = dir();
   const store = createRoutedKeyStore();

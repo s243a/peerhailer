@@ -715,19 +715,38 @@ switch (command) {
      */
     // Reload as one transaction over a SINGLE state snapshot: plugins, profiles, and the
     // directory adopt all derive from the same generation, so a change landing mid-build
-    // cannot split the runtime (plugins built from one state, directory from another) —
-    // that change triggers its own reload. Build (async, unlocked), then commit
-    // (synchronous), advancing the closure `plugins` only after `daemon.reload` accepts,
-    // so a throw leaves the old set serving.
-    const applyReload = async () => {
-      const snapshot = loadState(statePath);
-      const { plugins: nextPlugins } = await buildRuntime(snapshot, runtimeDeps);
-      const result = daemon.reload({ plugins: nextPlugins, profiles: mergeProfiles(nextPlugins, snapshot), state: snapshot });
-      plugins = nextPlugins;
-      if (nextPlugins.some((plugin) => plugin.name === "route")) {
+    // cannot split the runtime. Two further guards make it safe under concurrency:
+    //  - a *generation fence*: `adopt` bumps `directory.generation()`, and if state
+    //    committed while we were asynchronously building, we re-snapshot and rebuild
+    //    rather than adopt a stale snapshot over the newer live state;
+    //  - *serialization*: reloads run one at a time on a promise chain, so overlapping
+    //    API/SIGHUP reloads cannot interleave their commits.
+    // Build (async, unlocked), then commit (synchronous — no await between the fence check
+    // and `daemon.reload`), advancing `plugins` only after reload accepts, so a throw
+    // leaves the old set serving.
+    const doReload = async () => {
+      let gen = directory.generation ? directory.generation() : 0;
+      let snapshot = loadState(statePath);
+      let built = await buildRuntime(snapshot, runtimeDeps);
+      while (directory.generation && directory.generation() !== gen) {
+        gen = directory.generation();
+        snapshot = loadState(statePath);
+        built = await buildRuntime(snapshot, runtimeDeps);
+      }
+      const result = daemon.reload({ plugins: built.plugins, profiles: mergeProfiles(built.plugins, snapshot), state: snapshot });
+      plugins = built.plugins;
+      if (built.plugins.some((plugin) => plugin.name === "route")) {
         log(`[route] replay guard retained across reload`);
       }
       return result;
+    };
+    /** @type {Promise<any>} */
+    let reloadChain = Promise.resolve();
+    const applyReload = () => {
+      // Run even if a prior reload rejected (both handlers are doReload), so one failure
+      // does not wedge the chain.
+      reloadChain = reloadChain.then(doReload, doReload);
+      return reloadChain;
     };
 
     const daemon = createDaemon({

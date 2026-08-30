@@ -302,7 +302,9 @@ export function createRoutePlugin(deps) {
     // Once Tier 0 knows this peer's sealing posture, its Tier-1 entry is moot — drop it so
     // a stale key or conflict cannot linger (an authoritative walk supersedes discovery).
     if (tier0.state !== "unverified") routedKeyStore.forget(destinationKeyId);
-    if (target.decision === "refuse") return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0 };
+    if (target.decision === "refuse") {
+      return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0, seal: { decision: target.decision, tier: target.tier, state: target.state } };
+    }
     const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
 
     const wrapper = wrapRoutedMessage({

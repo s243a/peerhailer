@@ -1086,6 +1086,12 @@ export function createDaemon({
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        // A pin, if given, must be a real PEM string. Reject a non-string rather than
+        // silently treating it as no pin — an intended pin becoming an unpinned approval
+        // of whatever key is currently held is a footgun.
+        if (body.sealKey !== undefined && typeof body.sealKey !== "string") {
+          return send(response, 400, { error: "sealKey must be a PEM string" });
+        }
         const result = router.approveRoutedSeal(String(body.dest), typeof body.sealKey === "string" ? body.sealKey : undefined);
         return send(response, result.ok ? 200 : 409, result);
       }
@@ -1295,16 +1301,16 @@ export function createDaemon({
       // half-swapped route table. The caller does the async work (rebuilding
       // plugins) *before* calling this; an await moved inside here would reopen
       // exactly that window.
-      // Do the potentially-throwing directory work FIRST — `adopt` rejects malformed
-      // state — so a bad reload leaves the OLD plugin set (and its policy, e.g. the
-      // confidentiality floor) whole, rather than installing a possibly-weaker new set
-      // and only then failing. The plugin swap below cannot throw (collectRoutes
-      // logs-and-skips), so once we are past adopt the reload commits cleanly.
+      // Do ALL the potentially-throwing directory work FIRST — a malformed profile set or
+      // a malformed `adopt` state both throw — so a bad reload leaves the OLD plugin set
+      // (and its policy, e.g. the confidentiality floor) whole, rather than installing a
+      // possibly-weaker new set and only then failing. `useProfiles` runs before `adopt`,
+      // so malformed profiles are rejected before the directory is touched at all. The
+      // plugin swap below cannot throw (collectRoutes logs-and-skips), so once past this
+      // block the reload commits cleanly.
+      if (nextProfiles) directory.useProfiles(nextProfiles);
       if (state) directory.adopt(state);
-      if (nextProfiles) {
-        profiles = nextProfiles;
-        directory.useProfiles(nextProfiles);
-      }
+      if (nextProfiles) profiles = nextProfiles;
       if (Array.isArray(nextPlugins)) {
         // Build the replacement into a temporary *before* touching any live reference,
         // then swap both at once. Only after the swap are the replaced plugins stopped,

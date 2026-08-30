@@ -25,7 +25,7 @@ import {
   publicRecord,
   TARGET_BINDING_VERSION,
 } from "./peerRecord.js";
-import { fingerprint, normalizeKey, sameKey } from "./identity.js";
+import { fingerprint, normalizeKey, sameCanonicalKey, sameKey } from "./identity.js";
 
 /**
  * What `blockPeer` did, honest about what it blocked and why — so a caller can
@@ -271,6 +271,9 @@ export function createDirectory(state = {}) {
    * rotates, or a peer is forgotten) — the hook a routed key store uses to drop a now-moot
    * Tier-1 entry synchronously, before it can be sealed to a superseded key. */
   let sealPostureListener = null;
+  /** Bumped on every `adopt` (the daemon's commit point), so an async caller can tell
+   * whether the state moved under it between reading a snapshot and committing. */
+  let adoptGeneration = 0;
   /** @param {string | null | undefined} publicKey */
   const notifySeal = (publicKey) => {
     if (!publicKey || !sealPostureListener) return;
@@ -879,7 +882,11 @@ export function createDirectory(state = {}) {
      * @returns {{ state: "verified" | "conflict" | "reverify" | "unverified", key: string | null }}
      */
     sealForIdentity: (publicKey) => {
-      const aliases = [...admitted.values()].filter((record) => sameKey(record.publicKey, publicKey));
+      // Match by the CANONICAL key (SPKI DER), not PEM text: a routing destination is a
+      // DER key id, and an admitted record wrapping the same key differently must still
+      // count — otherwise its verified Tier-0 posture would be missed and a retired Tier-1
+      // key selected for the same identity.
+      const aliases = [...admitted.values()].filter((record) => sameCanonicalKey(record.publicKey, publicKey));
       if (aliases.length === 0) return { state: "unverified", key: null };
       let sawReverify = false;
       /** @type {string[]} */
@@ -1022,6 +1029,11 @@ export function createDirectory(state = {}) {
       const nextKeys = [...(state?.blocklist?.keys ?? [])];
       const incomingSelf = state?.self ? makePeerRecord(state.self) : null;
 
+      // Snapshot the identities we currently hold, so after the swap we can notify the
+      // ones that disappear (a forgotten or rotated-away peer) — its discovered Tier-1
+      // key must be invalidated too, not only when an identity *gains* a Tier-0 posture.
+      const beforeIdentities = new Set([...admitted.values()].map((r) => r.publicKey));
+
       // Everything normalised without throwing — apply it. Nothing below can throw,
       // so the directory moves from one consistent state to the next atomically.
       admitted.clear();
@@ -1061,15 +1073,22 @@ export function createDirectory(state = {}) {
       // The daemon commits EVERY runtime mutation through `adopt` (applyChange builds a
       // fresh directory, mutates it, and adopts it here), so the per-mutator notifySeal
       // calls above never fire in the live daemon — this is where Tier-1 invalidation has
-      // to happen. Notify for exactly the identities that now carry a Tier-0 seal posture
-      // (walked, disputed, or ever-sealed): a routed key store drops their discovered
-      // Tier-1 key, so a walk/accept/rotation can no longer leave a stale key sealable.
-      // Peers with no Tier-0 seal posture are untouched, so an approved Tier-1 key for an
-      // admitted-but-unwalked peer survives.
+      // to happen. Notify (a) identities that DISAPPEARED — a forgotten or rotated-away
+      // peer, whose discovered Tier-1 key must go too — and (b) identities that now carry
+      // a Tier-0 seal posture (walked, disputed, or ever-sealed), which supersedes Tier 1.
+      // A peer that stays put with no Tier-0 posture is untouched, so an approved Tier-1
+      // key for an admitted-but-unwalked peer survives.
+      const afterIdentities = new Set([...admitted.values()].map((r) => r.publicKey));
+      for (const pk of beforeIdentities) if (!afterIdentities.has(pk)) notifySeal(pk);
       for (const record of admitted.values()) {
         if (record.sealSeen || record.sealConflict || record.sealRequired) notifySeal(record.publicKey);
       }
+      adoptGeneration += 1;
     },
+    /** The adopt generation — a monotone counter a reload uses to detect that newer state
+     * committed while it was asynchronously building, so it never adopts a stale snapshot
+     * over it. */
+    generation: () => adoptGeneration,
     /**
      * Replace the profiles this directory resolves against.
      *

@@ -528,6 +528,7 @@ test("a Tier-1 conflict refuses the send rather than falling back to cleartext",
     delivered: false,
     reason: "seal-refused:tier1-conflict",
     spent: 0,
+    seal: { decision: "refuse", tier: null, state: "tier1-conflict" },
   });
 });
 

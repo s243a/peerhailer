@@ -68,6 +68,7 @@ export const COMMANDS = {
       route: "boolean",
       ui: "boolean",
       "require-target-binding": "boolean",
+      "require-sealed": "boolean",
     },
   },
   commands: {

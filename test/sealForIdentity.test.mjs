@@ -39,3 +39,22 @@ test("aliases verified to different keys fail closed as a conflict", () => {
 test("an unknown identity is unverified", () => {
   assert.deepEqual(dir().sealForIdentity(generateIdentity().publicKey), { state: "unverified", key: null });
 });
+
+test("aggregation matches a differently-wrapped PEM of the same key (canonical, not PEM text)", () => {
+  // Re-wrap the same key at a different line width: same DER, different text.
+  const rewrap = (pem) => {
+    const body = pem.replace(/-----[A-Z ]+-----|\s/g, "");
+    return `-----BEGIN PUBLIC KEY-----\n${(body.match(/.{1,48}/g) ?? []).join("\n")}\n-----END PUBLIC KEY-----\n`;
+  };
+  const d = dir();
+  const peer = generateIdentity();
+  const rewrapped = rewrap(peer.publicKey);
+  assert.notEqual(normalizeKey(rewrapped), normalizeKey(peer.publicKey), "the PEM text really differs");
+
+  d.admit({ name: "p", publicKey: peer.publicKey });
+  d.bindSealKey("p", peer.sealPublicKey, peer.publicKey);
+  // Query with the re-wrapped form of the same key — the verified alias must still match.
+  const r = d.sealForIdentity(rewrapped);
+  assert.equal(r.state, "verified", "a differently-wrapped PEM of the same key is not missed");
+  assert.equal(r.key, normalizeKey(peer.sealPublicKey));
+});

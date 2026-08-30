@@ -75,6 +75,27 @@ export function sameKey(left, right) {
 }
 
 /**
+ * Whether two keys are the same *identity* — compared by their canonical SPKI DER, not
+ * their PEM text. Two valid PEM encodings of one key (different line wrapping) are equal
+ * here though `sameKey` (PEM-text) calls them different. Use this wherever a *key*, not a
+ * byte-identical record, is what matters — e.g. matching a routing destination (keyed by
+ * the DER-canonical key id) to the admitted records that prove it. A key that will not
+ * parse compares unequal rather than throwing.
+ *
+ * @param {unknown} left
+ * @param {unknown} right
+ */
+export function sameCanonicalKey(left, right) {
+  try {
+    const a = createPublicKey(/** @type {any} */ (left)).export({ type: "spki", format: "der" });
+    const b = createPublicKey(/** @type {any} */ (right)).export({ type: "spki", format: "der" });
+    return a.equals(b);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A stable, human-checkable short form of a public key.
  *
  * For reading down a phone line or comparing on a screen — the moment where a
