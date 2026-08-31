@@ -538,6 +538,100 @@ switch (command) {
     break;
   }
 
+  case "route": {
+    // The operator side of confidential routing (M3b). Unlike `seal` (Tier-0, persisted),
+    // a routed destination's Tier-1 key lives in the RUNNING daemon's memory — so these
+    // are LIVE operations posted to its control API (served only with --ui), not offline
+    // state edits. `--control <url>` overrides the default 127.0.0.1:<port>.
+    const [action] = rest;
+    const controlUrl = (typeof flags.control === "string" ? flags.control : `http://127.0.0.1:${Number(flags.port ?? 8787)}`).replace(/\/+$/, "");
+    const post = async (/** @type {string} */ path, /** @type {any} */ body) => {
+      let res;
+      try {
+        res = await fetch(`${controlUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      } catch {
+        return fail(`could not reach the daemon control API at ${controlUrl} — is it running with --ui? (override with --control <url>)`);
+      }
+      const data = await res.json().catch(() => ({}));
+      return { status: res.status, data };
+    };
+    /** The destination identity key, from --dest-file or inline --dest. */
+    const readDest = () => {
+      const src = typeof flags["dest-file"] === "string" ? "dest-file" : typeof flags.dest === "string" ? "dest" : null;
+      if (!src) return null;
+      const raw = src === "dest-file"
+        ? (() => { try { return readFileSync(String(flags[src]), "utf8"); } catch { return fail(`--dest-file could not be read: ${flags[src]}`); } })()
+        : String(flags[src]);
+      const key = normalizeKey(raw);
+      // A file/value that read fine but holds no usable key is a distinct, clearer error
+      // than "you didn't pass a destination".
+      if (!key) return fail(`--${src} did not contain a usable destination key`);
+      return key;
+    };
+    /** @param {any} data */
+    const printSeal = (data) => {
+      if (!data || data.state === "none") return log("no routed sealing key for this destination");
+      const fp = data.detail?.sealKey ? fingerprint(data.detail.sealKey).slice(0, 14) : "(none)";
+      const name = data.detail?.name ? ` ${data.detail.name}` : "";
+      const note = data.detail?.approved ? "APPROVED" : data.state === "record-conflict" ? "CONFLICT — refuses to seal" : "pending — approve to use";
+      log(`${data.state}${name}: ${fp} (${note})`);
+    };
+
+    if (action === "discover" || action === "status") {
+      const dest = readDest();
+      if (!dest) fail(`usage: hail route ${action} --dest-file <peer-key-file> [--control <url>]`);
+      const { status, data } = await post(action === "discover" ? "/api/route/discover" : "/api/route/seal", { dest });
+      if (status !== 200) fail(data?.error ?? `${action} failed (HTTP ${status})`);
+      printSeal(data);
+      break;
+    }
+    if (action === "approve") {
+      const dest = readDest();
+      if (!dest) fail("usage: hail route approve --dest-file <peer-key-file> [--seal-key-file <expected-key-file>]");
+      let sealKey;
+      const src = typeof flags["seal-key-file"] === "string" ? "seal-key-file" : typeof flags["seal-key"] === "string" ? "seal-key" : null;
+      if (src) {
+        const raw = src === "seal-key-file"
+          ? (() => { try { return readFileSync(String(flags[src]), "utf8"); } catch { return fail(`--${src} could not be read: ${flags[src]}`); } })()
+          : String(flags[src]);
+        sealKey = normalizeKey(raw);
+        if (!sealKey) fail(`--${src} did not contain a usable sealing key`);
+      }
+      const { status, data } = await post("/api/route/seal-approve", { dest, ...(sealKey ? { sealKey } : {}) });
+      if (status === 200 && data?.ok) {
+        log(`approved routed sealing key ${fingerprint(data.sealKey).slice(0, 14)}`);
+        break;
+      }
+      fail(data?.error ?? (data?.reason ? `cannot approve: ${data.reason}` : `approve failed (HTTP ${status})`));
+      break;
+    }
+    if (action === "send") {
+      const dest = readDest();
+      if (!dest) fail('usage: hail route send --dest-file <peer-key-file> "<message>" [--public]');
+      const message = rest.slice(1).join(" ");
+      const { status, data } = await post("/api/route/send", {
+        dest,
+        payload: message,
+        public: flags.public === true,
+        ...(typeof flags.ttl === "string" ? { ttl: Number(flags.ttl) } : {}),
+        ...(typeof flags.budget === "string" ? { budget: Number(flags.budget) } : {}),
+      });
+      if (status !== 200) fail(data?.error ?? `send failed (HTTP ${status})`);
+      const tier = data?.seal?.tier;
+      // For a refusal, prefer the specific `reason` (e.g. a relay limit) and fall back to
+      // the seal state — one label, not the state and the reason duplicated.
+      const how = data?.seal?.decision === "seal"
+        ? `sealed (tier ${tier})`
+        : data?.seal?.decision === "cleartext"
+          ? "cleartext (public)"
+          : `refused: ${data?.reason ?? data?.seal?.state ?? "unknown"}`;
+      log(`${data?.delivered ? "delivered" : "not delivered"} — ${how}`);
+      break;
+    }
+    fail('usage: hail route discover|status|approve|send --dest-file <peer-key-file> [--seal-key-file <f>] [--public] [--control <url>]');
+    break;
+  }
+
   case "walk": {
     const result = await walk(directory, {
       as: { name: directory.self.name, publicKey: identity.publicKey, privateKey: identity.privateKey },
@@ -1596,6 +1690,8 @@ switch (command) {
         "  hail shares [add|remove]     a directory (or http store) a peer may list/get/put, by name",
         "  hail files <peer> <share> <list|get|put> [path] [localfile]   drive a peer's share",
         "  hail daemon --route          relay multi-hop messages across admitted peers (needs `route`)",
+        "  hail route status|approve --dest-file F   see/approve a routed peer's discovered sealing key (a live --ui daemon)",
+        "  hail route send --dest-file F \"msg\" [--public]   send a routed message (sealed once a key is approved)",
         "  hail gate set-password       gate a local web app behind a password, for a browser",
         "  hail gate serve --target U   serve that app over TLS at --port N (a bastion for e.g. T3)",
         "  hail shell <peer> <name> ...  drive a shell on a peer (open|send|poll|close|exec)",
