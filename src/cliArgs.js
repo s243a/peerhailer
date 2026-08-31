@@ -78,6 +78,23 @@ export const COMMANDS = {
       list: { positionals: [], options: {} },
     },
   },
+  // Live operations on a running daemon's in-memory routed key store (M3b), posted to
+  // its control API — so they take a `--control <url>` (default 127.0.0.1:<port>) and the
+  // destination identity key via `--dest`/`--dest-file`, not the offline state file.
+  route: {
+    actions: {
+      discover: { positionals: [], options: { dest: "string", "dest-file": "string", control: "string", port: "string" } },
+      status: { positionals: [], options: { dest: "string", "dest-file": "string", control: "string", port: "string" } },
+      approve: {
+        positionals: [],
+        options: { dest: "string", "dest-file": "string", "seal-key": "string", "seal-key-file": "string", control: "string", port: "string" },
+      },
+      send: {
+        positionals: ["...message"],
+        options: { dest: "string", "dest-file": "string", public: "boolean", ttl: "string", budget: "string", control: "string", port: "string" },
+      },
+    },
+  },
   profiles: {
     actions: {
       add: { positionals: ["name"], options: { allows: "string", description: "string" } },

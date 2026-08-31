@@ -336,7 +336,8 @@ honest: authenticate the exact bytes first (M1), establish destination-key polic
 anonymity (M3). **M0–M3b are implemented** — authenticated manifest + per-process replay
 (M1), Tier-1 key discovery (M2), and sealed payloads with confidential-by-default sends,
 per-key Tier-1 approval, identity-aggregated Tier-0, and the enforced floor (M3b), all
-hardened after Sol's integrated review. The remaining work is deferred and named where it
-arises above: durable (restart-safe) replay/Tier-1 and the M3a observation seam, signed
-response/refusal receipts, the signed floor *advertisement*, the `hail route` discovery/
-approval CLI subcommands, and the later M4+ chunking/anonymity.
+hardened after Sol's integrated review, and driveable from the CLI (`hail route
+status|approve|send` against a live `--ui` daemon's control API, since the Tier-1 store is
+in-memory). The remaining work is deferred and named where it arises above: durable
+(restart-safe) replay/Tier-1 and the M3a observation seam, signed response/refusal
+receipts, the signed floor *advertisement*, and the later M4+ chunking/anonymity.
