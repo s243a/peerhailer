@@ -226,23 +226,28 @@ export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineN
     /** @type {any} */
     let sealOverride = null;
     if (base && base.publicKey) {
-      const diskAdvanced = (Number(was.rev) || 0) > (Number(base.rev) || 0);
       const diskRotated = Boolean(was.publicKey) && !sameCanonicalKey(was.publicKey, base.publicKey);
       const iRotated = Boolean(p.publicKey) && !sameCanonicalKey(p.publicKey, base.publicKey);
-      if (diskAdvanced && diskRotated && !iRotated) winner = was;
-
-      // Same idea, one field down: the *sealing key* is causal too. When the identity is
-      // unchanged on both sides (no rotation), 3-way merge the seal against the baseline so
-      // a stale higher-`rev` snapshot cannot restore a retired key. If disk changed the seal
-      // and this writer did not, adopt disk's seal; if both changed it to DIFFERENT keys,
-      // fail closed to a conflict (never silently pick one).
-      if (!diskRotated && !iRotated) {
+      // The identity key is causal, both ways. Whichever side rotated (and only that side
+      // did) carries the identity+seal unit, regardless of `rev`: a stale higher-`rev`
+      // snapshot cannot undo a concurrent rotation, and this writer's own rotation is not
+      // lost to a concurrent higher-`rev` edit that never touched the identity. (A rotation
+      // bumps `rev`, so a differing identity always implies the other side advanced.)
+      if (diskRotated && !iRotated) winner = was;
+      else if (iRotated && !diskRotated) winner = p;
+      else if (!diskRotated && !iRotated) {
+        // Same identity on both sides: 3-way merge the *sealing key* against the baseline,
+        // both directions, so neither a stale writer nor a concurrent higher-`rev` edit can
+        // restore a retired key. Disagreeing concurrent keys fail closed to a conflict.
         const diskSealChanged = !sameSeal(was, base);
         const iSealChanged = !sameSeal(p, base);
-        if (diskSealChanged && !iSealChanged) sealOverride = sealUnit(was);
-        else if (diskSealChanged && iSealChanged && !sameCanonicalKey(was.sealPublicKey, p.sealPublicKey)) {
-          sealOverride = { ...sealUnit(was), sealSeen: true, sealConflict: normalizeKey(p.sealPublicKey) ?? was.sealConflict ?? null };
-        }
+        if (diskSealChanged && iSealChanged) {
+          if (was.sealPublicKey && p.sealPublicKey && !sameCanonicalKey(was.sealPublicKey, p.sealPublicKey)) {
+            sealOverride = { ...sealUnit(was), sealSeen: true, sealConflict: normalizeKey(p.sealPublicKey) };
+          }
+          // else a removal or the same key on both — leave the winner's seal (synthetic today).
+        } else if (diskSealChanged) sealOverride = sealUnit(was); // disk changed it, this writer did not
+        else if (iSealChanged) sealOverride = sealUnit(p); // this writer changed it, disk did not
       }
     }
     const loser = winner === p ? was : p;
