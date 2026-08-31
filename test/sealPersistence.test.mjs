@@ -32,6 +32,71 @@ test("mergeByRevision: higher revision wins, so a stale writer cannot roll a pee
   assert.ok(sameKey(mergeByRevision([fresh], [stale])[0].publicKey, bob2.publicKey));
 });
 
+test("reconcilePersist: a stale writer's higher-rev walk cannot undo a concurrent identity rotation", () => {
+  // This writer loaded peer K at rev 1 with the OLD identity + a verified old sealing key.
+  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, sealRequired: true, rev: 1 }] };
+  // Meanwhile another process ROTATED K to a new identity (rev 2), dropping the seal.
+  const onDisk = { admitted: [{ name: "k", publicKey: bob2.publicKey, sealRequired: true, rev: 2 }] };
+  // This stale writer, unaware of the rotation, made several walks on its old view -> rev 4.
+  const current = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, sealRequired: true, rev: 4 }] };
+
+  const merged = reconcilePersist(onDisk, baseline, current).admitted[0];
+  assert.ok(sameKey(merged.publicKey, bob2.publicKey), "the rotation held; the retired identity was not restored");
+  assert.ok(!merged.sealPublicKey, "the retired sealing key did not come back with the old identity");
+});
+
+test("reconcilePersist: this writer's OWN rotation/seal-retirement wins even when disk out-revs it (no key left live)", () => {
+  const sNew = generateIdentity();
+  // (a) This writer rotates the seal to sNew; disk made unrelated higher-rev edits, not touching the seal.
+  const baseSeal = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, rev: 1 }] };
+  const diskSeal = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, note: "disk", rev: 5 }] };
+  const mineSeal = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: sNew.sealPublicKey, sealSeen: true, rev: 2 }] };
+  assert.ok(
+    sameKey(reconcilePersist(diskSeal, baseSeal, mineSeal).admitted[0].sealPublicKey, sNew.sealPublicKey),
+    "the writer's new seal key landed despite disk's higher rev — the retired key is not left live",
+  );
+
+  // (b) This writer rotates the identity; disk didn't rotate but out-revs on other fields.
+  const baseId = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 1 }] };
+  const diskId = { admitted: [{ name: "k", publicKey: bob.publicKey, note: "disk", rev: 5 }] };
+  const mineId = { admitted: [{ name: "k", publicKey: bob2.publicKey, rev: 2 }] };
+  assert.ok(
+    sameKey(reconcilePersist(diskId, baseId, mineId).admitted[0].publicKey, bob2.publicKey),
+    "the writer's rotation landed despite disk's higher rev",
+  );
+});
+
+test("reconcilePersist: a higher-rev edit on the SAME identity still wins (no over-correction)", () => {
+  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 1 }] };
+  const onDisk = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 2, note: "disk" }] };
+  const current = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 4, note: "mine" }] };
+  assert.equal(reconcilePersist(onDisk, baseline, current).admitted[0].rev, 4, "same-identity higher rev still wins");
+});
+
+test("reconcilePersist: a stale writer's higher-rev walk cannot restore a retired seal key on one identity", () => {
+  const sNew = generateIdentity();
+  // Baseline: peer K, identity bob, the OLD seal key, rev 1.
+  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, sealRequired: true, rev: 1 }] };
+  // Disk: a concurrent accept rotated the SEAL to sNew (same identity), rev 2.
+  const onDisk = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: sNew.sealPublicKey, sealSeen: true, sealRequired: true, rev: 2 }] };
+  // Stale writer: several walks still holding the OLD seal, rev 4.
+  const current = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: bob.sealPublicKey, sealSeen: true, sealRequired: true, rev: 4 }] };
+
+  const merged = reconcilePersist(onDisk, baseline, current).admitted[0];
+  assert.ok(sameKey(merged.sealPublicKey, sNew.sealPublicKey), "the newer seal key held; the retired one was not restored");
+});
+
+test("reconcilePersist: concurrent DIFFERENT seal keys on one identity fail closed to a conflict", () => {
+  const s1 = generateIdentity();
+  const s2 = generateIdentity();
+  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 1 }] };
+  const onDisk = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: s1.sealPublicKey, sealSeen: true, rev: 2 }] };
+  const current = { admitted: [{ name: "k", publicKey: bob.publicKey, sealPublicKey: s2.sealPublicKey, sealSeen: true, rev: 4 }] };
+
+  const merged = reconcilePersist(onDisk, baseline, current).admitted[0];
+  assert.ok(merged.sealConflict, "disagreeing concurrent seal keys produce a conflict, not a silent pick");
+});
+
 test("mergeByRevision: sealRequired is a floor that never regresses, even if it loses the revision", () => {
   const onDisk = [{ name: "bob", publicKey: bob.publicKey, sealRequired: true, rev: 1 }];
   // A higher-rev snapshot that (defensively) lacks the floor must not clear it.

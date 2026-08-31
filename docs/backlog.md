@@ -283,14 +283,20 @@ roadmap is shared, not scattered across PR threads.
   event (walk/accept/rotate/forget, including a peer that disappears); reload is atomic (adopt before
   swap), single-snapshot, generation-fenced + serialized, and SIGHUP-reloadable headless; the resolver
   fails closed on incoherent state. All of Sol's re-review highs #2/#3/#4 + the mediums closed.
-- **TODO (HIGH, `[sol]`) — directory multi-writer merge is not causal.** `mergeByRevision` picks the
-  higher per-record `rev`, but `rev` is a local monotone counter, not a causal clock: a process that
-  loaded a stale snapshot and made several mutations outranks another process's newer one-step identity
-  rotation, and its OLD identity/sealing key wins the merge — restoring a **retired Tier-0 sealing key**.
-  Pre-existing (predates the routing work) and affects ALL sealed state, so it is out of M3b's scope, but
-  it is the one place "always seal to the current key" can still break. Fix = a directory-concurrency
-  change: causal ordering (or a wall-clock tiebreak with bounds), or a single-writer discipline where the
-  CLI signals the daemon (SIGHUP reload is a first step) instead of writing disk directly.
+- **CONFIDENTIALITY CORE FIXED (`branch directory-causal-merge`, Fable-confirmed) — `[sol]` directory
+  multi-writer merge is not causal.** `mergeByRevision` picked the higher per-record `rev`, but `rev` is a
+  local monotone counter, not a causal clock: a process that loaded a stale snapshot and made several
+  mutations outranked another process's newer one-step rotation, restoring a **retired identity/sealing
+  key**. FIXED for the security-critical fields, using the writer's baseline as the causal common
+  ancestor threaded into the merge: whichever side actually rotated the identity carries the identity+seal
+  unit regardless of `rev` (both directions); a same-identity seal change is a 3-way merge (disk-only →
+  disk, mine-only → mine, both-different → fail-closed conflict). So a retired key can no longer come back
+  from a stale multi-writer, in either direction. **Residual (NOT a confidentiality hole, pre-existing):**
+  non-security record fields (profile, addresses, note) still follow whole-record `rev`, so a stale writer
+  can still clobber a concurrent *non-security* edit; two concurrent rotations to *different* new
+  identities fall to `rev`. The full causal directory (vector clocks, or a single-writer discipline where
+  the CLI signals the daemon instead of writing disk — SIGHUP reload is a first step) remains the larger,
+  optional workstream.
 - **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
   identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
   (not the direct-chat `from === caller` binding). See `docs/routing.md`.
