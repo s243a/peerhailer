@@ -557,14 +557,16 @@ switch (command) {
     };
     /** The destination identity key, from --dest-file or inline --dest. */
     const readDest = () => {
-      if (typeof flags["dest-file"] === "string") {
-        try {
-          return normalizeKey(readFileSync(String(flags["dest-file"]), "utf8"));
-        } catch {
-          return fail(`--dest-file could not be read: ${flags["dest-file"]}`);
-        }
-      }
-      return typeof flags.dest === "string" ? normalizeKey(flags.dest) : null;
+      const src = typeof flags["dest-file"] === "string" ? "dest-file" : typeof flags.dest === "string" ? "dest" : null;
+      if (!src) return null;
+      const raw = src === "dest-file"
+        ? (() => { try { return readFileSync(String(flags[src]), "utf8"); } catch { return fail(`--dest-file could not be read: ${flags[src]}`); } })()
+        : String(flags[src]);
+      const key = normalizeKey(raw);
+      // A file/value that read fine but holds no usable key is a distinct, clearer error
+      // than "you didn't pass a destination".
+      if (!key) return fail(`--${src} did not contain a usable destination key`);
+      return key;
     };
     /** @param {any} data */
     const printSeal = (data) => {
@@ -616,8 +618,14 @@ switch (command) {
       });
       if (status !== 200) fail(data?.error ?? `send failed (HTTP ${status})`);
       const tier = data?.seal?.tier;
-      const how = data?.seal?.decision === "seal" ? `sealed (tier ${tier})` : data?.seal?.decision === "cleartext" ? "cleartext (public)" : `refused: ${data?.seal?.state ?? data?.reason}`;
-      log(`${data?.delivered ? "delivered" : "not delivered"} — ${how}${data?.reason && !data?.delivered ? ` (${data.reason})` : ""}`);
+      // For a refusal, prefer the specific `reason` (e.g. a relay limit) and fall back to
+      // the seal state — one label, not the state and the reason duplicated.
+      const how = data?.seal?.decision === "seal"
+        ? `sealed (tier ${tier})`
+        : data?.seal?.decision === "cleartext"
+          ? "cleartext (public)"
+          : `refused: ${data?.reason ?? data?.seal?.state ?? "unknown"}`;
+      log(`${data?.delivered ? "delivered" : "not delivered"} — ${how}`);
       break;
     }
     fail('usage: hail route discover|status|approve|send --dest-file <peer-key-file> [--seal-key-file <f>] [--public] [--control <url>]');
