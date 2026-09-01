@@ -195,3 +195,88 @@ test("the store stays bounded, evicting the oldest destination when full", () =>
   assert.equal(store.recordState(b.keyId), "record-carried");
   assert.equal(store.recordState(c.keyId), "record-carried");
 });
+
+// --- Durability: with an injected persistence port an approved key and a conflict survive a
+// restart — no first cleartext re-discovery, and a conflict cannot be shed by a bounce. ---
+
+test("persist fires on a durable mutation, not on a read", () => {
+  const calls = [];
+  const store = createRoutedKeyStore({ persist: (entries) => calls.push(entries) });
+  const d = machine("dest");
+  store.observe(d.keyId, recordOf(d)); // record-carried
+  assert.equal(calls.length, 1, "a new discovery persists");
+  store.recordSealKey(d.keyId);
+  store.recordState(d.keyId);
+  store.recordDetail(d.keyId);
+  assert.equal(calls.length, 1, "reads do not persist");
+  store.approve(d.keyId);
+  assert.equal(calls.length, 2, "an approval persists");
+  store.approve(d.keyId); // already approved
+  assert.equal(calls.length, 2, "a redundant approval does not persist");
+  store.forget(d.keyId);
+  assert.equal(calls.length, 3, "a forget persists");
+  store.forget(d.keyId); // nothing to delete
+  assert.equal(calls.length, 3, "a no-op forget does not persist");
+});
+
+test("an approved key survives a restart — no first cleartext re-discovery", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  store.observe(d.keyId, recordOf(d));
+  store.approve(d.keyId);
+  // A new process loads the snapshot.
+  const restored = createRoutedKeyStore({ initial: store.snapshot() });
+  assert.equal(restored.recordState(d.keyId), "record-approved");
+  assert.equal(restored.recordSealKey(d.keyId), d.sealPublicKey, "the approved key is usable immediately");
+});
+
+test("a conflict survives a restart and still refuses to pick", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  const stale = machine("dest"); // a different sealing key for the same target
+  store.observe(d.keyId, recordOf(d));
+  assert.equal(store.observe(d.keyId, recordOf(d, { sealPublicKey: stale.sealPublicKey })), "record-conflict");
+  const restored = createRoutedKeyStore({ initial: store.snapshot() });
+  assert.equal(restored.recordState(d.keyId), "record-conflict");
+  assert.equal(restored.recordSealKey(d.keyId), null, "a restored conflict seals to nothing");
+  // ...and it is still sticky: a matching record cannot clear it.
+  assert.equal(restored.observe(d.keyId, recordOf(d)), "record-conflict");
+});
+
+test("a pending key survives a restart but is still not usable until approved", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  store.observe(d.keyId, recordOf(d));
+  const restored = createRoutedKeyStore({ initial: store.snapshot() });
+  assert.equal(restored.recordState(d.keyId), "record-carried");
+  assert.equal(restored.recordSealKey(d.keyId), null, "still pending — approval did not survive because it never happened");
+  assert.equal(restored.approve(d.keyId).ok, true, "and it can be approved after the restart");
+});
+
+test("a malformed or unproven persisted entry is skipped; only a re-provable binding loads", () => {
+  const d = machine("dest");
+  const good = machine("good");
+  const store = createRoutedKeyStore({
+    initial: [
+      null,
+      { id: "not-a-key-id", record: recordOf(d), approved: true, conflict: false, name: "bad-id" },
+      { id: d.keyId, record: null, approved: true, conflict: false, name: "no-record" }, // approved but no proof → skipped
+      { id: good.keyId, record: recordOf(machine("other")), approved: true, conflict: false, name: "wrong-record" }, // record binds a different identity → skipped
+      { id: good.keyId, sealKey: good.sealPublicKey, record: recordOf(good), approved: true, conflict: false, name: "good" },
+    ],
+  });
+  assert.equal(store.size(), 1, "only the entry whose signed record re-proves its id loads");
+  assert.equal(store.recordSealKey(good.keyId), good.sealPublicKey, "and it is the approved, re-proven key");
+});
+
+test("a tampered sealKey field is overridden by the signed record on load", () => {
+  const d = machine("dest");
+  const attacker = machine("attacker");
+  // A local edit sets `approved:true` and swaps in the attacker's sealing key, but keeps the
+  // destination's genuine signed record. On load the key is taken from the RE-VERIFIED record,
+  // so the attacker's key is ignored — `approved` cannot bind a key the destination never signed.
+  const store = createRoutedKeyStore({
+    initial: [{ id: d.keyId, sealKey: attacker.sealPublicKey, record: recordOf(d), approved: true, conflict: false, name: "dest" }],
+  });
+  assert.equal(store.recordSealKey(d.keyId), d.sealPublicKey, "the sealing key comes from the record, not the sibling field");
+});

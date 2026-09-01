@@ -199,3 +199,15 @@ test("a change made while a daemon runs is not undone when it exits", () => {
   const afterNaiveShutdown = updateState(statePath, (onDisk) => ({ ...onDisk, ...asDaemonStarted }));
   assert.equal(afterNaiveShutdown.admitted.length, 0, "which is why the daemon no longer persists on exit");
 });
+
+test("loadState coerces a non-object file to {} so a caller's field access cannot throw", () => {
+  // A corrupt or hand-edited state/sidecar file might parse to a non-object. Each must load
+  // as an empty object, never a value whose `.field` access throws at daemon startup.
+  for (const raw of ["null", "[]", '"a string"', "42", "not json{"]) {
+    const path = scratch();
+    writeFileSync(path, raw, "utf8");
+    const state = loadState(path);
+    assert.deepEqual(state, {}, `"${raw}" loads as {}`);
+    assert.equal(state.entries, undefined, `"${raw}".entries is a safe undefined, not a throw`);
+  }
+});

@@ -42,7 +42,7 @@ import { walk, callPeer } from "../src/hail.js";
 import { createGate, hashPassword, newSecret } from "../src/gate.js";
 import { selfSignedCert } from "../src/cert.js";
 import { createDaemon } from "../src/server.js";
-import { defaultStatePath, loadState, updateState } from "../src/state.js";
+import { defaultStatePath, loadState, saveState, sidecarPath, updateState } from "../src/state.js";
 
 const log = (message) => process.stdout.write(`${message}\n`);
 const fail = (message) => {
@@ -687,11 +687,31 @@ switch (command) {
     const wantsRoute = flags.route === true || stored.routing === true;
     // One replay discipline for the daemon process, not one per plugin build: a
     // config reload reconstructs the route plugin but must not reopen every still-
-    // valid signed envelope. A process restart remains the documented M1 boundary.
-    const routeReplayGuard = createRouteReplayGuard();
-    // Likewise one Tier-1 discovery store for the process: a config reload must not
-    // forget the sealing keys learned from routed responses this session.
-    const routedKeyStore = createRoutedKeyStore();
+    // valid signed envelope. Durable across a *restart* too: reservations persist to a
+    // sidecar beside directory.json (write-per-reservation, small ~7-min-bounded set),
+    // so a still-unexpired envelope cannot be replayed once by bouncing the daemon.
+    const replayPath = sidecarPath("route-replay.json", statePath);
+    // A persist failure is logged, never thrown: the in-memory reservation is authoritative,
+    // so a full disk degrades durability, it does not fail (and burn) live deliveries.
+    const persistSidecar = (/** @type {string} */ path, /** @type {string} */ what) => (/** @type {any[]} */ entries) => {
+      try {
+        saveState({ entries }, path);
+      } catch (cause) {
+        process.stderr.write(`[route] could not persist ${what}: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+      }
+    };
+    const routeReplayGuard = createRouteReplayGuard({
+      initial: loadState(replayPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
+      persist: persistSidecar(replayPath, "replay guard"),
+    });
+    // Likewise one Tier-1 discovery store for the process, now durable across a restart:
+    // an approved routed sealing key survives a bounce (no first cleartext re-discovery),
+    // and a conflict cannot be shed by restarting. Daemon-owned, so no cross-writer lock.
+    const routeKeysPath = sidecarPath("route-keys.json", statePath);
+    const routedKeyStore = createRoutedKeyStore({
+      initial: loadState(routeKeysPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
+      persist: persistSidecar(routeKeysPath, "routed key store"),
+    });
     // A Tier-0 event (walk, accept, rotation, forget) supersedes any discovered Tier-1
     // key for that identity — drop it synchronously so a stale/retired key can never be
     // sealed to in the window before the next send would lazily clear it.

@@ -14,8 +14,10 @@ has **approved**) is refused, never sent in the clear; cleartext requires an exp
 `public` opt-out, which is also how a **data-free discovery probe** learns a peer's key.
 Tier-0 posture is aggregated per identity key; a Tier-0 event invalidates a stale Tier-1
 key synchronously; the resolver fails closed on any ambiguous or incoherent input. Bodies
-are cleartext only when explicitly public; the *response* path is still unsigned and
-unsealed (below), and replay/Tier-1 remain per-process.
+are cleartext only when explicitly public; the *response* path now carries a **signed
+delivery receipt** (below). Replay and Tier-1 are **restart-safe**: both persist to a
+daemon-owned sidecar beside `directory.json`, so a bounce neither reopens a still-unexpired
+replay window nor drops an approved sealing key to a first cleartext re-discovery.
 
 ## Where we are, honestly (M1 branch)
 
@@ -27,8 +29,11 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   payload (a discovery probe, or data the caller marked public) is cleartext to relays.
 - The outer **`origin` remains unsigned**, but it is discarded at delivery; consumers
   receive only the manifest's authenticated full-width `originKeyId`.
-- Replay is bounded per process by `(originKeyId,messageId,blockIndex)` until signed
-  expiry + skew. The guard survives daemon config reloads, **not process restart**.
+- Replay is bounded by `(originKeyId,messageId,blockIndex)` until signed expiry + skew. The
+  guard survives daemon config reloads **and process restart** — reservations persist to a
+  sidecar (`route-replay.json`), rehydrated on start with expired entries dropped, so a
+  still-unexpired envelope cannot be replayed once by bouncing the daemon. (A crash between
+  the reservation and the consumer completing is still at-most-once *attempt*, as before.)
 - The pure engine's unsigned M0 `id` cache is deliberately bypassed by the M1 plugin:
   it runs before cryptographic open and would otherwise be poisonable by a relay.
 - **"Loop-free" is a cooperative property, not a security one.** The visited-set / TTL
@@ -48,14 +53,15 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   *request* body — the consumer's response travels back through the same relays in the
   clear. Today's consumer only acks, but the first content-returning consumer (a routed
   `files get`) would send its payload back cleartext through the very relays the sealed
-  request bypassed; it must seal its own response. Signed/sealed receipts are later work.
-- Sealing to a **Tier-1** destination does not survive a restart. The record-carried key
-  store is session-scoped, so after a restart the first send to a Tier-1-only destination
-  resolves `cleartext` (no key, no dispute) — and that first send is also the
-  re-discovery vehicle, so the payload that was sealed pre-restart goes out clear once.
-  Tier-0 peers are protected by `sealRequired`'s durable floor; Tier-1 peers have no
-  equivalent until durable observation (M3a). The destination's own floor is the only
-  restart-safe backstop today.
+  request bypassed; it must seal its own response. A **signed delivery receipt** now proves
+  *what the destination did* with the request (delivered/refused, implemented); **sealing the
+  response body** is still later work.
+- Sealing to a **Tier-1** destination now survives a restart. The record-carried key store
+  persists to a sidecar (`route-keys.json`), so an **approved** key is usable immediately on
+  restart — no first send resolving `cleartext` and re-discovering — and a **conflict**
+  (security evidence) cannot be shed by a bounce. This extends Tier-1's existing no-liveness
+  property across the restart: a merely *pending* key is still unusable until approved, and a
+  Tier-0 event still supersedes (a persisted `forget` removes the moot entry durably).
 - **Multi-writer state can restore a retired Tier-0 sealing key (pre-existing, out of
   routing scope).** The directory merges concurrent state via a per-record monotone `rev`
   (higher wins). That is not a causal clock: a process that loaded a stale snapshot and
@@ -137,14 +143,31 @@ The signed manifest makes replay *detectable*; it does not close replay *without
 state* — and a signed expiry does **not** make an in-memory cache restart-safe
 (corrected from the prior draft). The restart hole: destination records `(origin,id)`
 in memory, restarts while the envelope is still unexpired, cache is empty, a relay
-replays the valid envelope, it is accepted again. The implementation picks the first:
+replays the valid envelope, it is accepted again. Both options now exist and the durable
+one is wired:
 
-- **session-only** dedup — in-memory, *explicitly not restart-safe* (**implemented**);
-  the daemon retains this same guard across plugin/config reloads; or
-- **across-restart** dedup — durable, retained until `expiresAt` (+ skew).
+- **session-only** dedup — in-memory, not restart-safe (**implemented**); the guard runs
+  this way whenever no persistence port is injected (all in-process consumers, tests); or
+- **across-restart** dedup — durable, retained until `expiresAt` (+ skew) (**implemented**).
+  The guard takes an injected `persist`/`initial` port; the daemon wires it to a sidecar
+  (`route-replay.json`), writing each new reservation and rehydrating on start (expired
+  dropped). The module itself stays pure — it does no I/O. Sidecars are daemon-owned and
+  written last-writer-wins (no `withStateLock`, unlike `directory.json`, which is multi-
+  writer): one daemon per home is assumed, and two daemons on one home clobber each other's
+  sidecars — fail-directions are availability (a lost reservation reopens a bounded window; a
+  lost key refuses), acceptable, since that configuration is already broken for directory
+  reasons. One honest edge: the monotonic time high-water mark is *deliberately not*
+  persisted. So the NTP-rollback fail-closed property is per-process, not across-restart — a
+  >skew backward clock jump spanning a restart could make any swept envelope whose `exp` falls
+  in the rollback span admissible again (a per-envelope-class reopening, each bounded by its
+  signed ≤7-min window; duplicate delivery, never a confidentiality loss). Persisting the
+  high-water would close that but at a worse cost: a transient *forward* clock error would then
+  persist a far-future mark that refuses all routed traffic until wall time catches up — and a
+  restart, the natural recovery, could no longer clear it. Restart-as-recovery for a bad clock
+  is worth more than closing a bounded, duplicate-only replay edge, so this stays documented.
 
-A signed expiry makes the durable state **bounded and garbage-collectable** — valuable
-— but not unnecessary.
+A signed expiry makes the durable state **bounded and garbage-collectable** (the live set is
+the ~7-minute window), which is what makes write-per-reservation cheap enough to be safe.
 
 Validation, enforced locally regardless of what the origin signed:
 
@@ -370,11 +393,14 @@ Kimi's two-root split and the equality-bound record discovery stand — routed k
 discovery is a piggyback plus a check, not a lookup protocol. Sol's corrections keep it
 honest: authenticate the exact bytes first (M1), establish destination-key policy second
 (M2), then add confidentiality without conflating it with freshness, replay state, or
-anonymity (M3). **M0–M3b are implemented** — authenticated manifest + per-process replay
-(M1), Tier-1 key discovery (M2), and sealed payloads with confidential-by-default sends,
-per-key Tier-1 approval, identity-aggregated Tier-0, and the enforced floor (M3b), all
-hardened after Sol's integrated review, and driveable from the CLI (`hail route
-status|approve|send` against a live `--ui` daemon's control API, since the Tier-1 store is
-in-memory). The remaining work is deferred and named where it arises above: durable
-(restart-safe) replay/Tier-1 and the M3a observation seam, signed response/refusal
-receipts, the signed floor *advertisement*, and the later M4+ chunking/anonymity.
+anonymity (M3). **M0–M3b are implemented**, plus signed delivery receipts and durable
+(restart-safe) replay/Tier-1 — authenticated manifest + replay dedup (M1), Tier-1 key
+discovery (M2), and sealed payloads with confidential-by-default sends, per-key Tier-1
+approval, identity-aggregated Tier-0, and the enforced floor (M3b), all hardened after Sol's
+integrated review, driveable from the CLI (`hail route status|approve|send` against a live
+`--ui` daemon's control API, since the Tier-1 store is in the daemon's memory), with the
+response path proven by a signed receipt and both replay + Tier-1 state now persisted across
+a restart. The remaining work is deferred and named where it arises above: the **M3a
+observation seam** (which would also let a receipt bind to a message's *terminal* outcome via
+durable per-id state), the signed floor *advertisement*, sealing the response *body*, and the
+later M4+ chunking/anonymity.

@@ -29,13 +29,31 @@ export function defaultStatePath(env = process.env) {
 }
 
 /**
+ * Sidecar files beside the directory, for the daemon's durable *runtime* state — the routed
+ * replay reservations and Tier-1 key store. Kept out of `directory.json` deliberately: they
+ * are daemon-owned (the CLI never writes them — it reaches Tier-1 through the control API), so
+ * they need no cross-writer lock, and the replay guard's write-per-delivery must not contend
+ * with the directory lock the CLI and page share.
+ * @param {string} name
+ * @param {string} [statePath]
+ */
+export function sidecarPath(name, statePath = defaultStatePath()) {
+  return join(dirname(statePath), name);
+}
+
+/**
  * @param {string} [path]
  * @param {{log?: (message: string) => void}} [options]
  * @returns {any}
  */
 export function loadState(path = defaultStatePath(), { log = () => {} } = {}) {
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    // A state file must be a JSON object; anything else (a literal `null`, an array, a
+    // scalar — from corruption or a hand-edit) is treated as absent, so a caller's
+    // `state.field` access cannot throw. A daemon that will not start over a bad file is a
+    // machine that has removed itself from the network for a reason nobody can see.
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (cause) {
     const code = /** @type {NodeJS.ErrnoException} */ (cause)?.code;
     if (code !== "ENOENT") {

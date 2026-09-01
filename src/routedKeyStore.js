@@ -21,10 +21,14 @@
  *    *different* key, but it can replay an *older* signed record (a retired sealing key).
  *    Approval is the human check against that; two *different* keys for one target become a
  *    sticky `record-conflict` (approval void) and the store refuses to pick a winner.
- *  - **Session-scoped, in-memory.** Like the replay guard, this holds no durable state; a
- *    record re-arrives on the next discovery, and a stale key never outlives the process.
- *    Capacity eviction drops a *pending* entry first — never an *approved* key or a
- *    *conflict* (both are operator/security state a relay must not be able to shed).
+ *  - **Restart-safe when given a persistence port.** With no port the store is session-scoped
+ *    (a record re-arrives on the next discovery, and a stale key never outlives the process).
+ *    Pass `initial` + `persist` and its state survives a restart — so an **approved** key does
+ *    not fall back to a first cleartext re-discovery on restart, and a **conflict** (security
+ *    evidence) cannot be shed by a bounce. This extends Tier-1's existing no-liveness property
+ *    across the restart (a pending key is still unusable until approved); the module does no
+ *    I/O, the daemon wires the port to a sidecar file. Capacity eviction still drops a
+ *    *pending* entry first — never an *approved* key or a *conflict*.
  *
  * @module routedKeyStore
  */
@@ -42,18 +46,79 @@ const B64URL = /^[A-Za-z0-9_-]+$/;
 const isKeyId = (v) => typeof v === "string" && v.length === SHA256_B64URL_LEN && B64URL.test(v);
 
 /**
- * @param {{ maxEntries?: number }} [options]
+ * A tracked destination, as persisted: its identity key id, the classified sealing key, and
+ * the **signed self-record** the key came from (null for a conflict), so the identity→key
+ * binding is re-proven on load rather than trusted — a hand-edited sidecar cannot bind an
+ * attacker's key as approved.
+ * @typedef {{ id: string, sealKey: string | null, approved: boolean, conflict: boolean, name: string, record: any }} StoredEntry
  */
-export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) {
+
+/**
+ * @param {{
+ *   maxEntries?: number,
+ *   initial?: StoredEntry[],                 // a persisted snapshot to rehydrate
+ *   persist?: (entries: StoredEntry[]) => void, // called after each durable mutation
+ * }} [options]
+ */
+export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial, persist } = {}) {
   /**
    * @type {Map<string, {
    *   sealKey: string | null,   // the discovered X25519 sealing key (null once conflicted)
    *   approved: boolean,        // a person has approved this key for sealing
    *   conflict: boolean,        // two differing sealing keys seen -> refuse to pick
    *   name: string,             // the destination's self-declared name, for surfacing
+   *   record: any,              // the signed self-record the key came from (null on conflict)
    * }>}
    */
   const entries = new Map();
+
+  /** @returns {StoredEntry[]} */
+  const serialize = () => [...entries].map(([id, e]) => ({ id, sealKey: e.sealKey, approved: e.approved, conflict: e.conflict, name: e.name, record: e.record ?? null }));
+  const persistNow = () => {
+    // Best-effort, for the same reason as the replay guard: a persist failure must not
+    // propagate out of observe/approve/forget (breaking a Tier-0 handler mid-flight, or
+    // failing a send() for a delivered message). The in-memory state is authoritative.
+    if (!persist) return;
+    try {
+      persist(serialize());
+    } catch {
+      /* durability is best-effort; the in-memory state stands */
+    }
+  };
+
+  // Rehydrate a persisted snapshot. A conflict seals to nothing (fail-closed), so it needs no
+  // key to re-prove and is kept sticky as-is. Any usable/pending entry must carry the signed
+  // self-record its key came from, and that record is re-verified here exactly as `observe`
+  // did — only the destination could sign a record whose identity hashes to this id, so a
+  // hand-edited sidecar cannot bind an *attacker's* key as approved: the key is always one the
+  // destination genuinely signed. What this proves is the identity->key *binding*, not the
+  // approval *decision* — a local editor can still flip `approved` on a genuine record, or
+  // substitute an older genuine one (the same no-liveness gap as a replayed record, at the
+  // same trust level as editing directory.json). The sealing key is taken from the re-verified
+  // record, not the sibling field, so a tampered `sealKey` is ignored. A malformed or unproven
+  // line is skipped, never fatal.
+  if (Array.isArray(initial)) {
+    for (const it of initial) {
+      if (!it || !isKeyId(it.id) || entries.has(it.id) || entries.size >= maxEntries) continue;
+      if (it.conflict === true) {
+        entries.set(it.id, { sealKey: null, approved: false, conflict: true, name: typeof it.name === "string" ? it.name : "", record: null });
+        continue;
+      }
+      if (!it.record) continue; // a usable/pending entry with no record to re-prove is dropped
+      const rec = verifyRecord(it.record, null);
+      if (!rec.ok) continue;
+      let identityKeyId;
+      try {
+        identityKeyId = keyId(rec.key);
+      } catch {
+        continue;
+      }
+      if (identityKeyId !== it.id) continue;
+      const sealKey = rec.record.sealPublicKey ?? null;
+      if (!sealKey) continue;
+      entries.set(it.id, { sealKey, approved: it.approved === true, conflict: false, name: rec.record.name, record: it.record });
+    }
+  }
 
   /** Make room under the ceiling by dropping the oldest *pending* destination, and report
    * whether it could. An approved key (operator-blessed) and a conflict (security evidence
@@ -106,10 +171,12 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
         // key or a conflict (never evicted), drop this new discovery rather than clobber
         // one — it is retriable on the next probe.
         if (entries.size >= maxEntries && !evictOldest()) return "at-capacity";
-        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name });
+        // Keep the signed envelope so the binding is re-provable on restart, not just trusted.
+        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name, record: envelope });
+        persistNow();
         return "record-carried";
       }
-      if (existing.conflict) return "record-conflict"; // sticky within the session
+      if (existing.conflict) return "record-conflict"; // sticky — and now persisted, so sticky across restarts too
       if (sameKey(existing.sealKey, sealKey)) {
         return existing.approved ? "record-approved" : "record-carried"; // adds no authority
       }
@@ -118,6 +185,8 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
       existing.sealKey = null;
       existing.approved = false;
       existing.conflict = true;
+      existing.record = null; // a conflict seals to nothing; it carries no key to re-prove
+      persistNow();
       return "record-conflict";
     },
 
@@ -140,7 +209,10 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
       if (expectedSealKey !== undefined && !sameKey(e.sealKey, expectedSealKey)) {
         return { ok: false, reason: "mismatch" };
       }
-      e.approved = true;
+      if (!e.approved) {
+        e.approved = true;
+        persistNow(); // persist only a real transition, not an idempotent re-approval
+      }
       return { ok: true, sealKey: e.sealKey };
     },
 
@@ -194,10 +266,13 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES } = {}) 
      * @param {string} targetKeyId
      */
     forget(targetKeyId) {
-      entries.delete(targetKeyId);
+      if (entries.delete(targetKeyId)) persistNow();
     },
 
     /** Tracked-destination count — for tests and diagnostics. */
     size: () => entries.size,
+
+    /** The tracked destinations in persisted form — the same snapshot `persist` receives. */
+    snapshot: () => serialize(),
   };
 }

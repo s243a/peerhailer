@@ -8,11 +8,14 @@
  * not-yet-valid envelope, or a full cache → refuse. Verification and replay state are
  * deliberately separate concerns.
  *
- * **This is a session guard, not restart-safe** (Sol's review): a signed `expiry`
- * bounds how long the state must live, so the cache is in-memory and
- * garbage-collectable, but a restart empties it and a still-unexpired envelope could
- * be replayed once. A durable variant — retained until `expiresAt` — is the
- * across-restart option; this is the stated per-process one.
+ * **Restart-safe when given a persistence port.** A signed `expiry` bounds how long the
+ * state must live (≤ `maxValidityMs` + skew, ~7 min), so the live set is small, in-memory,
+ * and garbage-collectable. With no port the guard is per-process (a restart empties it and a
+ * still-unexpired envelope could be replayed once — the historical M1 boundary). Pass
+ * `initial` (a loaded snapshot) and `persist` (called after each new reservation) and the
+ * reservations survive a restart: the loaded set is rehydrated, already-expired entries
+ * dropped, so a replay inside its window is still refused across the restart. The port is
+ * injected, not owned — the module does no I/O, and the daemon wires it to a sidecar file.
  *
  * The delivery it guards is at-most-once *attempt*: a crash between the reservation
  * here and the consumer completing can lose or (durably) duplicate. A consumer that
@@ -37,12 +40,20 @@ export const DEFAULT_MAX_ENTRIES = 4096;
 export const DEFAULT_MAX_PER_ORIGIN = 512;
 
 /**
+ * A durable reservation, as persisted: the composite dedup key, its effective expiry
+ * (`expiresAt + skew`), and the origin (so the per-origin ceiling rebuilds on load).
+ * @typedef {{ k: string, exp: number, origin: string }} ReplayEntry
+ */
+
+/**
  * @param {{
  *   now?: () => number,
  *   maxValidityMs?: number,
  *   clockSkewMs?: number,
  *   maxEntries?: number,
  *   maxPerOrigin?: number,
+ *   initial?: ReplayEntry[],            // a persisted snapshot to rehydrate (expired dropped)
+ *   persist?: (entries: ReplayEntry[]) => void, // called after each new reservation
  * }} [options]
  */
 export function createRouteReplayGuard({
@@ -51,6 +62,8 @@ export function createRouteReplayGuard({
   clockSkewMs = DEFAULT_CLOCK_SKEW_MS,
   maxEntries = DEFAULT_MAX_ENTRIES,
   maxPerOrigin = DEFAULT_MAX_PER_ORIGIN,
+  initial,
+  persist,
 } = {}) {
   // Validate the numeric options up front. A NaN (e.g. `clockSkewMs: NaN`) would flow
   // into `exp = expiresAt + clockSkewMs` as NaN, and `existing.exp >= t` is false for
@@ -102,6 +115,52 @@ export function createRouteReplayGuard({
     }
   };
 
+  // The persisted form is the *live* reservations only (expired ones are dropped, never
+  // written), so the sidecar file stays bounded to the ~7-minute window and hand-diffable.
+  /** @returns {ReplayEntry[]} */
+  const serialize = () => {
+    const t = timeHighWater;
+    /** @type {ReplayEntry[]} */
+    const out = [];
+    for (const [k, e] of entries) if (e.exp >= t) out.push({ k, exp: e.exp, origin: e.origin });
+    return out;
+  };
+  const persistNow = () => {
+    // Durability is an enhancement; the in-memory reservation is authoritative. A persist
+    // failure (full disk, EACCES) must NEVER propagate out of `admit` and turn a reserved-
+    // but-unwritten envelope into a hard delivery failure (deduped-yet-never-delivered).
+    // Best-effort here so the port contract — "persist must not throw" — holds however the
+    // daemon wires it; the daemon logs the failure at the port for visibility.
+    if (!persist) return;
+    try {
+      persist(serialize());
+    } catch {
+      /* keep the authoritative in-memory reservation */
+    }
+  };
+
+  // Rehydrate a persisted snapshot: a reservation still inside its window keeps deduping a
+  // replay across the restart; an already-expired one is dropped. The per-origin counts are
+  // rebuilt from the loaded set, honoring the per-origin ceiling. A malformed entry is
+  // skipped, not fatal — the sidecar is operator-local state, and a bad line must not remove
+  // the machine from the network.
+  if (Array.isArray(initial)) {
+    const t = currentTime();
+    // The live path can never reserve an `exp` beyond this (a reservation is `expiresAt +
+    // skew`, `issuedAt ≤ t + skew`, and validity ≤ max), so a snapshot claiming more is a
+    // corrupt/hand-edited entry that would never sweep — reject it, or one far-future line
+    // could deny its `(origin,messageId)` (or, at capacity, everyone's) indefinitely.
+    const maxExp = t + maxValidityMs + 2 * clockSkewMs;
+    for (const it of initial) {
+      if (!it || typeof it.k !== "string" || typeof it.origin !== "string") continue;
+      if (typeof it.exp !== "number" || !Number.isFinite(it.exp) || it.exp < t || it.exp > maxExp) continue;
+      if (entries.has(it.k) || entries.size >= maxEntries) continue;
+      if ((perOrigin.get(it.origin) ?? 0) >= maxPerOrigin) continue;
+      entries.set(it.k, { exp: it.exp, origin: it.origin });
+      inc(it.origin);
+    }
+  }
+
   /**
    * Run the complete window/dedup/capacity decision. `reserve:false` is a
    * non-reserving preflight (apart from harmless expired-entry GC); the caller can
@@ -148,6 +207,7 @@ export function createRouteReplayGuard({
     }
     entries.set(key, { exp: expiresAt + clockSkewMs, origin: originKeyId });
     inc(originKeyId);
+    persistNow();
     return { ok: true };
   };
 
@@ -179,6 +239,12 @@ export function createRouteReplayGuard({
     size: () => {
       sweep(currentTime());
       return entries.size;
+    },
+
+    /** The live reservations in persisted form — the same snapshot `persist` receives. */
+    snapshot: () => {
+      sweep(currentTime());
+      return serialize();
     },
   };
 }

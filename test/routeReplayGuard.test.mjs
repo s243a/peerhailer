@@ -116,3 +116,72 @@ test("a misconfigured guard fails loudly at construction rather than silently di
   assert.throws(() => createRouteReplayGuard({ maxValidityMs: Infinity }), /maxValidityMs/);
   assert.throws(() => createRouteReplayGuard({ maxEntries: -1 }), /maxEntries/);
 });
+
+// --- Durability: with an injected persistence port the reservations survive a restart, so a
+// still-unexpired envelope cannot be replayed by bouncing the daemon (routing roadmap). ---
+
+/** The module's composite dedup key, mirrored for building an `initial` snapshot by hand. */
+const dedupKey = (m) => `${m.originKeyId}\0${m.messageId}\0${m.blockIndex}`;
+
+test("persist is called on a reservation, not on a preflight check", () => {
+  const calls = [];
+  const g = createRouteReplayGuard({ now: () => T, persist: (entries) => calls.push(entries) });
+  g.check(man());
+  assert.equal(calls.length, 0, "a non-reserving check writes nothing");
+  g.admit(man());
+  assert.equal(calls.length, 1, "a reservation persists once");
+  assert.equal(calls[0][0].k, dedupKey(man()), "the persisted entry is the reserved one");
+  g.admit(man()); // a duplicate reserves nothing
+  assert.equal(calls.length, 1, "a refused duplicate does not persist");
+});
+
+test("a persisted snapshot rehydrates: a replay is refused across the restart, a fresh id admits", () => {
+  const g1 = createRouteReplayGuard({ now: () => T });
+  g1.admit(man());
+  const snapshot = g1.snapshot();
+  assert.equal(snapshot.length, 1);
+  // A new process loads the snapshot: the same envelope is still a duplicate.
+  const g2 = createRouteReplayGuard({ now: () => T, initial: snapshot });
+  assert.deepEqual(g2.admit(man()), { ok: false, reason: "duplicate" }, "the reservation survived the restart");
+  assert.deepEqual(g2.admit(man({ messageId: "m-2" })), { ok: true }, "a different envelope is still fresh");
+});
+
+test("an already-expired reservation in the snapshot is dropped on load", () => {
+  const g = createRouteReplayGuard({
+    now: () => T,
+    initial: [{ k: dedupKey(man()), exp: T - 1, origin: "O" }],
+  });
+  assert.equal(g.size(), 0, "the expired entry is not rehydrated");
+  assert.deepEqual(g.admit(man()), { ok: true }, "so the same key is admissible again");
+});
+
+test("a malformed snapshot entry is skipped, never fatal", () => {
+  const g = createRouteReplayGuard({
+    now: () => T,
+    initial: [null, { k: 1, exp: T + 1, origin: "O" }, { k: "ok", exp: "soon", origin: "O" }, { k: dedupKey(man()), exp: T + 180_000, origin: "O" }],
+  });
+  assert.equal(g.size(), 1, "only the well-formed, in-window entry loads");
+  assert.deepEqual(g.admit(man()), { ok: false, reason: "duplicate" });
+});
+
+test("a snapshot entry at exactly exp === t loads and still refuses as a duplicate at t", () => {
+  // The keep/drop seam: load drops exp < t, so exp === t must load and dedup at the same t.
+  const g = createRouteReplayGuard({ now: () => T, initial: [{ k: dedupKey(man()), exp: T, origin: "O" }] });
+  assert.equal(g.size(), 1, "exp === t is still in-window on load");
+  assert.deepEqual(g.admit(man()), { ok: false, reason: "duplicate" });
+});
+
+test("a far-future exp in a snapshot is rejected on load — no indefinite denial", () => {
+  const g = createRouteReplayGuard({ now: () => T, initial: [{ k: dedupKey(man()), exp: Number.MAX_SAFE_INTEGER, origin: "O" }] });
+  assert.equal(g.size(), 0, "an exp beyond any legitimate reservation is not loaded");
+  assert.deepEqual(g.admit(man()), { ok: true }, "so the key is admissible");
+});
+
+test("rehydration honors the per-origin ceiling, not just the global one", () => {
+  const initial = [0, 1, 2].map((i) => {
+    const m = man({ messageId: `m-${i}` });
+    return { k: dedupKey(m), exp: m.expiresAt + 120_000, origin: m.originKeyId };
+  });
+  const g = createRouteReplayGuard({ now: () => T, maxPerOrigin: 2, initial });
+  assert.equal(g.size(), 2, "only up to the per-origin ceiling is rehydrated");
+});
