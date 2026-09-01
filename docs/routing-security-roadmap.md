@@ -229,9 +229,46 @@ policy at delivery**:
    origin's signature over a different mode + digest).
 
 "Loud refusal" is loud *locally*; a relay can suppress any response, so if the origin
-must distinguish a refusal from a grayhole, the destination returns a **signed refusal
-receipt bound to `(origin, messageId)`**. Lowering the floor is a deliberate
-destination-side change; a replayed remote record never lowers local enforcement.
+must distinguish a refusal from a grayhole, the destination returns a **signed receipt
+bound to `(origin, messageId, blockIndex, outcome)`** (**implemented**, `src/routeReceipt.js`).
+The destination signs it with its **identity key** — the key the origin routed to — for both
+a `delivered` and any *authenticated* refusal (a refusal before authentication carries no
+receipt: there is no authenticated origin to bind, only relay-tampered bytes). The origin
+verifies it against the routing target it chose and the id it minted, so a relay can neither
+forge a `delivered` for a key it does not hold, replay a receipt onto a different message, nor
+silently downgrade a refusal reason; a *missing* receipt is itself the signal (treat it as a
+possible grayhole, not a delivery). The receipt is signed, not private — it names key ids and
+an outcome, nothing secret.
+
+A receipt attests *one presentation*, not the message id's final fate. A relay holding a valid
+wrapper can obtain a genuine `refused` receipt for the same `(origin, messageId)` that also
+delivers. With a payload-mangled copy the order is refuse-then-deliver: the manifest still
+authenticates, so the destination signs a `payload-digest` refusal *before* it reserves
+(`guard.admit` is last), and the real wrapper still delivers afterward. The `replay:duplicate`
+variant is the mirror image — the real wrapper lands and admits *first*, then a replayed copy
+refuses. Either way the destination signs two true receipts for one id, and a forking relay
+forwards only the `refused` one while swallowing the `delivered`. So the origin can be shown a
+*true, verified* `refused` for a message that in fact landed. This is strictly weaker than the
+grayhole a relay could already cause (a dropped receipt), and it can never manufacture a false
+`delivered` — that requires the destination's key. Treat a verified `refused` as "at least one
+presentation was refused", not "nothing was delivered". Binding a receipt to the message id's
+terminal outcome would need the destination to persist per-id state (M3a durable observation),
+out of scope here.
+
+One outcome deliberately carries **no** receipt: a sealed wrapper a destination cannot open
+(it holds no sealing key) is refused `unsupported-mode` in the pre-authentication capability
+gate, so the origin sees `present:false` (a possible grayhole). This is a *destination
+misconfiguration* — a record advertised a sealing key the daemon does not actually hold — not
+a relay-reachable state, since `payloadMode` is signed and a relay cannot flip a send to
+sealed. Making it receiptable would mean authenticating before the cheap capability check and
+splitting the mode gate three ways, to serve a misconfiguration signal; deferred. The
+operational reading meanwhile: a sealed send to a peer whose record advertised a seal key that
+returns `present:false` most likely means the destination cannot open sealed (misconfig), not
+a grayhole. If it is ever fixed, move both halves of the mode gate (capability + floor)
+post-authentication in one change so the gate is not split.
+
+Lowering the floor is a deliberate destination-side change; a replayed remote record never lowers
+local enforcement.
 
 ## Milestones (reordered per the review)
 

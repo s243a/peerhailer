@@ -22,6 +22,7 @@ import { createPrivateKey, randomBytes } from "node:crypto";
 import { keyId } from "../routeManifest.js";
 import { createRouteReplayGuard, DEFAULT_MAX_VALIDITY_MS } from "../routeReplayGuard.js";
 import { openRoutedMessage, wrapRoutedMessage } from "../routedMessage.js";
+import { buildReceipt, signReceipt, verifyReceipt } from "../routeReceipt.js";
 import { createRoutedKeyStore } from "../routedKeyStore.js";
 import { resolveRoutedSeal } from "../routedSealResolver.js";
 import { signRecord } from "../peerRecord.js";
@@ -48,6 +49,15 @@ const OPEN_REFUSAL = Symbol("route.open-refusal");
  * catches the identity match and flags a conflict), but cannot forge a new key.
  */
 export const ROUTED_RECORD_FIELD = "__routedRecord";
+
+/**
+ * Wire field: the destination piggybacks its *signed delivery receipt* on a routed response
+ * so the origin can tell a real delivery/refusal (signed by the routing target) from a relay
+ * forgery or a grayhole (no receipt). Like the discovery record it crosses JSON, so it is a
+ * reserved string key. A relay may drop it (the origin then has no proof and treats it as a
+ * possible grayhole) but cannot forge one for a key it does not hold. See `../routeReceipt.js`.
+ */
+export const ROUTED_RECEIPT_FIELD = "__routedReceipt";
 
 /** A JSON-object response we can safely add a field to — not an array, Buffer, or class
  * instance, which spreading would flatten into indexed/own properties.
@@ -131,14 +141,23 @@ export function createRoutePlugin(deps) {
         requireSealed: deps.requireSealed === true,
       });
       if (!opened.ok) {
+        // A refusal that got as far as an authenticated origin can be receipted: the
+        // origin learns *we* refused (and why), not that a relay dropped its message.
+        // A refusal before authentication (relay-tampered garbage) carries no receipt.
+        const auth = opened.authenticated;
+        const receipt = auth ? signedReceipt(auth.originKeyId, auth.messageId, auth.blockIndex, "refused", opened.reason) : null;
         // A floor refusal still teaches our sealing key, so a routed-only origin can
         // learn it and retry sealed. Otherwise the floor deadlocks discovery: it
         // demands sealing while refusing the clear probe that carries the key back.
         if (opened.reason === "cleartext-refused") {
           const record = signedDiscoveryRecord();
-          return record ? { [OPEN_REFUSAL]: opened.reason, [ROUTED_RECORD_FIELD]: record } : { [OPEN_REFUSAL]: opened.reason };
+          return {
+            [OPEN_REFUSAL]: opened.reason,
+            ...(record ? { [ROUTED_RECORD_FIELD]: record } : {}),
+            ...(receipt ? { [ROUTED_RECEIPT_FIELD]: receipt } : {}),
+          };
         }
-        return { [OPEN_REFUSAL]: opened.reason };
+        return { [OPEN_REFUSAL]: opened.reason, ...(receipt ? { [ROUTED_RECEIPT_FIELD]: receipt } : {}) };
       }
       // Await the consumer before attaching: a consumer may return a promise, and
       // spreading that instead of its resolved response would corrupt the result.
@@ -147,7 +166,8 @@ export function createRoutePlugin(deps) {
         origin: opened.originKeyId,
         originKeyId: opened.originKeyId,
       });
-      return attachDiscovery(response);
+      const receipt = signedReceipt(opened.originKeyId, opened.messageId, opened.blockIndex, "delivered", "");
+      return attachReceipt(attachDiscovery(response), receipt);
     },
   });
 
@@ -176,6 +196,51 @@ export function createRoutePlugin(deps) {
     if (!isPlainObject(response)) return response;
     const signed = signedDiscoveryRecord();
     return signed ? { ...response, [ROUTED_RECORD_FIELD]: signed } : response;
+  };
+
+  /**
+   * Sign a delivery receipt as the destination (this machine): bind our authenticated view
+   * of `(origin, messageId, blockIndex, outcome[, reason])` under our identity key — the key
+   * the origin routed to. Returns `{ receipt, signature }`, or `null` if a receipt cannot be
+   * built (a defensive guard; the inputs come from an already-authenticated manifest).
+   * @param {string} originKeyId @param {string} messageId @param {number} blockIndex
+   * @param {"delivered" | "refused"} outcome @param {string} reason
+   */
+  const signedReceipt = (originKeyId, messageId, blockIndex, outcome, reason) => {
+    try {
+      const receipt = buildReceipt({ originKeyId, destinationKeyId: selfKeyId, messageId, blockIndex, outcome, reason, issuedAt: now() });
+      return { receipt, signature: signReceipt(receipt, deps.privateKey) };
+    } catch {
+      return null;
+    }
+  };
+
+  /** Attach a signed receipt to a plain-object response (same corruption guard as discovery).
+   * @param {any} response @param {{receipt: any, signature: string} | null} receipt */
+  const attachReceipt = (response, receipt) => {
+    if (!receipt || !isPlainObject(response)) return response;
+    return { ...response, [ROUTED_RECEIPT_FIELD]: receipt };
+  };
+
+  /**
+   * Verify the receipt an origin got back for a send it made. Confirms the carried receipt is
+   * signed by the routing target (`dest`), and binds to *this* send: our own key as origin,
+   * the exact `messageId` we minted, block 0 (host sends are single-block). Returns a small
+   * verdict — `{ present:false }` when the response carried none (a possible grayhole),
+   * `{ present:true, verified:false }` on a forgery/mismatch, or the verified outcome.
+   * @param {string} dest destination identity public key (PEM)
+   * @param {string} messageId the id this send minted
+   * @param {any} result
+   */
+  const verifyRoutedReceipt = (dest, messageId, result) => {
+    const carried = result?.response?.[ROUTED_RECEIPT_FIELD];
+    if (!carried || typeof carried !== "object") return { present: false, verified: false };
+    const { receipt, signature } = carried;
+    if (typeof signature !== "string" || !verifyReceipt(receipt, signature, dest)) return { present: true, verified: false };
+    if (receipt.originKeyId !== selfKeyId || receipt.messageId !== messageId || receipt.blockIndex !== 0) {
+      return { present: true, verified: false };
+    }
+    return { present: true, verified: true, outcome: receipt.outcome, reason: receipt.reason };
   };
 
   /**
@@ -208,6 +273,9 @@ export function createRoutePlugin(deps) {
     // works under the floor); preserve it when rebuilding the response, or the fix would
     // hold multi-hop but be dropped on the single-hop/self-delivery path.
     const record = result?.response?.[ROUTED_RECORD_FIELD];
+    // A receipted refusal carries the destination's signed proof it refused (and why);
+    // preserve it when rebuilding the response, exactly as the discovery record is kept.
+    const receipt = result?.response?.[ROUTED_RECEIPT_FIELD];
     return {
       ...result,
       delivered: true,
@@ -220,6 +288,7 @@ export function createRoutePlugin(deps) {
             reason: refusalReason,
             ...(duplicate ? { duplicate: true } : {}),
             ...(record ? { [ROUTED_RECORD_FIELD]: record } : {}),
+            ...(receipt ? { [ROUTED_RECEIPT_FIELD]: receipt } : {}),
           }
         : result.response,
     };
@@ -307,12 +376,13 @@ export function createRoutePlugin(deps) {
     }
     const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
 
+    const messageId = newMessageId();
     const wrapper = wrapRoutedMessage({
       self: deps.selfRecord(),
       privateKey: deps.privateKey,
       destinationKeyId,
       body: payload,
-      messageId: newMessageId(),
+      messageId,
       now: now(),
       validityMs: messageValidityMs,
       ...(sealTo ? { sealTo } : {}),
@@ -322,9 +392,13 @@ export function createRoutePlugin(deps) {
     if (opts.budget !== undefined) routeOptions.budget = opts.budget;
     const result = normalizeOpenResult(await rawRouter.send(dest, wrapper, routeOptions));
     observeDiscovery(destinationKeyId, result);
+    // Verify the destination's signed receipt against the target we chose and the id we
+    // minted: a verified `delivered`/`refused` is proof the routing target acted; a missing
+    // or unverifiable one is surfaced as such (a relay may have grayholed or forged).
+    const receipt = verifyRoutedReceipt(dest, messageId, result);
     // Surface the confidentiality decision so a caller sees whether it was sealed and at
     // which tier — not just that it was delivered (the review's pre-send disclosure).
-    return { ...result, seal: { decision: target.decision, tier: target.tier, state: target.state } };
+    return { ...result, seal: { decision: target.decision, tier: target.tier, state: target.state }, receipt };
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as

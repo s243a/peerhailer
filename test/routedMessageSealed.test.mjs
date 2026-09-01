@@ -47,14 +47,20 @@ const sealedWrap = (origin, dest, body, over = {}) =>
   });
 
 /** Open at `dest`, supplying its sealing key by default. */
-const openAt = (wrapper, dest, { guard = guardAt(), ...rest } = {}) =>
-  openRoutedMessage(wrapper, {
+const openAt = (wrapper, dest, { guard = guardAt(), ...rest } = {}) => {
+  const r = openRoutedMessage(wrapper, {
     selfKeyId: dest.keyId,
     guard,
     authorizeOrigin: () => true,
     sealPrivateKey: dest.sealPrivateKey,
     ...rest,
   });
+  // Strip the receipt-support fields so the exact-shape assertions stay focused (see the
+  // dedicated receipt tests for those).
+  if (r.ok) { const { messageId, blockIndex, ...core } = r; return core; }
+  const { authenticated, ...core } = r;
+  return core;
+};
 
 /** Hand-build a sealed wrapper carrying `sealedObj`, with the manifest signed by `origin`. */
 const sealedForge = (origin, dest, sealedObj) => {

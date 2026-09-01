@@ -626,6 +626,19 @@ switch (command) {
           ? "cleartext (public)"
           : `refused: ${data?.reason ?? data?.seal?.state ?? "unknown"}`;
       log(`${data?.delivered ? "delivered" : "not delivered"} — ${how}`);
+      // The signed receipt is the destination's own proof of what it did. A verified one
+      // distinguishes a real delivery/refusal from a relay forgery; a missing one means no
+      // proof (a possible grayhole) — worth showing, not just the unsigned response.
+      const receipt = data?.receipt;
+      if (receipt) {
+        if (receipt.verified) {
+          log(`  receipt: verified ${receipt.outcome}${receipt.outcome === "refused" && receipt.reason ? ` (${receipt.reason})` : ""} — signed by the destination`);
+        } else if (receipt.present) {
+          log("  receipt: present but did NOT verify — treat as unproven (possible relay forgery)");
+        } else {
+          log("  receipt: none — no proof of delivery (possible grayhole, or a peer that predates receipts)");
+        }
+      }
       break;
     }
     fail('usage: hail route discover|status|approve|send --dest-file <peer-key-file> [--seal-key-file <f>] [--public] [--control <url>]');

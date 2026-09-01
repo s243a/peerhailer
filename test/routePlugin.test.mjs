@@ -12,6 +12,7 @@ import {
   MAX_RELAYS_PER_WINDOW,
   RELAY_WINDOW_MS,
   ROUTED_RECORD_FIELD,
+  ROUTED_RECEIPT_FIELD,
 } from "../src/builtin/routePlugin.js";
 import { generateIdentity, normalizeKey } from "../src/identity.js";
 import { signRecord } from "../src/peerRecord.js";
@@ -20,6 +21,7 @@ import { REFUSE } from "../src/plugins.js";
 import { keyId } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { wrapRoutedMessage } from "../src/routedMessage.js";
+import { verifyReceipt } from "../src/routeReceipt.js";
 
 /** A signed key-only record for `m` advertising `sealPublicKey` (default its own). */
 const recordOf = (m, sealPublicKey = m.identity.sealPublicKey) =>
@@ -35,10 +37,11 @@ const machine = (name) => {
   };
 };
 
-/** A delivery response with the M2 discovery record stripped, for exact-shape checks. */
+/** A delivery response with the M2 discovery record and signed receipt stripped, for
+ * exact-shape checks (dedicated tests cover both wire fields). */
 const responseBody = (response) => {
   if (!response || typeof response !== "object") return response;
-  const { [ROUTED_RECORD_FIELD]: _record, ...rest } = response;
+  const { [ROUTED_RECORD_FIELD]: _record, [ROUTED_RECEIPT_FIELD]: _receipt, ...rest } = response;
   return rest;
 };
 
@@ -594,4 +597,161 @@ test("a floored destination teaches its key on a public probe; after approval th
   const sealed = await pluginA.send(b.identity.publicKey, { secret: "ok" });
   assert.equal(sealed.delivered, true, `sealed retry delivered (${sealed.reason ?? ""})`);
   assert.deepEqual(deliveredBody, { secret: "ok" });
+});
+
+// --- Signed delivery receipts: the origin can tell a real delivery/refusal (signed by the
+// routing target) from a relay forgery or a grayhole (docs/routing-security-roadmap.md). ---
+
+/** A two-machine wire where `relay` may tamper with bob's response before alice sees it. */
+const receiptWire = (a, b, { destOver = {}, tamper = (r) => r } = {}) => {
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => tamper(await pluginB.router.relay(envelope, a.identity.publicKey)),
+    deliver: () => assert.fail("origin must not deliver a message addressed to bob"),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey], ...destOver }));
+  return pluginA;
+};
+
+test("a delivered send returns a receipt the origin verifies against the routing target", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const pluginA = receiptWire(a, b, { destOver: { deliver: (body) => ({ received: true, echo: body }) } });
+
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
+  assert.equal(result.delivered, true);
+  assert.deepEqual(result.receipt, { present: true, verified: true, outcome: "delivered", reason: "" });
+  // The wire field carries bob's signature; the verdict is the origin's, keyed to this send.
+  assert.ok(result.response[ROUTED_RECEIPT_FIELD]?.signature, "bob signed a delivery receipt");
+});
+
+test("a refusal the destination authenticated returns a signed `refused` receipt with the reason", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  // Bob authenticates the origin, then declines it: an authenticated refusal is receiptable.
+  const pluginA = receiptWire(a, b, { destOver: { authorizeOrigin: () => false } });
+
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
+  assert.equal(result.refused, true);
+  assert.deepEqual(result.receipt, { present: true, verified: true, outcome: "refused", reason: "origin-unauthorized" });
+});
+
+test("a relay that drops the receipt leaves the origin with no proof (a possible grayhole)", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const pluginA = receiptWire(a, b, {
+    destOver: { deliver: () => ({ received: true }) },
+    tamper: (r) => {
+      if (r?.response?.[ROUTED_RECEIPT_FIELD]) delete r.response[ROUTED_RECEIPT_FIELD];
+      return r;
+    },
+  });
+
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
+  assert.equal(result.delivered, true, "the response still arrives; only the proof is gone");
+  assert.deepEqual(result.receipt, { present: false, verified: false });
+});
+
+test("a relay that forges the receipt outcome fails verification (present but not verified)", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const pluginA = receiptWire(a, b, {
+    destOver: { authorizeOrigin: () => false }, // a `refused` receipt bob really signed
+    tamper: (r) => {
+      const carried = r?.response?.[ROUTED_RECEIPT_FIELD];
+      if (carried) carried.receipt = { ...carried.receipt, outcome: "delivered", reason: "" }; // flip to a fake ack
+      return r;
+    },
+  });
+
+  const result = await pluginA.send(b.identity.publicKey, { hello: "graph" }, { public: true });
+  assert.deepEqual(result.receipt, { present: true, verified: false }, "the tampered outcome breaks bob's signature");
+});
+
+test("T1: a floored destination's clear refusal carries BOTH its key record and a verified receipt", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    requireSealed: true, // the floor: B refuses cleartext
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  assert.equal(res.refused, true);
+  assert.equal(res.response.reason, "cleartext-refused");
+  // The two wire fields ride together on the same refusal object: the discovery record
+  // (so a routed origin can still learn B's key behind the floor) AND the signed receipt.
+  assert.ok(res.response[ROUTED_RECORD_FIELD], "the floor refusal still teaches B's key-only record");
+  assert.ok(res.response[ROUTED_RECEIPT_FIELD]?.signature, "and carries B's signed refusal receipt");
+  // The origin's verdict verifies it against the routing target and this send.
+  assert.deepEqual(res.receipt, { present: true, verified: true, outcome: "refused", reason: "cleartext-refused" });
+});
+
+test("T2: a pre-authentication refusal (relay-mangled manifest) carries NO receipt", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => {
+      // A relay mutates the signed manifest: verifyManifest now fails, so B refuses at
+      // "manifest" — before any authenticated origin exists, so it can sign no receipt.
+      const mangled = structuredClone(envelope);
+      mangled.payload.manifest.messageId = "AAAAAAAAAAAAAAAAAAAAAA"; // valid shape, breaks the signature
+      return pluginB.router.relay(mangled, a.identity.publicKey);
+    },
+    deliver: () => assert.fail("a mangled manifest must not deliver"),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, { neighbors: () => [a.identity.publicKey] }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  assert.equal(res.refused, true);
+  assert.equal(res.response.reason, "manifest");
+  assert.equal(res.response[ROUTED_RECEIPT_FIELD], undefined, "no receipt is signed over relay-tampered garbage");
+  assert.deepEqual(res.receipt, { present: false, verified: false });
+});
+
+test("Q4: one messageId can yield two genuine receipts — a refused presentation and a delivered one", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  let refusedReceipt;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => {
+      // A forking relay presents a payload-mangled copy first: it authenticates (manifest
+      // intact) but fails the digest — refused BEFORE guard.admit, so nothing is reserved.
+      const mangled = structuredClone(envelope);
+      const bytes = Buffer.from(mangled.payload.payload, "base64");
+      bytes[0] ^= 0xff;
+      mangled.payload.payload = bytes.toString("base64");
+      const refused = await pluginB.router.relay(mangled, a.identity.publicKey);
+      refusedReceipt = refused?.response?.[ROUTED_RECEIPT_FIELD];
+      // ...then forwards the real wrapper, which delivers (the mangled copy reserved nothing).
+      return pluginB.router.relay(envelope, a.identity.publicKey);
+    },
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    deliver: () => ({ received: true }),
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  // The real wrapper delivered, with a verified delivered receipt.
+  assert.deepEqual(res.receipt, { present: true, verified: true, outcome: "delivered", reason: "" });
+  const deliveredMsgId = res.response[ROUTED_RECEIPT_FIELD].receipt.messageId;
+  // The mangled presentation produced a SEPARATE, genuine refused receipt for the SAME id:
+  // both verify against B's key — the per-presentation limitation the roadmap documents.
+  assert.ok(refusedReceipt, "the mangled presentation was itself receipted");
+  assert.equal(verifyReceipt(refusedReceipt.receipt, refusedReceipt.signature, b.identity.publicKey), true);
+  assert.equal(refusedReceipt.receipt.outcome, "refused");
+  assert.equal(refusedReceipt.receipt.reason, "payload-digest");
+  assert.equal(refusedReceipt.receipt.messageId, deliveredMsgId, "two true receipts bind one (origin, messageId)");
 });

@@ -252,8 +252,13 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
  *   sealPrivateKey?: string, // this machine's X25519 private key (PEM); required for sealed
  *   requireSealed?: boolean, // local floor: refuse a clear wrapper
  * }} deps
- * @returns {{ ok: true, body: any, originKeyId: string }
- *   | { ok: false, reason: string }}
+ * On any outcome AFTER the manifest is authenticated (delivery or refusal) the result
+ * carries the authenticated `{originKeyId, messageId, blockIndex}` — on `ok` as fields, on
+ * refusal under `authenticated` — so the caller can sign a delivery receipt for it. Refusals
+ * before authentication carry no such identity (there is no authenticated origin).
+ *
+ * @returns {{ ok: true, body: any, originKeyId: string, messageId: string, blockIndex: number }
+ *   | { ok: false, reason: string, authenticated?: { originKeyId: string, messageId: string, blockIndex: number } }}
  */
 export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, sealPrivateKey, requireSealed }) {
   if (!hasExactly(wrapper, WRAPPER_FIELDS)) return { ok: false, reason: "malformed" };
@@ -273,14 +278,15 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   // can make a valid message for us pass; a relay that changes one earns refusal.
   if (manifestProblem(manifest) !== null) return { ok: false, reason: "manifest" };
   if (manifest.destinationKeyId !== selfKeyId) return { ok: false, reason: "not-for-me" };
-  // Mode + local floor. `payloadMode` is a signed field, so these are safe pre-crypto
-  // rejections a relay cannot leverage: it can neither downgrade sealed→clear nor
-  // upgrade clear→sealed without breaking the manifest signature checked below.
-  if (manifest.payloadMode === "clear") {
-    if (requireSealed) return { ok: false, reason: "cleartext-refused" };
-  } else if (manifest.payloadMode === "sealed") {
+  // Mode capability. `payloadMode` is a signed field, so this is a safe pre-crypto
+  // rejection: a relay can neither downgrade sealed→clear nor upgrade clear→sealed without
+  // breaking the manifest signature checked below. We must be able to open a sealed body;
+  // an unknown mode is refused. The confidentiality FLOOR (refuse clear when required) is
+  // deferred until after the manifest is verified, so a floor refusal can carry a signed
+  // receipt bound to the authenticated origin rather than an unverified one.
+  if (manifest.payloadMode === "sealed") {
     if (!sealPrivateKey) return { ok: false, reason: "unsupported-mode" };
-  } else {
+  } else if (manifest.payloadMode !== "clear") {
     return { ok: false, reason: "unsupported-mode" };
   }
   if (manifest.blockCount !== 1) return { ok: false, reason: "multi-block" };
@@ -318,6 +324,15 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   }
   if (!verifyManifest(manifest, manifestSignature, rec.key)) return { ok: false, reason: "manifest" };
 
+  // The manifest is now authenticated, so its origin/messageId are the real ones — the
+  // binding a signed delivery receipt needs. Every refusal from here carries it, so the
+  // destination can issue a receipt the origin can trust (delivery vs grayhole, and the
+  // true refusal reason). Refusals *before* this point have no authenticated origin, so no
+  // receipt: they are relay-tampered garbage, not a message the destination "handled".
+  const authenticated = { originKeyId: recKeyId, messageId: manifest.messageId, blockIndex: manifest.blockIndex };
+  /** @param {string} reason */
+  const refuse = (reason) => ({ ok: /** @type {const} */ (false), reason, authenticated });
+
   // 5. Authentication is not admission. Give local policy the authenticated key
   // before either payload work or replay allocation; a rejected/Sybil key consumes
   // no global guard slot. Policy is synchronous and should be side-effect-free.
@@ -327,21 +342,25 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   } catch {
     authorized = false;
   }
-  if (!authorized) return { ok: false, reason: "origin-unauthorized" };
+  if (!authorized) return refuse("origin-unauthorized");
+
+  // The confidentiality floor, now on a verified manifest: an authorized origin sending
+  // clear to a destination that requires sealing is refused — with a receipt it can trust.
+  if (manifest.payloadMode === "clear" && requireSealed) return refuse("cleartext-refused");
 
   // 6. Reject expiry, replay, and capacity before decoding/hashing a large body,
   // without reserving yet (a corrupt first copy must not poison a later good path).
   if (!guard || typeof guard.check !== "function" || typeof guard.admit !== "function") {
-    return { ok: false, reason: "replay-guard" };
+    return refuse("replay-guard");
   }
   const checked = guard.check(manifest);
-  if (!checked.ok) return { ok: false, reason: `replay:${checked.reason}` };
+  if (!checked.ok) return refuse(`replay:${checked.reason}`);
 
   // 7. The payload is the exact canonical base64 spelling of the committed bytes.
   const bytes = Buffer.from(payload, "base64");
-  if (bytes.length > MAX_ROUTED_BODY_BYTES) return { ok: false, reason: "payload-too-large" };
-  if (bytes.toString("base64") !== payload) return { ok: false, reason: "payload" };
-  if (payloadDigest(bytes) !== manifest.payloadDigest) return { ok: false, reason: "payload-digest" };
+  if (bytes.length > MAX_ROUTED_BODY_BYTES) return refuse("payload-too-large");
+  if (bytes.toString("base64") !== payload) return refuse("payload");
+  if (payloadDigest(bytes) !== manifest.payloadDigest) return refuse("payload-digest");
 
   // Recover the body. Clear: strict-UTF-8 JSON of the committed bytes. Sealed: the
   // committed bytes are the sealed object; open it (verify-before-decrypt inside), then
@@ -354,38 +373,38 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
     try {
       sealed = JSON.parse(UTF8.decode(bytes));
     } catch {
-      return { ok: false, reason: "sealed" };
+      return refuse("sealed");
     }
     let opened;
     try {
       opened = openSigned(sealed, /** @type {string} */ (sealPrivateKey));
     } catch {
-      return { ok: false, reason: "seal" };
+      return refuse("seal");
     }
     let sealerKeyId;
     try {
       sealerKeyId = keyId(opened.from);
     } catch {
-      return { ok: false, reason: "seal" };
+      return refuse("seal");
     }
-    if (sealerKeyId !== manifest.originKeyId) return { ok: false, reason: "seal-origin-mismatch" };
+    if (sealerKeyId !== manifest.originKeyId) return refuse("seal-origin-mismatch");
     try {
       body = JSON.parse(UTF8.decode(opened.plaintext));
     } catch {
-      return { ok: false, reason: "body" };
+      return refuse("body");
     }
   } else {
     try {
       body = JSON.parse(UTF8.decode(bytes));
     } catch {
-      return { ok: false, reason: "body" };
+      return refuse("body");
     }
   }
-  if (containsNonFiniteNumber(body)) return { ok: false, reason: "body" };
+  if (containsNonFiniteNumber(body)) return refuse("body");
 
   // 8. Reserve only after every gate that can reject the bytes has passed.
   const admitted = guard.admit(manifest);
-  if (!admitted.ok) return { ok: false, reason: `replay:${admitted.reason}` };
+  if (!admitted.ok) return refuse(`replay:${admitted.reason}`);
 
-  return { ok: true, body, originKeyId: recKeyId };
+  return { ok: /** @type {const} */ (true), body, originKeyId: recKeyId, messageId: manifest.messageId, blockIndex: manifest.blockIndex };
 }

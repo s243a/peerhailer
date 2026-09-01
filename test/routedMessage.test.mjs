@@ -46,8 +46,15 @@ const wrap = (origin, dest, body, over = {}) =>
 
 /** A guard pinned to T, so window checks are deterministic. */
 const guardAt = (t = T) => createRouteReplayGuard({ now: () => t });
-const open = (wrapper, destination, guard = guardAt(), authorizeOrigin = () => true) =>
-  openRoutedMessage(wrapper, { selfKeyId: destination.keyId, guard, authorizeOrigin });
+const open = (wrapper, destination, guard = guardAt(), authorizeOrigin = () => true) => {
+  const r = openRoutedMessage(wrapper, { selfKeyId: destination.keyId, guard, authorizeOrigin });
+  // Strip the receipt-support fields (messageId/blockIndex on ok; authenticated on refusal)
+  // so the exact-shape assertions here stay focused on open's core result; a dedicated test
+  // ("open surfaces the authenticated identity for a delivery receipt") covers them.
+  if (r.ok) { const { messageId, blockIndex, ...core } = r; return core; }
+  const { authenticated, ...core } = r;
+  return core;
+};
 
 /**
  * Hand-build a wrapper `origin` signs over arbitrary `bytes`, with manifest overrides
@@ -309,4 +316,24 @@ test("a stale signed manifest is rejected before a corrupt payload can burn stat
   const corrupt = { ...w, payload: Buffer.from("not the signed body", "utf8").toString("base64") };
   assert.deepEqual(open(corrupt, b, late), { ok: false, reason: "replay:expired" });
   assert.equal(late.size(), 0);
+});
+
+test("open surfaces the authenticated identity, for a delivery receipt", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const w = wrap(a, b, { x: 1 });
+  // On delivery: the authenticated origin, message id, and block index are exposed.
+  const ok = openRoutedMessage(w, { selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.originKeyId, a.keyId);
+  assert.equal(ok.messageId, "_9_dyjXkLPnraDMak3Jg0w");
+  assert.equal(ok.blockIndex, 0);
+  // A post-authentication refusal carries the same identity under `authenticated`.
+  const refused = openRoutedMessage(w, { selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => false });
+  assert.equal(refused.reason, "origin-unauthorized");
+  assert.deepEqual(refused.authenticated, { originKeyId: a.keyId, messageId: "_9_dyjXkLPnraDMak3Jg0w", blockIndex: 0 });
+  // A pre-authentication refusal (not addressed to us) has no authenticated identity.
+  const notForMe = openRoutedMessage(w, { selfKeyId: machine("carol").keyId, guard: guardAt(), authorizeOrigin: () => true });
+  assert.equal(notForMe.reason, "not-for-me");
+  assert.equal(notForMe.authenticated, undefined);
 });
