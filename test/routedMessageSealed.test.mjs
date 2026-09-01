@@ -14,6 +14,7 @@ import { signRecord } from "../src/peerRecord.js";
 import { seal } from "../src/sealing.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { RoutedMessageInputError, wrapRoutedMessage, openRoutedMessage } from "../src/routedMessage.js";
+import { isAuthenticatedOrigin } from "../src/routedObservation.js";
 
 const T = 1_700_000_000_000;
 const MSG_ID = "_9_dyjXkLPnraDMak3Jg0w"; // 16 bytes, canonical base64url
@@ -55,9 +56,9 @@ const openAt = (wrapper, dest, { guard = guardAt(), ...rest } = {}) => {
     sealPrivateKey: dest.sealPrivateKey,
     ...rest,
   });
-  // Strip the receipt-support fields so the exact-shape assertions stay focused (see the
-  // dedicated receipt tests for those).
-  if (r.ok) { const { messageId, blockIndex, ...core } = r; return core; }
+  // Strip the receipt- and observation-support fields so the exact-shape assertions stay
+  // focused (dedicated tests cover those).
+  if (r.ok) { const { messageId, blockIndex, sealed, proof, ...core } = r; return core; }
   const { authenticated, ...core } = r;
   return core;
 };
@@ -238,4 +239,43 @@ test("a non-sealed-object or non-JSON sealed payload with a matching digest is r
     payload: transported.toString("base64"),
   };
   assert.deepEqual(openAt(w, b), { ok: false, reason: "sealed" });
+});
+
+// --- M3a: open surfaces the sealed flag + an authenticated-origin proof, and honours a
+// per-origin downgrade floor (the mechanism; the daemon does not yet arm it). ---
+
+test("a sealed open surfaces sealed:true and an authenticated-origin proof; a clear open sealed:false", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const sealedR = openRoutedMessage(sealedWrap(a, b, { x: 1 }), {
+    selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true, sealPrivateKey: b.sealPrivateKey,
+  });
+  assert.equal(sealedR.ok, true);
+  assert.equal(sealedR.sealed, true);
+  assert.equal(isAuthenticatedOrigin(sealedR.proof), true, "the proof is a handle core verification minted");
+  assert.equal(sealedR.proof.originKeyId, a.keyId);
+  // A clear wrapper from the same origin: opened (no floor set), but marked not sealed.
+  const clearW = wrapRoutedMessage({ self: a.self, privateKey: a.id.privateKey, destinationKeyId: b.keyId, body: { x: 1 }, messageId: MSG_ID, now: T, validityMs: 60_000 });
+  const clearR = openRoutedMessage(clearW, { selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true, sealPrivateKey: b.sealPrivateKey });
+  assert.equal(clearR.ok, true);
+  assert.equal(clearR.sealed, false);
+});
+
+test("requireSealFrom refuses a clear message from a known-sealing origin, receiptably; a sealed one still opens", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const knownSealer = (/** @type {string} */ k) => k === a.keyId;
+  const clearW = wrapRoutedMessage({ self: a.self, privateKey: a.id.privateKey, destinationKeyId: b.keyId, body: { x: 1 }, messageId: MSG_ID, now: T, validityMs: 60_000 });
+  const refused = openRoutedMessage(clearW, {
+    selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true, sealPrivateKey: b.sealPrivateKey, requireSealFrom: knownSealer,
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "downgrade-refused");
+  // Post-authentication, so the refusal carries the authenticated identity (receiptable).
+  assert.deepEqual(refused.authenticated, { originKeyId: a.keyId, messageId: MSG_ID, blockIndex: 0 });
+  // The floor is about a clear downgrade, not sealing: a sealed message is admitted.
+  const sealedR = openRoutedMessage(sealedWrap(a, b, { x: 1 }), {
+    selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true, sealPrivateKey: b.sealPrivateKey, requireSealFrom: knownSealer,
+  });
+  assert.equal(sealedR.ok, true);
 });

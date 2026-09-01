@@ -38,6 +38,7 @@ import { createPrivateKey, createPublicKey } from "node:crypto";
 import { buildManifest, keyId, manifestProblem, payloadDigest, signManifest, verifyManifest } from "./routeManifest.js";
 import { signRecord, verifyRecord } from "./peerRecord.js";
 import { seal, openSigned } from "./sealing.js";
+import { authenticatedOrigin } from "./routedObservation.js";
 
 /** Serialized body ceiling before base64 expansion. */
 export const MAX_ROUTED_BODY_BYTES = 700_000;
@@ -251,16 +252,23 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
  *   authorizeOrigin: (origin: {originKeyId: string}) => boolean,
  *   sealPrivateKey?: string, // this machine's X25519 private key (PEM); required for sealed
  *   requireSealed?: boolean, // local floor: refuse a clear wrapper
+ *   requireSealFrom?: (originKeyId: string) => boolean, // per-origin downgrade floor (M3a)
  * }} deps
  * On any outcome AFTER the manifest is authenticated (delivery or refusal) the result
  * carries the authenticated `{originKeyId, messageId, blockIndex}` — on `ok` as fields, on
  * refusal under `authenticated` — so the caller can sign a delivery receipt for it. Refusals
  * before authentication carry no such identity (there is no authenticated origin).
  *
- * @returns {{ ok: true, body: any, originKeyId: string, messageId: string, blockIndex: number }
+ * On `ok` the result also carries `sealed` (whether the body arrived sealed) and `proof` (the
+ * request-scoped `AuthenticatedOrigin` handle for the origin — the token a consumer presents
+ * to record a durable observation, M3a). `requireSealFrom(originKeyId)` is an optional
+ * per-origin downgrade floor: a clear message from an origin it returns `true` for is refused
+ * `downgrade-refused` (post-authentication, so receiptable), alongside the global `requireSealed`.
+ *
+ * @returns {{ ok: true, body: any, originKeyId: string, messageId: string, blockIndex: number, sealed: boolean, proof: { originKeyId: string } }
  *   | { ok: false, reason: string, authenticated?: { originKeyId: string, messageId: string, blockIndex: number } }}
  */
-export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, sealPrivateKey, requireSealed }) {
+export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, sealPrivateKey, requireSealed, requireSealFrom }) {
   if (!hasExactly(wrapper, WRAPPER_FIELDS)) return { ok: false, reason: "malformed" };
   const { manifest, manifestSignature, originRecord, payload } = wrapper;
 
@@ -347,6 +355,12 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   // The confidentiality floor, now on a verified manifest: an authorized origin sending
   // clear to a destination that requires sealing is refused — with a receipt it can trust.
   if (manifest.payloadMode === "clear" && requireSealed) return refuse("cleartext-refused");
+  // The per-origin downgrade floor (M3a): a clear message from an origin this destination has
+  // learned to expect sealed from is a possible strip-attack, refused. Off unless a policy is
+  // supplied; the observation that feeds it is recorded on sealed delivery, below.
+  if (manifest.payloadMode === "clear" && typeof requireSealFrom === "function" && requireSealFrom(recKeyId) === true) {
+    return refuse("downgrade-refused");
+  }
 
   // 6. Reject expiry, replay, and capacity before decoding/hashing a large body,
   // without reserving yet (a corrupt first copy must not poison a later good path).
@@ -406,5 +420,13 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   const admitted = guard.admit(manifest);
   if (!admitted.ok) return refuse(`replay:${admitted.reason}`);
 
-  return { ok: /** @type {const} */ (true), body, originKeyId: recKeyId, messageId: manifest.messageId, blockIndex: manifest.blockIndex };
+  return {
+    ok: /** @type {const} */ (true),
+    body,
+    originKeyId: recKeyId,
+    messageId: manifest.messageId,
+    blockIndex: manifest.blockIndex,
+    sealed: manifest.payloadMode === "sealed",
+    proof: authenticatedOrigin(recKeyId),
+  };
 }

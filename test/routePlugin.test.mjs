@@ -755,3 +755,74 @@ test("Q4: one messageId can yield two genuine receipts — a refused presentatio
   assert.equal(refusedReceipt.receipt.reason, "payload-digest");
   assert.equal(refusedReceipt.receipt.messageId, deliveredMsgId, "two true receipts bind one (origin, messageId)");
 });
+
+// --- M3a observation seam: a sealed delivery records a durable per-origin requireSealFrom
+// marker; the enforcement floor (off by default) refuses a clear downgrade when armed. ---
+
+test("M3a: a sealed delivery records a requireSealFrom observation against the authenticated origin", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const observed = [];
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+    // A Tier-0 verified key makes the send seal.
+    tier0Seal: () => ({ state: "verified", key: normalizeKey(b.identity.sealPublicKey) }),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    observeSealed: (proof) => observed.push(proof.originKeyId),
+    deliver: () => ({ received: true }),
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { secret: "s" });
+  assert.equal(res.delivered, true);
+  assert.equal(res.seal.decision, "seal", "the send was sealed (Tier-0 verified)");
+  assert.deepEqual(observed, [keyId(a.identity.publicKey)], "bob recorded that this origin seals to him");
+});
+
+test("M3a: a clear (public) delivery records no observation", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const observed = [];
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    observeSealed: (proof) => observed.push(proof.originKeyId),
+    deliver: () => ({ received: true }),
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  assert.equal(res.delivered, true);
+  assert.deepEqual(observed, [], "a clear delivery teaches no downgrade marker");
+});
+
+test("M3a: with requireSealFrom armed, a clear message from a known-sealing origin is refused", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  let pluginB;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+    requireSealFrom: (k) => k === keyId(a.identity.publicKey),
+    deliver: () => ({ received: true }),
+  }));
+
+  const res = await pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  assert.equal(res.refused, true);
+  assert.equal(res.response.reason, "downgrade-refused", "the per-origin floor refuses the clear downgrade");
+  // The downgrade refusal teaches B's current key, so an origin whose Tier-1 key went stale
+  // (a relay-forced conflict, or B rotating its sealing key) recovers instead of deadlocking.
+  assert.ok(res.response[ROUTED_RECORD_FIELD], "a downgrade refusal carries the discovery record");
+});

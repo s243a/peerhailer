@@ -87,6 +87,8 @@ const isPlainObject = (v) => {
  *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); enables opening sealed
  *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
  *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
+ *   requireSealFrom?: (originKeyId: string) => boolean, // per-origin downgrade floor (M3a)
+ *   observeSealed?: (proof: { originKeyId: string }) => void, // record a sealed delivery (M3a)
  *   newMessageId?: () => string,
  *   messageValidityMs?: number,
  * }} deps
@@ -139,6 +141,7 @@ export function createRoutePlugin(deps) {
         authorizeOrigin: deps.authorizeOrigin,
         ...(deps.sealPrivateKey !== undefined ? { sealPrivateKey: deps.sealPrivateKey } : {}),
         requireSealed: deps.requireSealed === true,
+        ...(typeof deps.requireSealFrom === "function" ? { requireSealFrom: deps.requireSealFrom } : {}),
       });
       if (!opened.ok) {
         // A refusal that got as far as an authenticated origin can be receipted: the
@@ -148,8 +151,13 @@ export function createRoutePlugin(deps) {
         const receipt = auth ? signedReceipt(auth.originKeyId, auth.messageId, auth.blockIndex, "refused", opened.reason) : null;
         // A floor refusal still teaches our sealing key, so a routed-only origin can
         // learn it and retry sealed. Otherwise the floor deadlocks discovery: it
-        // demands sealing while refusing the clear probe that carries the key back.
-        if (opened.reason === "cleartext-refused") {
+        // demands sealing while refusing the clear probe that carries the key back. The
+        // per-origin downgrade floor (M3a `downgrade-refused`) needs the same: an origin
+        // whose Tier-1 key went stale — a relay-manufactured conflict, or the destination
+        // rotating its sealing key — recovers the current key from the refusal and reseals,
+        // instead of deadlocking on a clear probe it can never send. The origin is
+        // authenticated here, so teaching the key-only record leaks nothing.
+        if (opened.reason === "cleartext-refused" || opened.reason === "downgrade-refused") {
           const record = signedDiscoveryRecord();
           return {
             [OPEN_REFUSAL]: opened.reason,
@@ -158,6 +166,17 @@ export function createRoutePlugin(deps) {
           };
         }
         return { [OPEN_REFUSAL]: opened.reason, ...(receipt ? { [ROUTED_RECEIPT_FIELD]: receipt } : {}) };
+      }
+      // Arm the downgrade observation BEFORE accepting delivery (M3a): opening a sealed body
+      // from this origin is proof it seals to us, recorded durably against the authenticated-
+      // origin proof so a later clear message can be recognised as a possible strip-attack.
+      // Best-effort and off unless the daemon wires it; the enforcement policy reads it above.
+      if (opened.sealed && typeof deps.observeSealed === "function") {
+        try {
+          deps.observeSealed(opened.proof);
+        } catch {
+          /* recording is an add-on; a failure must not block delivery */
+        }
       }
       // Await the consumer before attaching: a consumer may return a promise, and
       // spreading that instead of its resolved response would corrupt the result.

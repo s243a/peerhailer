@@ -48,10 +48,10 @@ const wrap = (origin, dest, body, over = {}) =>
 const guardAt = (t = T) => createRouteReplayGuard({ now: () => t });
 const open = (wrapper, destination, guard = guardAt(), authorizeOrigin = () => true) => {
   const r = openRoutedMessage(wrapper, { selfKeyId: destination.keyId, guard, authorizeOrigin });
-  // Strip the receipt-support fields (messageId/blockIndex on ok; authenticated on refusal)
-  // so the exact-shape assertions here stay focused on open's core result; a dedicated test
-  // ("open surfaces the authenticated identity for a delivery receipt") covers them.
-  if (r.ok) { const { messageId, blockIndex, ...core } = r; return core; }
+  // Strip the receipt- and observation-support fields (messageId/blockIndex/sealed/proof on
+  // ok; authenticated on refusal) so the exact-shape assertions here stay focused on open's
+  // core result; dedicated tests cover those fields.
+  if (r.ok) { const { messageId, blockIndex, sealed, proof, ...core } = r; return core; }
   const { authenticated, ...core } = r;
   return core;
 };

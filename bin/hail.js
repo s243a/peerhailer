@@ -30,6 +30,7 @@ import { greedyPolicy, xorDistanceOver } from "../src/routing.js";
 import { keyId as routeKeyId } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { createRoutedKeyStore } from "../src/routedKeyStore.js";
+import { createRoutedObservationStore } from "../src/routedObservation.js";
 import { createHash } from "node:crypto";
 import { listFiles, getFile, putFile } from "../src/filesClient.js";
 
@@ -712,6 +713,20 @@ switch (command) {
       initial: loadState(routeKeysPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
       persist: persistSidecar(routeKeysPath, "routed key store"),
     });
+    // The observation seam (M3a): opening a sealed body from an origin is recorded durably
+    // (per-origin, OR-floored) as "this origin seals to us". Recording is on; ENFORCEMENT (the
+    // per-origin downgrade refusal) is not yet wired — the mechanism is built and tested, and
+    // arming it is a deliberate later step once the clear/public-probe policy is settled.
+    const routeObsPath = sidecarPath("route-observations.json", statePath);
+    const routedObservationStore = createRoutedObservationStore({
+      initial: loadState(routeObsPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
+      persist: persistSidecar(routeObsPath, "routed observation store"),
+    });
+    // A full observation store stops gaining downgrade markers for NEW origins (fail-closed —
+    // it never evicts an existing one). That is silent otherwise, so say it once: an operator
+    // recovers coverage by pruning the sidecar. A malicious admitted relay can flood it with
+    // throwaway sealed identities, so this is a real (if bounded) signal, not just a full-disk.
+    let observationStoreFull = false;
     // A Tier-0 event (walk, accept, rotation, forget) supersedes any discovered Tier-1
     // key for that identity — drop it synchronously so a stale/retired key can never be
     // sealed to in the window before the next send would lazily clear it.
@@ -732,6 +747,16 @@ switch (command) {
       selfRecord: () => directory.self,
       replayGuard: routeReplayGuard,
       routedKeyStore,
+      // Record a sealed delivery against the authenticated-origin proof (M3a). Recording only;
+      // the matching `requireSealFrom` enforcement policy is intentionally left unwired until
+      // it is deliberately armed, so this daemon observes but does not yet refuse a downgrade.
+      observeSealed: (/** @type {{ originKeyId: string }} */ proof) => {
+        const result = routedObservationStore.observe(proof, "requireSealFrom");
+        if (result === "at-capacity" && !observationStoreFull) {
+          observationStoreFull = true;
+          process.stderr.write(`[route] observation store full — new origins gain no downgrade marker until ${routeObsPath} is pruned\n`);
+        }
+      },
       // M3b confidentiality. `send` seals to a routed destination's key when it has one;
       // `deliver` opens a sealed block with this machine's X25519 key.
       sealPrivateKey: /** @type {string} */ (identity.sealPrivateKey),
