@@ -157,7 +157,18 @@ export function createRoutePlugin(deps) {
         // rotating its sealing key — recovers the current key from the refusal and reseals,
         // instead of deadlocking on a clear probe it can never send. The origin is
         // authenticated here, so teaching the key-only record leaks nothing.
-        if (opened.reason === "cleartext-refused" || opened.reason === "downgrade-refused") {
+        //
+        // `seal` re-teaches on ANY decrypt/verify failure (`openSigned` threw), of which a
+        // sealing-key rotation is the load-bearing case: the ciphertext was not sealed to our
+        // current X25519 key (we rotated, or the origin holds a stale/relayed key) — but a
+        // corrupt-but-authenticated blob lands here too. Either way the origin is authenticated
+        // and the record is key-only, so attaching it leaks nothing and lets the origin's next
+        // send come back with our current key — the diagnosis its own store needs to flip
+        // stale→conflict and stop spraying. A relay cannot manufacture a `seal`: the payload
+        // digest is bound to the origin-signed manifest and checked first, so the sealed bytes are
+        // exactly what the authenticated origin committed. Deliberately NOT
+        // `sealed`/`seal-origin-mismatch`/`body`: malformed/tampered/origin-bug, no record.
+        if (opened.reason === "cleartext-refused" || opened.reason === "downgrade-refused" || opened.reason === "seal") {
           const record = signedDiscoveryRecord();
           return {
             [OPEN_REFUSAL]: opened.reason,
@@ -462,6 +473,26 @@ export function createRoutePlugin(deps) {
       const id = destKeyId(dest);
       return id ? routedKeyStore.approve(id, expectedSealKey) : { ok: false, reason: "unknown" };
     },
+    /**
+     * Discard a destination's Tier-1 key state — the operator's only way to clear a sticky
+     * `record-conflict` (relay-manufactured, or the destination rotating its seal key) so the
+     * key can be re-discovered and re-approved. Monotone-restricting: it ONLY deletes, leaving
+     * the destination at `none` (which the resolver refuses — never cleartext), and NEVER touches
+     * the receive-side `requireSealFrom` marker, so the armed downgrade posture cannot be shed
+     * through it. Re-establishing sealing still needs a fresh discovery AND a pinned approve — the
+     * same human gate Tier-1 always had, so a fooled operator can lose a key but not bind a wrong
+     * one. Reachable only through the control API/CLI: no code path calls it, no wire input triggers it.
+     * @param {string} dest destination identity public key (PEM)
+     * @returns {{ ok: true, was: string } | { ok: false, reason: "unknown" }}
+     */
+    discardRoutedSeal: (/** @type {string} */ dest) => {
+      const id = destKeyId(dest);
+      if (!id) return { ok: false, reason: "unknown" };
+      const was = routedKeyStore.recordState(id);
+      if (was === "none") return { ok: false, reason: "unknown" };
+      routedKeyStore.forget(id);
+      return { ok: true, was };
+    },
   };
 
   // Per-caller token bucket. peerhailer has no framework rate limiter — command and
@@ -510,5 +541,6 @@ export function createRoutePlugin(deps) {
     routedSealState: router.routedSealState,
     routedSealDetail: router.routedSealDetail,
     approveRoutedSeal: router.approveRoutedSeal,
+    discardRoutedSeal: router.discardRoutedSeal,
   };
 }

@@ -619,14 +619,22 @@ switch (command) {
       });
       if (status !== 200) fail(data?.error ?? `send failed (HTTP ${status})`);
       const tier = data?.seal?.tier;
-      // For a refusal, prefer the specific `reason` (e.g. a relay limit) and fall back to
-      // the seal state — one label, not the state and the reason duplicated.
-      const how = data?.seal?.decision === "seal"
+      const sent = data?.seal?.decision === "seal"
         ? `sealed (tier ${tier})`
         : data?.seal?.decision === "cleartext"
           ? "cleartext (public)"
-          : `refused: ${data?.reason ?? data?.seal?.state ?? "unknown"}`;
-      log(`${data?.delivered ? "delivered" : "not delivered"} — ${how}`);
+          : null;
+      // A terminal DESTINATION (or relay) refusal comes back `delivered:true, refused:true` so the
+      // engine stops routing — but to the operator that is NOT a delivery. Honor `refused` and
+      // print the destination's refusal reason (e.g. `downgrade-refused`), not our seal decision,
+      // so the line agrees with the signed receipt below (Sol F3).
+      if (data?.refused === true) {
+        log(`refused — ${data?.response?.reason ?? data?.reason ?? "unknown"}${sent ? ` (we sent ${sent})` : ""}`);
+      } else if (data?.delivered === true) {
+        log(`delivered — ${sent ?? "unknown"}`);
+      } else {
+        log(`not delivered — ${data?.reason ?? data?.seal?.state ?? "unknown"}`);
+      }
       // The signed receipt is the destination's own proof of what it did. A verified one
       // distinguishes a real delivery/refusal from a relay forgery; a missing one means no
       // proof (a possible grayhole) — worth showing, not just the unsigned response.
@@ -642,7 +650,24 @@ switch (command) {
       }
       break;
     }
-    fail('usage: hail route discover|status|approve|send --dest-file <peer-key-file> [--seal-key-file <f>] [--public] [--control <url>]');
+    if (action === "discard") {
+      const dest = readDest();
+      if (!dest) fail("usage: hail route discard --dest-file <peer-key-file> [--control <url>]");
+      const { status, data } = await post("/api/route/seal-discard", { dest });
+      if (status === 200 && data?.ok) {
+        // Discard only clears the Tier-1 key; re-establishing sealing is a deliberate,
+        // fingerprint-gated re-discovery — spell the recovery out so the operator does not
+        // stop at an empty state and assume the relationship is broken.
+        log(`discarded (${data.was}) — now: hail route discover, verify the fingerprint out-of-band, then hail route approve --seal-key-file <expected>`);
+        // A discard is a restricting write; if it has not durably landed, say so — a restart
+        // before it clears could revert the discard (Sol F5).
+        if (data?.persistDegraded) log("  warning: the discard is not yet durably on disk (daemon persistence degraded) — it may revert on restart until that clears");
+        break;
+      }
+      fail(data?.error ?? (data?.reason ? `cannot discard: ${data.reason}` : `discard failed (HTTP ${status})`));
+      break;
+    }
+    fail('usage: hail route discover|status|approve|discard|send --dest-file <peer-key-file> [--seal-key-file <f>] [--public] [--control <url>]');
     break;
   }
 
@@ -721,61 +746,63 @@ switch (command) {
     // an approved routed sealing key survives a bounce (no first cleartext re-discovery),
     // and a conflict cannot be shed by restarting. Daemon-owned, so no cross-writer lock.
     const routeKeysPath = sidecarPath("route-keys.json", statePath);
-    // F2: a key-RESTRICTING persist (a conflict void, a forget) that fails is a security
-    // problem — a restart before it lands could resurrect a revoked key. Unlike the adding
-    // hot path (best-effort by design), flag it loudly and keep retrying the FULL snapshot
-    // until any write lands, then clear. `persistDegraded` is surfaced in the seal status.
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    let routeKeysRetry = null;
-    let routeKeysDegraded = false;
+    // A RESTRICTING persist (a Tier-1 conflict void / forget; a new downgrade-floor marker) that
+    // fails is a security problem — a restart before it lands could resurrect a revoked key or
+    // roll back the one-way downgrade floor (Sol F2 / M3a-arming F1). Unlike the adding hot path
+    // (best-effort by design), flag it loudly and keep retrying the FULL snapshot durably until a
+    // write lands, then clear. `persistDegraded` (OR of every sidecar) is surfaced in the seal
+    // status. One factory serves each daemon-owned durable sidecar; `snapshot` is read lazily at
+    // retry time, so it may close over a store constructed just below.
     const RESTRICTING_BACKOFF_MS = [5_000, 30_000, 60_000]; // then hold at the last step
-    const clearRouteKeysDegraded = () => {
-      routeKeysDegraded = false;
-      if (routeKeysRetry) {
-        clearTimeout(routeKeysRetry);
-        routeKeysRetry = null;
-      }
-    };
-    /** @param {number} step */
-    const armRouteKeysRetry = (step) => {
-      const delay = RESTRICTING_BACKOFF_MS[Math.min(step, RESTRICTING_BACKOFF_MS.length - 1)];
-      routeKeysRetry = setTimeout(() => {
-        routeKeysRetry = null;
-        try {
-          // Re-write the store's CURRENT snapshot, so any later state (a further conflict)
-          // rides the same recovery; persist always writes the full set, so one success heals.
-          // Durable (R3) — this is the recovery of a key-restricting write.
-          saveState({ entries: routedKeyStore.snapshot() }, routeKeysPath, { durable: true });
-          clearRouteKeysDegraded();
-          process.stderr.write(`[route] a key-restricting change is now on disk — durability recovered\n`);
-        } catch {
-          armRouteKeysRetry(step + 1);
+    /** @param {string} path @param {() => any[]} snapshot @param {string} what */
+    const makeSidecarDurability = (path, snapshot, what) => {
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let retry = null;
+      let degraded = false;
+      const clear = () => {
+        degraded = false;
+        if (retry) {
+          clearTimeout(retry);
+          retry = null;
         }
-      }, delay);
-      routeKeysRetry.unref?.();
+      };
+      /** @param {number} step */
+      const arm = (step) => {
+        const delay = RESTRICTING_BACKOFF_MS[Math.min(step, RESTRICTING_BACKOFF_MS.length - 1)];
+        retry = setTimeout(() => {
+          retry = null;
+          try {
+            saveState({ entries: snapshot() }, path, { durable: true });
+            clear();
+            process.stderr.write(`[route] a restricting change to ${what} is now on disk — durability recovered\n`);
+          } catch {
+            arm(step + 1);
+          }
+        }, delay);
+        retry.unref?.();
+      };
+      return {
+        degraded: () => degraded,
+        /** @param {boolean} ok @param {boolean} restricting */
+        note: (ok, restricting) => {
+          // Only a DURABLE (restricting) write heals: `persistSidecar` passes `durable: restricting`,
+          // so a non-durable additive persist succeeding must NOT clear the flag, or it would cancel
+          // the retry while the restriction is still in a non-fsync'd snapshot (Sol F3).
+          if (ok) {
+            if (restricting && degraded) clear();
+            return;
+          }
+          if (restricting && !degraded) {
+            degraded = true;
+            process.stderr.write(
+              `[route] SECURITY: a restricting change to ${what} is not yet on disk — a restart before it clears may resurrect a revoked key or roll back the downgrade floor\n`,
+            );
+            arm(0);
+          }
+        },
+      };
     };
-    const routeKeysDurability = {
-      /** @param {boolean} ok @param {boolean} restricting */
-      note: (ok, restricting) => {
-        // Only a DURABLE write heals the degraded state. In this wiring a durable write is
-        // exactly a restricting one (`persistSidecar` passes `durable: restricting`), so a
-        // non-durable additive persist succeeding must NOT clear it — otherwise it would cancel
-        // the retry while the conflict is still only in a non-fsync'd snapshot, and a power
-        // loss could then restore the revoked key (Sol F3). The armed retry writes durably and
-        // clears the flag itself; a later restricting persist landing durably clears it here.
-        if (ok) {
-          if (ok && restricting && routeKeysDegraded) clearRouteKeysDegraded();
-          return;
-        }
-        if (restricting && !routeKeysDegraded) {
-          routeKeysDegraded = true;
-          process.stderr.write(
-            "[route] SECURITY: a key-restricting change is not yet on disk — a restart before this clears may resurrect a revoked key\n",
-          );
-          armRouteKeysRetry(0);
-        }
-      },
-    };
+    const routeKeysDurability = makeSidecarDurability(routeKeysPath, () => routedKeyStore.snapshot(), "routed key store");
     const routedKeyStore = createRoutedKeyStore({
       initial: loadState(routeKeysPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
       persist: persistSidecar(routeKeysPath, "routed key store", routeKeysDurability),
@@ -784,14 +811,29 @@ switch (command) {
       gen: () => directory.routeGen?.() ?? 0,
     });
     // The observation seam (M3a): opening a sealed body from an origin is recorded durably
-    // (per-origin, OR-floored) as "this origin seals to us". Recording is on; ENFORCEMENT (the
-    // per-origin downgrade refusal) is not yet wired — the mechanism is built and tested, and
-    // arming it is a deliberate later step once the clear/public-probe policy is settled.
+    // (per-origin, OR-floored) as "this origin seals to us". Recording AND enforcement are now
+    // ARMED — `routeDeps` wires `requireSealFrom` to this store, so a later clear message from a
+    // marked origin is refused `downgrade-refused`. The floor only ADDS refusals (monotone) and
+    // every refusal teaches our key back, so recovery is one resend; the escape hatch for
+    // capacity/rotation trouble stays an explicit offline prune of the sidecar + restart.
     const routeObsPath = sidecarPath("route-observations.json", statePath);
+    // A new marker is RESTRICTING now enforcement is armed: a lost marker rolls back the one-way
+    // floor, so it rides the same durable-persist + retry as a Tier-1 conflict (Sol M3a-arming F1).
+    const routeObsDurability = makeSidecarDurability(routeObsPath, () => routedObservationStore.snapshot(), "downgrade-floor markers");
     const routedObservationStore = createRoutedObservationStore({
       initial: loadState(routeObsPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
-      persist: persistSidecar(routeObsPath, "routed observation store"),
+      persist: persistSidecar(routeObsPath, "routed observation store", routeObsDurability),
     });
+    // Recording has been live since M3a landed, so an upgraded daemon may already hold markers
+    // and the floor flips behavior for existing sealed relationships at first armed start. Say
+    // so once: an operator whose sidecar pre-recorded markers can see the armed count and, if a
+    // relationship needs to go clear again, prune the sidecar and restart before serving.
+    {
+      const armed = routedObservationStore.size();
+      if (armed > 0) {
+        log(`[route] downgrade floor armed: ${armed} origin(s) hold requireSealFrom markers — clear messages from them will be refused`);
+      }
+    }
     // A full observation store stops gaining downgrade markers for NEW origins (fail-closed —
     // it never evicts an existing one). That is silent otherwise, so say it once: an operator
     // recovers coverage by pruning the sidecar. A malicious admitted relay can flood it with
@@ -918,9 +960,15 @@ switch (command) {
       selfRecord: () => directory.self,
       replayGuard: routeReplayGuard,
       routedKeyStore,
-      // Record a sealed delivery against the authenticated-origin proof (M3a). Recording only;
-      // the matching `requireSealFrom` enforcement policy is intentionally left unwired until
-      // it is deliberately armed, so this daemon observes but does not yet refuse a downgrade.
+      // Enforce the per-origin downgrade floor (M3a, ARMED): a clear message from an origin
+      // this daemon has recorded a `requireSealFrom` marker for — because it opened a sealed
+      // body from that origin before — is refused `downgrade-refused`. The marker is written by
+      // `observeSealed` below on every sealed delivery, behind the authenticated-origin proof.
+      // A Map `.has` cannot throw in practice; `openRoutedMessage` still fails closed if it did.
+      requireSealFrom: (/** @type {string} */ originKeyId) => routedObservationStore.has(originKeyId, "requireSealFrom"),
+      // Record a sealed delivery against the authenticated-origin proof (M3a): opening a sealed
+      // body from this origin is durable proof it seals to us, which arms the `requireSealFrom`
+      // floor above so a later clear message from it can be refused as a possible strip-attack.
       observeSealed: (/** @type {{ originKeyId: string }} */ proof) => {
         const result = routedObservationStore.observe(proof, "requireSealFrom");
         if (result === "at-capacity" && !observationStoreFull) {
@@ -1100,9 +1148,10 @@ switch (command) {
         command: process.execPath,
         args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
       }),
-      // F2 surfacing: is a key-restricting Tier-1 persist currently un-landed on disk? The
-      // seal status reports it so `hail route seal` shows a degraded, retry-armed daemon.
-      routePersistDegraded: () => routeKeysDegraded,
+      // Surfacing: is ANY restricting sidecar persist (a Tier-1 conflict/forget, or a new
+      // downgrade-floor marker) currently un-landed on disk? The seal status reports it so
+      // `hail route status` shows a degraded, retry-armed daemon.
+      routePersistDegraded: () => routeKeysDurability.degraded() || routeObsDurability.degraded(),
       onReload: () => applyReload(),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,

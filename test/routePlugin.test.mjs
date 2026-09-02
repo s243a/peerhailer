@@ -17,11 +17,14 @@ import {
 import { generateIdentity, normalizeKey } from "../src/identity.js";
 import { signRecord } from "../src/peerRecord.js";
 import { createRoutedKeyStore } from "../src/routedKeyStore.js";
+import { createRoutedObservationStore } from "../src/routedObservation.js";
 import { REFUSE } from "../src/plugins.js";
-import { keyId } from "../src/routeManifest.js";
+import { buildManifest, keyId, payloadDigest, signManifest } from "../src/routeManifest.js";
 import { createRouteReplayGuard } from "../src/routeReplayGuard.js";
 import { wrapRoutedMessage } from "../src/routedMessage.js";
+import { seal } from "../src/sealing.js";
 import { verifyReceipt } from "../src/routeReceipt.js";
+import { randomBytes } from "node:crypto";
 
 /** A signed key-only record for `m` advertising `sealPublicKey` (default its own). */
 const recordOf = (m, sealPublicKey = m.identity.sealPublicKey) =>
@@ -825,4 +828,222 @@ test("M3a: with requireSealFrom armed, a clear message from a known-sealing orig
   // The downgrade refusal teaches B's current key, so an origin whose Tier-1 key went stale
   // (a relay-forced conflict, or B rotating its sealing key) recovers instead of deadlocking.
   assert.ok(res.response[ROUTED_RECORD_FIELD], "a downgrade refusal carries the discovery record");
+});
+
+// --- M3a ARMED: the per-origin downgrade floor is now wired to a live observation store, not
+// a stub — the first sealed delivery arms it, a later clear is refused with the key taught back,
+// a rotation is diagnosed via a `seal` refusal, and an operator clears a sticky conflict. ---
+
+/**
+ * Build an A→B pair whose destination B is armed by a REAL observation store: opening a sealed
+ * body records a `requireSealFrom` marker, and the enforcement floor reads that same store — so
+ * the tests exercise the wiring end to end, not a hand-written policy predicate.
+ * @returns {{ pluginA: any, pluginB: any, obs: any, deliveredBody: () => any }}
+ */
+const armedPair = (a, b, { obs = createRoutedObservationStore(), tier0, sealPrivateKey = b.identity.sealPrivateKey, selfRecordB } = {}) => {
+  let pluginB;
+  let lastBody;
+  const pluginA = createRoutePlugin(cryptoDeps(a, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => pluginB.router.relay(envelope, a.identity.publicKey),
+    routedKeyStore: a.store,
+    ...(tier0 ? { tier0Seal: tier0 } : { tier0Seal: () => ({ state: "unverified", key: null }) }),
+  }));
+  pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey,
+    ...(selfRecordB ? { selfRecord: selfRecordB } : {}),
+    observeSealed: (proof) => obs.observe(proof, "requireSealFrom"),
+    requireSealFrom: (k) => obs.has(k, "requireSealFrom"),
+    deliver: (body) => { lastBody = body; return { received: true }; },
+  }));
+  return { pluginA, get pluginB() { return pluginB; }, obs, deliveredBody: () => lastBody };
+};
+
+test("M3a armed (store-backed): the first seal arms the floor, and a later clear is refused with record + verified receipt", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  a.store = createRoutedKeyStore();
+  // A holds a walk-verified Tier-0 key for B, so its first send seals.
+  const { pluginA, obs } = armedPair(a, b, {
+    tier0: () => ({ state: "verified", key: normalizeKey(b.identity.sealPublicKey) }),
+  });
+
+  const sealed = await pluginA.send(b.identity.publicKey, { secret: "s" });
+  assert.equal(sealed.delivered, true, "the sealing send delivered");
+  assert.equal(obs.has(keyId(a.identity.publicKey), "requireSealFrom"), true, "opening the seal armed the floor");
+
+  // A now (mistakenly, or deliberately) sends clear: the armed floor refuses it, through the
+  // real store, and the refusal carries B's key-only record and a receipt A can verify.
+  const clear = await pluginA.send(b.identity.publicKey, { oops: 1 }, { public: true });
+  assert.equal(clear.refused, true);
+  assert.equal(clear.response.reason, "downgrade-refused", "the store-backed floor refuses the clear downgrade");
+  assert.ok(clear.response[ROUTED_RECORD_FIELD], "the armed refusal still teaches B's key");
+  assert.deepEqual(clear.receipt, { present: true, verified: true, outcome: "refused", reason: "downgrade-refused" });
+});
+
+test("M3a armed: the FIRST sealed delivery arms the floor (order-sensitive) and it survives a store restart", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  a.store = createRoutedKeyStore();
+  const obs = createRoutedObservationStore();
+  const tier0 = () => ({ state: "verified", key: normalizeKey(b.identity.sealPublicKey) });
+  const first = armedPair(a, b, { obs, tier0 });
+
+  // Clear BEFORE any seal: no marker yet, so it delivers.
+  const before = await first.pluginA.send(b.identity.publicKey, { x: 1 }, { public: true });
+  assert.equal(before.delivered, true, "a clear before the first seal delivers (nothing armed)");
+  assert.equal(before.refused ?? false, false);
+
+  // Seal once — this arms the floor — then a clear AFTER is refused.
+  await first.pluginA.send(b.identity.publicKey, { secret: "s" });
+  const after = await first.pluginA.send(b.identity.publicKey, { x: 2 }, { public: true });
+  assert.equal(after.response.reason, "downgrade-refused", "a clear after the first seal is refused");
+
+  // Restart the observation store from its persisted snapshot and rebuild B against it: the
+  // durable marker still refuses, so arming is not session state.
+  a.store = createRoutedKeyStore();
+  const restored = createRoutedObservationStore({ initial: obs.snapshot() });
+  const second = armedPair(a, b, { obs: restored, tier0 });
+  const afterRestart = await second.pluginA.send(b.identity.publicKey, { x: 3 }, { public: true });
+  assert.equal(afterRestart.response.reason, "downgrade-refused", "the marker survives a store restart");
+});
+
+test("M3a rotation: a stale sealed send is refused `seal`, teaches the current key, and flips the origin to a sticky conflict", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const rotated = generateIdentity(); // B's NEW sealing keypair
+  a.store = createRoutedKeyStore();
+  // A approves B's OLD sealing key, as a prior discovery+approval would have left it.
+  const bKeyId = keyId(b.identity.publicKey);
+  a.store.observe(bKeyId, recordOf(b, b.identity.sealPublicKey));
+  assert.equal(a.store.approve(bKeyId).ok, true);
+
+  // B has rotated: it advertises and holds the NEW key. Its identity (Ed25519) is unchanged.
+  const { pluginA } = armedPair(a, b, {
+    sealPrivateKey: rotated.sealPrivateKey,
+    selfRecordB: () => ({ name: b.name, publicKey: b.identity.publicKey, sealPublicKey: rotated.sealPublicKey, addresses: [] }),
+  });
+
+  const res = await pluginA.send(b.identity.publicKey, { secret: "stale" });
+  assert.equal(res.refused, true);
+  assert.equal(res.response.reason, "seal", "sealing to the retired key cannot be opened -> `seal`");
+  assert.ok(res.response[ROUTED_RECORD_FIELD], "the `seal` refusal now teaches B's CURRENT key");
+  // Observing that current key against the still-approved old one is the rotation signal: a
+  // sticky local conflict, so all further sends refuse locally instead of spraying the network.
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-conflict", "the origin flips to a sticky conflict");
+});
+
+test("M3a rotation: a `seal-origin-mismatch` or a malformed sealed body is refused but teaches NO record", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const c = machine("carol"); // a third identity, to forge a seal by a non-origin
+  const pluginB = createRoutePlugin(cryptoDeps(b, {
+    neighbors: () => [a.identity.publicKey],
+    sealPrivateKey: b.identity.sealPrivateKey,
+  }));
+  const nowT = Date.now();
+  const msgId = () => randomBytes(16).toString("base64url");
+  /** Forge a sealed wrapper: manifest signed by `origin`, carrying arbitrary transported bytes. */
+  const forge = (origin, transported) => {
+    const manifest = buildManifest({
+      originKeyId: keyId(origin.identity.publicKey),
+      destinationKeyId: keyId(b.identity.publicKey),
+      messageId: msgId(),
+      issuedAt: nowT,
+      expiresAt: nowT + 60_000,
+      payloadMode: "sealed",
+      payloadDigest: payloadDigest(transported),
+    });
+    return {
+      manifest,
+      manifestSignature: signManifest(manifest, origin.identity.privateKey),
+      originRecord: signRecord({ name: origin.name, publicKey: origin.identity.publicKey, sealPublicKey: origin.identity.sealPublicKey, addresses: [], lastSeen: null }, origin.identity.privateKey),
+      payload: transported.toString("base64"),
+    };
+  };
+  const feed = (wrapper) =>
+    pluginB.router.relay({ dest: b.identity.publicKey, ttl: 4, budget: 8, visited: [], payload: wrapper, id: null }, a.identity.publicKey);
+
+  // A block A signs the manifest over, but that CAROL sealed — the sealer is not the origin.
+  const crossSealed = Buffer.from(JSON.stringify(seal(Buffer.from(JSON.stringify({ x: 1 })), b.identity.sealPublicKey, { signer: { publicKey: c.identity.publicKey, privateKey: c.identity.privateKey } })), "utf8");
+  const mismatch = await feed(forge(a, crossSealed));
+  assert.equal(mismatch.response.reason, "seal-origin-mismatch", "an attack indicator, not rotation");
+  assert.equal(mismatch.response[ROUTED_RECORD_FIELD], undefined, "seal-origin-mismatch must NOT reward the sealer with a key");
+  assert.ok(mismatch.response[ROUTED_RECEIPT_FIELD], "the authenticated refusal is still receipted");
+
+  // Committed bytes that are not even a JSON object -> `sealed` (malformed), not rotation.
+  const malformed = await feed(forge(a, Buffer.from("not-a-sealed-object", "utf8")));
+  assert.equal(malformed.response.reason, "sealed");
+  assert.equal(malformed.response[ROUTED_RECORD_FIELD], undefined, "a malformed sealed body teaches nothing");
+});
+
+test("M3a recovery: discard clears a sticky conflict so re-discover + pinned approve reseals end to end", async () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const persists = [];
+  a.store = createRoutedKeyStore({ persist: (_entries, meta) => persists.push(meta ?? {}) });
+  const { pluginA, obs, deliveredBody } = armedPair(a, b);
+  const bKeyId = keyId(b.identity.publicKey);
+  const aKeyId = keyId(a.identity.publicKey);
+
+  // Arm B via an approved Tier-1 key: A seals a first delivery, so B records A as a sealer.
+  a.store.observe(bKeyId, recordOf(b, b.identity.sealPublicKey));
+  assert.equal(a.store.approve(bKeyId).ok, true);
+  const armed = await pluginA.send(b.identity.publicKey, { hi: 1 });
+  assert.equal(armed.delivered, true);
+  assert.equal(obs.has(aKeyId, "requireSealFrom"), true, "B is now armed for A");
+
+  // Manufacture the origin-side conflict (a relay replaying a differing record would do this).
+  a.store.observe(bKeyId, recordOf(b, generateIdentity().sealPublicKey));
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-conflict");
+  // Sends now refuse LOCALLY — no clear leak, no network spray.
+  const stuck = await pluginA.send(b.identity.publicKey, { x: 1 });
+  assert.equal(stuck.reason, "seal-refused:tier1-conflict");
+
+  // The operator discards. It reports the prior state and persists a RESTRICTING write.
+  const discarded = pluginA.router.discardRoutedSeal(b.identity.publicKey);
+  assert.deepEqual(discarded, { ok: true, was: "record-conflict" });
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "none", "discard leaves the destination at none");
+  assert.equal(persists.at(-1)?.restricting, true, "discard persists as a key-voiding (restricting) write");
+  // Discard of an unknown destination reports unknown, changing nothing.
+  assert.deepEqual(pluginA.router.discardRoutedSeal(generateIdentity().publicKey), { ok: false, reason: "unknown" });
+
+  // Re-discover against the ARMED destination: the clear probe is refused downgrade-refused but
+  // still teaches B's current key, so the origin relearns it (pending) without a clear ever landing.
+  const probe = await pluginA.send(b.identity.publicKey, { probe: 1 }, { public: true });
+  assert.equal(probe.response.reason, "downgrade-refused", "the probe is refused by the armed floor");
+  assert.equal(pluginA.router.routedSealState(b.identity.publicKey), "record-carried", "yet it re-learned B's key (pending)");
+
+  // Approve pinned to the fingerprint the operator verified out of band, then the next send seals.
+  assert.equal(pluginA.router.approveRoutedSeal(b.identity.publicKey, b.identity.sealPublicKey).ok, true);
+  const resealed = await pluginA.send(b.identity.publicKey, { secret: "recovered" });
+  assert.equal(resealed.delivered, true, `the resend seals and delivers (${resealed.reason ?? ""})`);
+  assert.equal(resealed.seal.decision, "seal");
+  assert.deepEqual(resealed.receipt, { present: true, verified: true, outcome: "delivered", reason: "" });
+  assert.deepEqual(deliveredBody(), { secret: "recovered" });
+});
+
+test("M3a armed: a never-sealing origin's clear still delivers under the floor", async () => {
+  const a = machine("alice"); // will seal, arming the floor for itself
+  const c = machine("carol"); // never seals
+  const b = machine("bob");
+  a.store = createRoutedKeyStore();
+  const wire = armedPair(a, b, {
+    tier0: () => ({ state: "verified", key: normalizeKey(b.identity.sealPublicKey) }),
+  });
+  const { obs, deliveredBody } = wire;
+  // C shares the same armed destination B, over its own wire.
+  const pluginC = createRoutePlugin(cryptoDeps(c, {
+    neighbors: () => [b.identity.publicKey],
+    forward: async (_peer, envelope) => wire.pluginB.router.relay(envelope, c.identity.publicKey),
+  }));
+
+  await wire.pluginA.send(b.identity.publicKey, { secret: "s" }); // arms the floor for A only
+  assert.equal(obs.has(keyId(a.identity.publicKey), "requireSealFrom"), true);
+  assert.equal(obs.has(keyId(c.identity.publicKey), "requireSealFrom"), false, "C never sealed, so it has no marker");
+
+  const clearFromC = await pluginC.send(b.identity.publicKey, { hello: "clear" }, { public: true });
+  assert.equal(clearFromC.delivered, true, "the floor is per-origin: C's clear is unaffected");
+  assert.deepEqual(deliveredBody(), { hello: "clear" });
 });

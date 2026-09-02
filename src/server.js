@@ -1101,6 +1101,21 @@ export function createDaemon({
         return send(response, result.ok ? 200 : 409, result);
       }
 
+      // Discard a destination's Tier-1 key state — the operator's only lever to clear a sticky
+      // conflict (relay-forced, or a seal-key rotation) so the key can be re-discovered and
+      // re-approved. It only deletes: the post-discard state is `none`, and the receive-side
+      // `requireSealFrom` marker is untouched, so this cannot shed the armed downgrade posture.
+      if (scope === "control" && url.pathname === "/api/route/seal-discard" && request.method === "POST") {
+        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
+        const body = await readJson(request);
+        if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
+        const result = router.discardRoutedSeal(String(body.dest));
+        // Report the facade verdict plus the post-discard state (`none` on success) and the
+        // persist-health flag, mirroring the discover/seal-approve response shape.
+        return send(response, result.ok ? 200 : 409, { ...result, state: router.routedSealState(String(body.dest)), persistDegraded: routePersistDegraded() === true });
+      }
+
       // What this machine offers, as it knows itself. Locally sourced: nothing
       // advertises its abilities over the wire yet, which is the namespace
       // design's job — see docs/shared-namespace.md.

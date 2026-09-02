@@ -6,9 +6,10 @@
  * The first (and only) observation kind is `requireSealFrom`: once a destination has opened a
  * *sealed* message from an origin, it has learned "this origin seals to me", and that fact is
  * worth remembering across restarts so a later *clear* message claiming that origin can be
- * recognised as a possible downgrade. M3a builds and records the observation; *enforcing* it
- * (refusing the downgrade) is the load-bearing step wired on top — the mechanism is here and
- * tested, the daemon does not yet activate it.
+ * recognised as a possible downgrade. Enforcement is **armed**: the daemon wires
+ * `requireSealFrom` to this store's `has`, so a clear message from a marked origin is refused
+ * `downgrade-refused`. Because a lost marker would roll back that one-way floor, recording a new
+ * marker is a *restricting* write the daemon persists durably and retries (see `persistNow`).
  *
  * **The proof, and why.** A raw `observe(key, kind)` is too easy for an honest in-process
  * consumer to call with the last-hop key or an unverified field. This is not a
@@ -84,7 +85,7 @@ export function isAuthenticatedOrigin(v) {
  * @param {{
  *   maxEntries?: number,
  *   initial?: StoredObservation[],                 // a persisted snapshot to rehydrate
- *   persist?: (entries: StoredObservation[]) => void, // called after each durable change
+ *   persist?: (entries: StoredObservation[], meta?: { restricting?: boolean }) => void, // called after each durable change
  * }} [options]
  */
 export function createRoutedObservationStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial, persist } = {}) {
@@ -93,12 +94,18 @@ export function createRoutedObservationStore({ maxEntries = DEFAULT_MAX_ENTRIES,
 
   /** @returns {StoredObservation[]} */
   const serialize = () => [...entries].map(([id, kinds]) => ({ id, kinds: [...kinds] }));
-  const persistNow = () => {
-    // Best-effort, like the replay guard and key store: a persist failure must not propagate
-    // out of the delivery path. The in-memory marker is authoritative; durability is an add-on.
+  /**
+   * Persist the current markers. Never throws (a failure must not break the delivery path); the
+   * in-memory marker is authoritative. But recording a NEW marker is a security-**restricting**
+   * write once enforcement is armed — a lost marker rolls back the one-way downgrade floor — so
+   * it is flagged `{ restricting: true }`, which the daemon's sidecar wrapper writes DURABLY
+   * (fsync) and RETRIES on failure, exactly like a Tier-1 conflict/forget (Sol M3a-arming F1).
+   * @param {{ restricting?: boolean }} [meta]
+   */
+  const persistNow = (meta) => {
     if (!persist) return;
     try {
-      persist(serialize());
+      persist(serialize(), meta);
     } catch {
       /* the in-memory marker stands */
     }
@@ -135,13 +142,13 @@ export function createRoutedObservationStore({ maxEntries = DEFAULT_MAX_ENTRIES,
       if (set) {
         if (set.has(kind)) return "already";
         set.add(kind);
-        persistNow();
+        persistNow({ restricting: true }); // a new marker raises the floor — persist it durably
         return "recorded";
       }
       // A new origin: honor the ceiling by refusing, never evicting an existing marker.
       if (entries.size >= maxEntries) return "at-capacity";
       entries.set(id, new Set([kind]));
-      persistNow();
+      persistNow({ restricting: true });
       return "recorded";
     },
 

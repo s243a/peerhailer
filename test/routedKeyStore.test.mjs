@@ -164,6 +164,22 @@ test("forget drops a destination's Tier-1 entry (as a Tier-0 walk would supersed
   assert.equal(store.size(), 0);
 });
 
+test("forget reports whether an entry existed and persists a restricting (key-voiding) write", () => {
+  const metas = [];
+  const store = createRoutedKeyStore({ persist: (_entries, meta) => metas.push(meta) });
+  const d = machine("dest");
+  store.observe(d.keyId, recordOf(d)); // record-carried; an adding (non-restricting) persist
+  assert.deepEqual(metas.at(-1), undefined, "a discovery persists without a restricting flag");
+
+  assert.equal(store.forget(d.keyId), true, "forget returns true when it removed an entry");
+  assert.equal(metas.at(-1)?.restricting, true, "voiding a key persists as restricting (F2 retry)");
+  assert.equal(store.recordState(d.keyId), "none");
+
+  const before = metas.length;
+  assert.equal(store.forget(d.keyId), false, "forget returns false when nothing existed to remove");
+  assert.equal(metas.length, before, "a no-op forget does not persist");
+});
+
 test("a conflict survives capacity pressure — it is evidence, not evicted like a plain key", () => {
   const store = createRoutedKeyStore({ maxEntries: 2 });
   const t = machine("target");

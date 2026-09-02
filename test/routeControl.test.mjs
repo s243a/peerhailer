@@ -177,3 +177,70 @@ test("the seal status surfaces persistDegraded so an operator sees a durability-
   degraded = false;
   assert.equal((await seal()).persistDegraded, false, "and it clears once a write lands");
 });
+
+test("route seal-discard clears a sticky conflict and reports the prior state; missing dest is 400", async (t) => {
+  const { keyId } = await import("../src/routeManifest.js");
+  const { signRecord } = await import("../src/peerRecord.js");
+  const { createRoutedKeyStore } = await import("../src/routedKeyStore.js");
+  const { generateIdentity: gen } = await import("../src/identity.js");
+
+  const self = generateIdentity();
+  const peer = generateIdentity();
+  const store = createRoutedKeyStore();
+  const peerId = keyId(peer.publicKey);
+  const rec = (sealPublicKey) => signRecord(
+    { name: "peer", publicKey: peer.publicKey, sealPublicKey, addresses: [], lastSeen: null },
+    peer.privateKey,
+  );
+  // Two differing sealing keys for one target -> a sticky conflict the operator must clear.
+  store.observe(peerId, rec(peer.sealPublicKey));
+  store.observe(peerId, rec(gen().sealPublicKey));
+  assert.equal(store.recordState(peerId), "record-conflict");
+
+  const directory = createDirectory({ self: { name: "self", publicKey: self.publicKey } });
+  const route = createRoutePlugin({
+    self: self.publicKey, privateKey: self.privateKey, selfRecord: () => directory.self,
+    authorizeOrigin: () => true, neighbors: () => [], forward: async () => ({ delivered: false, spent: 0 }),
+    deliver: () => ({ received: true }), routedKeyStore: store, tier0Seal: () => ({ state: "unverified", key: null }),
+  });
+  const daemon = createDaemon({ directory, identity: self, plugins: [route] });
+  const { port } = await daemon.listen({ port: 0 });
+  t.after(() => daemon.close());
+
+  const discard = (body) =>
+    fetch(`http://127.0.0.1:${port}/api/route/seal-discard`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(async (r) => ({ status: r.status, json: await r.json() }));
+
+  const missing = await discard({});
+  assert.equal(missing.status, 400, "a discard with no destination is a caller error");
+
+  const ok = await discard({ dest: peer.publicKey });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.ok, true);
+  assert.equal(ok.json.was, "record-conflict", "it reports the prior state");
+  assert.equal(ok.json.state, "none", "and the post-discard state is none");
+  assert.equal(store.recordState(peerId), "none", "the store was actually cleared");
+
+  // Discarding again is now unknown (nothing to clear) — a 409 with reason, like seal-approve.
+  const again = await discard({ dest: peer.publicKey });
+  assert.equal(again.status, 409);
+  assert.equal(again.json.reason, "unknown");
+});
+
+test("route seal-discard returns 501 when routing is off, like the other route control endpoints", async (t) => {
+  const self = generateIdentity();
+  const directory = createDirectory({ self: { name: "self", publicKey: self.publicKey } });
+  // A daemon with NO route plugin: the control endpoint reports routing is off.
+  const daemon = createDaemon({ directory, identity: self, plugins: [] });
+  const { port } = await daemon.listen({ port: 0 });
+  t.after(() => daemon.close());
+
+  const res = await fetch(`http://127.0.0.1:${port}/api/route/seal-discard`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ dest: generateIdentity().publicKey }),
+  }).then(async (r) => ({ status: r.status, json: await r.json() }));
+  assert.equal(res.status, 501);
+  assert.match(res.json.error, /routing is off/);
+});

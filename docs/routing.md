@@ -337,6 +337,27 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
   — and it is distinct from anonymity: confidentiality hides *what* is carried,
   anonymity hides *who* is talking. Sealing is a fabric-level primitive with its own
   decision record: `docs/sealing.md`.
+- **Per-origin downgrade floor (M3a, armed):** once this node has opened a *sealed*
+  message from an origin, it records that fact durably and thereafter refuses a *clear*
+  message from that origin with a `downgrade-refused` receipt — a relay cannot strip a
+  seal by getting the origin to send clear, and the node will not participate in the
+  origin's own downgrade mistakes. It is per-origin and monotone (an origin that never
+  sealed is unaffected; the floor only adds refusals), and it resets only when an
+  *identity* key rotates. Operator-facing consequences:
+  - A `--public` send into a relationship the destination has seen you seal is refused
+    `downgrade-refused` — read it as "seal instead", not as a delivery failure. To go
+    clear again you must drop the destination's record of your seals (prune its
+    `route-observations.json` and restart); there is no per-message override.
+  - `hail route discover` sends a clear probe, so against an armed destination it comes
+    back *refused* — **this is normal**: the refusal still carries the destination's
+    key-only record, so the probe still teaches you its current sealing key. Discovery
+    keeps working under the floor.
+  - When your Tier-1 key for a destination goes stale — a relay replays an older record
+    (a sticky `record-conflict`) or the destination rotates its sealing key (persistent
+    `seal` refusals) — clear the conflict with `hail route discard --dest-file <peer>`,
+    then `hail route discover`, verify the fingerprint out of band, and `hail route
+    approve --seal-key-file <expected>`. Discard only deletes local key state; it never
+    binds a key and never lifts the destination's downgrade floor.
 - **Routing attacks** (blackhole, grayhole, misdirection): mitigated by first-party
   success/RTT measurement feeding the next-hop weights (a peer that silently drops
   loses weight fast), by trust-weighting, and by keeping the "never relay toward a

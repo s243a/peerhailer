@@ -299,14 +299,19 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
 
     /**
      * Drop a destination's Tier-1 entry — used when an authoritative Tier-0 event (a walk,
-     * a rotation, a forget) supersedes it, so a moot or retired key cannot linger.
+     * a rotation, a forget) supersedes it, or an operator discards a sticky conflict, so a
+     * moot or retired key cannot linger. Returns whether an entry existed, so a caller (the
+     * operator discard surface) can report whether it removed anything.
      * @param {string} targetKeyId
+     * @returns {boolean} whether an entry was removed
      */
     forget(targetKeyId) {
       // A forget VOIDS a key, so its persist is restricting (F2). It also self-heals at the
       // next start via the directory tombstone that drives an operator forget, but flagging
       // it keeps a live conflict/rotation-driven forget durable within this run too.
-      if (entries.delete(targetKeyId)) persistNow({ restricting: true });
+      const existed = entries.delete(targetKeyId);
+      if (existed) persistNow({ restricting: true });
+      return existed;
     },
 
     /**

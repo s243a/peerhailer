@@ -2,8 +2,9 @@
 
 **Status: M0–M3b merged to `main`, plus signed delivery receipts, durable
 (restart-safe) replay/Tier-1, the High-1 causal identity/seal merge, and the M3a observation
-seam (mechanism; enforcement not yet armed). Latest: durable Tier-1 *invalidation* fixes the
-ordinary offline forget/rotate path, with three retirement/restart corner cases still open
+seam — now ARMED: the per-origin `requireSealFrom` downgrade floor is wired and enforcing, with
+an operator `hail route discard` recovery surface. Latest: durable Tier-1 *invalidation* fixes
+the ordinary offline forget/rotate path, with three retirement/restart corner cases still open
 (see the What-is-true-today bullet).** `docs/routing.md` is the full routing roadmap. This
 security-focused companion sequences *origin authentication*, *duplicate suppression
 (replay)*, *key trust*, and *confidentiality* by their dependencies. Kimi corrected the
@@ -396,16 +397,20 @@ local enforcement.
   is surfaced — a Tier-1 record carries no liveness, and any age would be a value a relay
   selects. The **signed floor advertisement** folds into M3b, where it is enforceable (a
   destination rejecting `clear` needs a sealed alternative to exist first).
-- **M3a — authenticated-origin capability seam. Implemented (mechanism), enforcement
-  dormant.** The durable observation store (`src/routedObservation.js`), the request-scoped
-  `AuthenticatedOrigin` proof, and the first observation kind (`requireSealFrom`) are built
-  and wired: `openRoutedMessage` mints the proof and surfaces `sealed`; the route plugin
-  records the marker on every sealed delivery (durably, best-effort, before accepting
-  delivery); the daemon persists it to a sidecar. The matching *enforcement* floor
-  (`requireSealFrom` → `downgrade-refused`, receiptable) exists in `openRoutedMessage` and
-  is tested, but the daemon does **not** wire it yet — the seam is load-bearing-ready, not
-  yet load-bearing. Arming it is a deliberate later step (with the clear/public-probe policy
-  below).
+- **M3a — authenticated-origin capability seam. Implemented and ARMED.** The durable
+  observation store (`src/routedObservation.js`), the request-scoped `AuthenticatedOrigin`
+  proof, and the first observation kind (`requireSealFrom`) are built and wired:
+  `openRoutedMessage` mints the proof and surfaces `sealed`; the route plugin records the
+  marker on every sealed delivery (durably, best-effort, before accepting delivery); the
+  daemon persists it to a sidecar. The enforcement floor is now **armed**: `bin/hail.js`
+  wires `requireSealFrom` to that store, so a clear message from an origin the destination has
+  opened a seal from is refused `downgrade-refused` (post-authentication, receiptable), and
+  the refusal carries the key-only discovery record so recovery is one resend. Always-on, no
+  disarm flag — the floor is per-origin and fires only for an origin that *demonstrably*
+  sealed to us, it only ADDS refusals (monotone), and a local disarm would be a standing
+  downgrade invitation. The one escape hatch stays the offline capacity/rotation recovery:
+  prune `route-observations.json` and restart. See "The observation seam (M3a)" below for the
+  refuse-all-clear decision, the `seal`-refusal re-teach, and the discard recovery flow.
 - **M3b — sealed routed payload. Implemented on `routing-m3b-sealed`.** `wrap` seals the
   body to the destination's X25519 key signed by the origin identity; the manifest commits
   to the ciphertext and `payloadMode:"sealed"`. `open` runs every M1 gate first, then
@@ -477,34 +482,70 @@ fail-closed at capacity (a flood of throwaway identities cannot evict an existin
 records `requireSealFrom` on each sealed delivery, before accepting it. The store persists to
 a `route-observations.json` sidecar, like the replay guard and Tier-1 key store.
 
-**Deferred — arming enforcement.** `openRoutedMessage` already refuses a clear message
-`downgrade-refused` when an injected `requireSealFrom(origin)` says so (post-authentication, so
-receiptable), and the plugin attaches the key-only discovery record to that refusal, as it does
-for the `cleartext-refused` floor — but the daemon does not yet supply the policy. Two things
-settle before arming it:
+**Armed.** `openRoutedMessage` refuses a clear message `downgrade-refused` when the injected
+`requireSealFrom(origin)` says so (post-authentication, so receiptable), and the plugin attaches
+the key-only discovery record to that refusal as it does for the `cleartext-refused` floor.
+`bin/hail.js` now supplies that policy — `requireSealFrom(k) = routedObservationStore.has(k,
+"requireSealFrom")` — so the floor enforces against the same durable markers recording writes.
+Two questions settled at arming:
 
-- *The clear-after-seal recovery flows.* An earlier draft here claimed the discovery-probe
-  deadlock does not recur "because a routed origin that sealed already holds our key." That was
-  wrong (Kimi, M3a review): it recurs in two flows, which is exactly why the refusal must carry
-  the discovery record. (1) A relay shows the origin a second, different record for the
-  destination → the origin's Tier-1 entry goes `record-conflict`, its key voided, and
-  re-learning the key rides a clear probe. (2) The destination rotates its sealing key → the
-  origin seals to the retired key (a `seal` refusal that itself teaches no key) and falls back
-  to a clear probe. Armed, both probes would be refused `downgrade-refused` — a deadlock —
-  unless the refusal teaches the current key, which it now does; the origin then reseals in one
-  retry. (Attaching the record to post-auth `seal` failures too would close the rotation flow
-  one step earlier — a candidate for the arming commit.)
-- *The `public`-override policy.* An origin that has sealed to us may still *intend* a later
-  clear message (an explicit `public` send). Refusing it ratchets confidentiality upward per
-  origin; since a relay cannot forge a clear message (`payloadMode` is signed), the ratchet's
-  real value is refusing to participate in the origin's *own* downgrade mistakes (a
-  confused-deputy `public` send into a sealed relationship). Refuse-all-clear is the recommended
-  policy, acceptable precisely because the record-on-refusal lets a wrongly-refused origin
-  recover in one retry.
+- *Refuse-all-clear, `public` included — a one-way ratchet.* An origin that has sealed to us may
+  still *intend* a later clear message (an explicit `public` send), but on the wire a deliberate
+  `public` send and a confused-deputy clear send are byte-identical (`payloadMode:"clear"`,
+  signed by the origin either way); the destination has no signal to tell intent from mistake,
+  and any carve-out would need a new signed field the confused deputy would also set. Since a
+  relay cannot forge a clear message (`payloadMode` is under the manifest signature), the floor's
+  whole value is refusing to participate in the origin's *own* downgrade mistakes — so refusing
+  the deliberate `public` too is the acceptable cost. The consequence, documented: per-origin
+  confidentiality ratchets upward — an origin **whose marker was successfully recorded** must seal
+  everything to this destination thereafter (until the *origin's* identity key rotates; the marker
+  is key-indexed by origin, so a new origin key is a fresh start — the destination rotating its own
+  identity does not reset a marker it holds). It can still say anything — sealed. The ratchet binds
+  only recorded origins: if the marker was not recorded (the store was at capacity, §capacity), that
+  origin's later clear is still accepted — "once sealed, thereafter refused" is scoped to a
+  recorded marker, and recording is now a durable, retried write (below) so a persist failure no
+  longer silently drops the floor.
+- *The clear-after-seal recovery flows, and the `seal` re-teach.* An earlier draft claimed the
+  discovery-probe deadlock does not recur "because a routed origin that sealed already holds our
+  key." Wrong (Kimi, M3a review): it recurs in two flows, which is why the refusal must carry the
+  discovery record. (1) A relay shows the origin a second, different record for the destination →
+  the origin's Tier-1 entry goes `record-conflict`, its key voided, and re-learning the key rides
+  a clear probe. (2) The destination rotates its sealing key → the origin seals to the retired
+  key. Armed, both probes are refused `downgrade-refused` — a deadlock — *unless the refusal
+  teaches the current key*, which it now does; the origin then reseals in one retry. For flow (2)
+  the arming commit also attaches the record to a post-authentication **`seal`** refusal (only
+  `seal` — the decrypt-failed rotation signal — not `sealed`/`seal-origin-mismatch`/`body`, which
+  are malformed/attack/origin-bug and must teach nothing): a rotated-away origin's next sealed
+  send comes back `seal` + record, its `observeDiscovery` flips it to a loud local
+  `record-conflict`, and all further sends refuse *locally* (`seal-refused:tier1-conflict`)
+  instead of spraying the network. The sticky conflict is correct — from the origin's seat,
+  rotation and relay-replay are indistinguishable hearsay, so a human decides — and the recovery
+  is the discard surface below.
+
+**Recovery — the operator discard surface.** Both flows end in a sticky origin-side
+`record-conflict` that only an explicit operator act may clear. `router.discardRoutedSeal(dest)`
+(control `POST /api/route/seal-discard`, CLI `hail route discard`) drops the Tier-1 *key* state
+so the key can be re-discovered and re-approved. It preserves the sticky property that protects
+against auto-clear downgrade: it is reachable only through the control API/CLI (no code path
+calls it, no wire input triggers it); it is monotone-restricting (it only deletes — the state
+after is `none`, which the resolver refuses, never cleartext); and it **never touches the
+`requireSealFrom` marker**, so the armed downgrade posture cannot be shed through it. Re-sealing
+still needs a fresh discovery observation AND a separate operator `approve` — the same human gate
+Tier-1 always had, so a fooled operator can lose a key but not bind a wrong one; a relay that loops
+conflicts just forces the operator back to the review step, never picking the winner. The safe
+workflow is to **pin** the approval (`hail route approve --seal-key-file <reviewed>`): the pin is
+*recommended, not mechanically enforced* — `approve` without a pin still requires the explicit
+operator act, and if the operator blesses a relay-replayed stale key it fails at the destination as
+`seal`, re-teaches, and flips back to conflict (a loud loop, not a confidentiality break). Discard's
+CLI output spells out the pinned form. Deliberately NOT built: a "resolve conflict to key X" op —
+discard + re-discover + pinned approve reaches the same end state through the existing, already-
+audited gates.
 
 Operational note: the observation store is fail-closed at capacity and never evicts, so a flood
-of throwaway sealed identities (cheap for an admitted relay) can fill it permanently; an
-operator recovers coverage by pruning `route-observations.json`.
+of throwaway sealed identities (cheap for an admitted relay) can fill it permanently; an operator
+recovers coverage by pruning `route-observations.json` (a new origin then gains no marker and its
+clear still delivers; existing markers keep refusing). The daemon logs the armed marker count at
+startup so an operator whose sidecar pre-recorded markers sees the floor take effect.
 
 ## Net effect
 
@@ -513,15 +554,15 @@ discovery is a piggyback plus a check, not a lookup protocol. Sol's corrections 
 honest: authenticate the exact bytes first (M1), establish destination-key policy second
 (M2), then add confidentiality without conflating it with freshness, replay state, or
 anonymity (M3). **M0–M3b are implemented**, plus signed delivery receipts, durable
-(restart-safe) replay/Tier-1, and the **M3a observation seam** (mechanism) — authenticated
+(restart-safe) replay/Tier-1, and the **M3a observation seam — now armed** — authenticated
 manifest + replay dedup (M1), Tier-1 key discovery (M2), and sealed payloads with
 confidential-by-default sends, per-key Tier-1 approval, identity-aggregated Tier-0, and the
 enforced floor (M3b), all hardened after Sol's integrated review, driveable from the CLI
-(`hail route status|approve|send` against a live `--ui` daemon's control API, since the Tier-1
-store is in the daemon's memory), with the response path proven by a signed receipt, replay +
-Tier-1 state persisted across a restart, and the durable observation seam recording each sealed
-delivery against a request-scoped authenticated-origin proof. The remaining work is deferred
-and named where it arises above: **arming M3a enforcement** (the `requireSealFrom` downgrade
-floor, with its clear/public-probe policy) and binding a receipt to a message's *terminal*
-outcome on the same durable seam, the signed floor *advertisement*, sealing the response
-*body*, and the later M4+ chunking/anonymity.
+(`hail route status|approve|discard|send` against a live `--ui` daemon's control API, since the
+Tier-1 store is in the daemon's memory), with the response path proven by a signed receipt,
+replay + Tier-1 state persisted across a restart, and the durable observation seam recording each
+sealed delivery against a request-scoped authenticated-origin proof and enforcing the per-origin
+`requireSealFrom` downgrade floor (refuse-all-clear, one-way ratchet, `seal`-refusal re-teach,
+operator discard recovery). The remaining work is deferred and named where it arises above:
+binding a receipt to a message's *terminal* outcome on the same durable seam, the signed floor
+*advertisement*, sealing the response *body*, and the later M4+ chunking/anonymity.

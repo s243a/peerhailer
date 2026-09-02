@@ -40,6 +40,13 @@ test("observe requires a proof and a known kind; a bare key or bad kind throws",
   assert.equal(store.has(id, "requireSealFrom"), true);
 });
 
+test("recording a new marker persists as RESTRICTING — a lost marker rolls back the armed floor", () => {
+  const metas = [];
+  const store = createRoutedObservationStore({ persist: (_entries, meta) => metas.push(meta) });
+  store.observe(authenticatedOrigin(originId()), "requireSealFrom");
+  assert.deepEqual(metas, [{ restricting: true }], "a new marker is a durable, retried write (Sol F1)");
+});
+
 test("a marker is OR-floored: recording it again is a no-op and does not persist", () => {
   const calls = [];
   const store = createRoutedObservationStore({ persist: (entries) => calls.push(entries) });
