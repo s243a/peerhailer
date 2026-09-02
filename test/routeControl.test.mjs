@@ -146,3 +146,34 @@ test("route seal-approve rejects a non-string pin instead of approving unpinned"
   assert.equal(res.status, 400, "a malformed pin is rejected, not silently unpinned");
   assert.equal(store.recordState(keyId(peer.publicKey)), "record-carried", "still pending, not approved");
 });
+
+test("the seal status surfaces persistDegraded so an operator sees a durability-degraded daemon (F2)", async (t) => {
+  const { createRoutedKeyStore } = await import("../src/routedKeyStore.js");
+  const self = generateIdentity();
+  const peer = generateIdentity();
+  const store = createRoutedKeyStore();
+  const directory = createDirectory({ self: { name: "self", publicKey: self.publicKey } });
+  const route = createRoutePlugin({
+    self: self.publicKey, privateKey: self.privateKey, selfRecord: () => directory.self,
+    authorizeOrigin: () => true, neighbors: () => [], forward: async () => ({ delivered: false, spent: 0 }),
+    deliver: () => ({ received: true }), routedKeyStore: store, tier0Seal: () => ({ state: "unverified", key: null }),
+  });
+  // A key-restricting persist that has not yet landed on disk flips this to true; a later
+  // success clears it. Drive it directly to prove the seal status reflects the flag.
+  let degraded = false;
+  const daemon = createDaemon({ directory, identity: self, plugins: [route], routePersistDegraded: () => degraded });
+  const { port } = await daemon.listen({ port: 0 });
+  t.after(() => daemon.close());
+
+  const seal = () =>
+    fetch(`http://127.0.0.1:${port}/api/route/seal`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dest: peer.publicKey }),
+    }).then(async (r) => (await r.json()));
+
+  assert.equal((await seal()).persistDegraded, false, "healthy by default");
+  degraded = true;
+  assert.equal((await seal()).persistDegraded, true, "a failed restricting persist shows in the status");
+  degraded = false;
+  assert.equal((await seal()).persistDegraded, false, "and it clears once a write lands");
+});

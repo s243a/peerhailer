@@ -694,13 +694,22 @@ switch (command) {
     const replayPath = sidecarPath("route-replay.json", statePath);
     // A persist failure is logged, never thrown: the in-memory reservation is authoritative,
     // so a full disk degrades durability, it does not fail (and burn) live deliveries.
-    const persistSidecar = (/** @type {string} */ path, /** @type {string} */ what) => (/** @type {any[]} */ entries) => {
-      try {
-        saveState({ entries }, path);
-      } catch (cause) {
-        process.stderr.write(`[route] could not persist ${what}: ${cause instanceof Error ? cause.message : String(cause)}\n`);
-      }
-    };
+    // `durability`, when given, is told the outcome of every write and whether it was a
+    // key-RESTRICTING one (a conflict void or a forget). A restricting write that FAILS is a
+    // security problem — a restart before it lands could resurrect a revoked key — so the
+    // route-keys sidecar hooks this to surface and retry it (F2). The adding path passes no
+    // durability and stays purely best-effort, as before.
+    const persistSidecar =
+      (/** @type {string} */ path, /** @type {string} */ what, /** @type {{ note: (ok: boolean, restricting: boolean) => void } | undefined} */ durability) =>
+      (/** @type {any[]} */ entries, /** @type {{ restricting?: boolean } | undefined} */ meta) => {
+        try {
+          saveState({ entries }, path);
+          durability?.note(true, meta?.restricting === true);
+        } catch (cause) {
+          process.stderr.write(`[route] could not persist ${what}: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+          durability?.note(false, meta?.restricting === true);
+        }
+      };
     const routeReplayGuard = createRouteReplayGuard({
       initial: loadState(replayPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
       persist: persistSidecar(replayPath, "replay guard"),
@@ -709,9 +718,59 @@ switch (command) {
     // an approved routed sealing key survives a bounce (no first cleartext re-discovery),
     // and a conflict cannot be shed by restarting. Daemon-owned, so no cross-writer lock.
     const routeKeysPath = sidecarPath("route-keys.json", statePath);
+    // F2: a key-RESTRICTING persist (a conflict void, a forget) that fails is a security
+    // problem — a restart before it lands could resurrect a revoked key. Unlike the adding
+    // hot path (best-effort by design), flag it loudly and keep retrying the FULL snapshot
+    // until any write lands, then clear. `persistDegraded` is surfaced in the seal status.
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let routeKeysRetry = null;
+    let routeKeysDegraded = false;
+    const RESTRICTING_BACKOFF_MS = [5_000, 30_000, 60_000]; // then hold at the last step
+    const clearRouteKeysDegraded = () => {
+      routeKeysDegraded = false;
+      if (routeKeysRetry) {
+        clearTimeout(routeKeysRetry);
+        routeKeysRetry = null;
+      }
+    };
+    /** @param {number} step */
+    const armRouteKeysRetry = (step) => {
+      const delay = RESTRICTING_BACKOFF_MS[Math.min(step, RESTRICTING_BACKOFF_MS.length - 1)];
+      routeKeysRetry = setTimeout(() => {
+        routeKeysRetry = null;
+        try {
+          // Re-write the store's CURRENT snapshot, so any later state (a further conflict)
+          // rides the same recovery; persist always writes the full set, so one success heals.
+          saveState({ entries: routedKeyStore.snapshot() }, routeKeysPath);
+          clearRouteKeysDegraded();
+          process.stderr.write(`[route] a key-restricting change is now on disk — durability recovered\n`);
+        } catch {
+          armRouteKeysRetry(step + 1);
+        }
+      }, delay);
+      routeKeysRetry.unref?.();
+    };
+    const routeKeysDurability = {
+      /** @param {boolean} ok @param {boolean} restricting */
+      note: (ok, restricting) => {
+        // Any successful write (retry OR an organic later persist) carries the full snapshot,
+        // so it includes the pending restriction — clear the degraded state and its timer.
+        if (ok) {
+          if (routeKeysDegraded) clearRouteKeysDegraded();
+          return;
+        }
+        if (restricting && !routeKeysDegraded) {
+          routeKeysDegraded = true;
+          process.stderr.write(
+            "[route] SECURITY: a key-restricting change is not yet on disk — a restart before this clears may resurrect a revoked key\n",
+          );
+          armRouteKeysRetry(0);
+        }
+      },
+    };
     const routedKeyStore = createRoutedKeyStore({
       initial: loadState(routeKeysPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
-      persist: persistSidecar(routeKeysPath, "routed key store"),
+      persist: persistSidecar(routeKeysPath, "routed key store", routeKeysDurability),
     });
     // The observation seam (M3a): opening a sealed body from an origin is recorded durably
     // (per-origin, OR-floored) as "this origin seals to us". Recording is on; ENFORCEMENT (the
@@ -737,6 +796,39 @@ switch (command) {
         /* a non-key input cannot have a routed entry to forget */
       }
     });
+    // Cold-start Tier-1 reconcile (F1): a forget/rotation done while this daemon was DOWN
+    // wrote a tombstone into directory.json but never reached the daemon-owned route-keys.json,
+    // so a naive rehydrate would resurrect a retired approved key. Apply the tombstones, then
+    // mirror the lazy send-time Tier-0 rule (a walked/disputed identity supersedes Tier 1) —
+    // both run here, once, BEFORE any serving, so no stale key is ever resolvable.
+    try {
+      const dropped = routedKeyStore.applyTombstones(directory.tombstones?.() ?? []);
+      if (dropped.length) {
+        log(`[route] startup: dropped ${dropped.length} Tier-1 key(s) retired (forget/rotate) while offline`);
+      }
+    } catch (cause) {
+      process.stderr.write(`[route] startup tombstone reconcile failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+    }
+    // Tier-0 posture sweep: an admitted identity that is walked/disputed/reverify supersedes
+    // any discovered Tier-1 key — drop it now rather than waiting for a first send to do it
+    // lazily. No confidentiality hole exists here today (Tier-0 wins in the resolver); this is
+    // hygiene so a moot entry does not linger. A never-admitted destination has no record and
+    // no posture, so its legitimate Tier-1 key is untouched.
+    let sweptTier1 = 0;
+    for (const record of directory.listAdmitted?.() ?? []) {
+      try {
+        if (directory.sealForIdentity?.(record.publicKey)?.state !== "unverified") {
+          const kid = routeKeyId(record.publicKey);
+          if (routedKeyStore.recordState(kid) !== "none") {
+            routedKeyStore.forget(kid);
+            sweptTier1 += 1;
+          }
+        }
+      } catch {
+        /* a non-Ed25519 or unparseable key can hold no routed entry to sweep */
+      }
+    }
+    if (sweptTier1) log(`[route] startup: swept ${sweptTier1} Tier-1 key(s) superseded by a Tier-0 posture`);
     // The routing plugin's deps read the *live* directory and identity; policy keys read
     // from the *fresh* `state` buildRuntime passes (not the startup snapshot), so a reload
     // honors an edited floor/opt-in like every other runtime input. One builder serves
@@ -929,6 +1021,9 @@ switch (command) {
         command: process.execPath,
         args: [process.argv[1], "--state", statePath, "tunnel", String(peer), String(tunnel), "pipe"],
       }),
+      // F2 surfacing: is a key-restricting Tier-1 persist currently un-landed on disk? The
+      // seal status reports it so `hail route seal` shows a degraded, retry-armed daemon.
+      routePersistDegraded: () => routeKeysDegraded,
       onReload: () => applyReload(),
       // The page can admit and block, so those changes reach disk the same way
       // the CLI's do — applied to what is on disk now, then adopted in memory,

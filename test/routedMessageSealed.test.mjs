@@ -279,3 +279,15 @@ test("requireSealFrom refuses a clear message from a known-sealing origin, recei
   });
   assert.equal(sealedR.ok, true);
 });
+
+test("requireSealFrom that throws fails closed — the clear message is refused, not admitted", () => {
+  const a = machine("alice");
+  const b = machine("bob");
+  const clearW = wrapRoutedMessage({ self: a.self, privateKey: a.id.privateKey, destinationKeyId: b.keyId, body: { x: 1 }, messageId: MSG_ID, now: T, validityMs: 60_000 });
+  const r = openRoutedMessage(clearW, {
+    selfKeyId: b.keyId, guard: guardAt(), authorizeOrigin: () => true, sealPrivateKey: b.sealPrivateKey,
+    requireSealFrom: () => { throw new Error("policy boom"); },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "downgrade-refused", "a throwing floor refuses rather than escaping or admitting");
+});

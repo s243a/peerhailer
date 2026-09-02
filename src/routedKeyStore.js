@@ -42,7 +42,7 @@ export const DEFAULT_MAX_ENTRIES = 4096;
 
 const SHA256_B64URL_LEN = 43; // a keyId: SHA-256 of SPKI DER, base64url, unpadded
 const B64URL = /^[A-Za-z0-9_-]+$/;
-/** @param {unknown} v */
+/** @param {unknown} v @returns {v is string} */
 const isKeyId = (v) => typeof v === "string" && v.length === SHA256_B64URL_LEN && B64URL.test(v);
 
 /**
@@ -50,14 +50,18 @@ const isKeyId = (v) => typeof v === "string" && v.length === SHA256_B64URL_LEN &
  * the **signed self-record** the key came from (null for a conflict), so the identity→key
  * binding is re-proven on load rather than trusted — a hand-edited sidecar cannot bind an
  * attacker's key as approved.
- * @typedef {{ id: string, sealKey: string | null, approved: boolean, conflict: boolean, name: string, record: any }} StoredEntry
+ * `at` is when this entry last (re)established its claim — a new discovery, a conflict, or
+ * an approval — so a durable identity tombstone (directory.js) can forget an entry only
+ * when the retirement is at least as new as the claim, and a deliberate re-approval AFTER
+ * a forget (a newer `at`) is not undone at the next start. A missing `at` loads as 0.
+ * @typedef {{ id: string, sealKey: string | null, approved: boolean, conflict: boolean, name: string, record: any, at: number }} StoredEntry
  */
 
 /**
  * @param {{
  *   maxEntries?: number,
  *   initial?: StoredEntry[],                 // a persisted snapshot to rehydrate
- *   persist?: (entries: StoredEntry[]) => void, // called after each durable mutation
+ *   persist?: (entries: StoredEntry[], meta?: { restricting?: boolean }) => void, // called after each durable mutation
  * }} [options]
  */
 export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial, persist } = {}) {
@@ -68,19 +72,27 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
    *   conflict: boolean,        // two differing sealing keys seen -> refuse to pick
    *   name: string,             // the destination's self-declared name, for surfacing
    *   record: any,              // the signed self-record the key came from (null on conflict)
+   *   at: number,               // when this entry last (re)established its claim (F1)
    * }>}
    */
   const entries = new Map();
 
   /** @returns {StoredEntry[]} */
-  const serialize = () => [...entries].map(([id, e]) => ({ id, sealKey: e.sealKey, approved: e.approved, conflict: e.conflict, name: e.name, record: e.record ?? null }));
-  const persistNow = () => {
-    // Best-effort, for the same reason as the replay guard: a persist failure must not
-    // propagate out of observe/approve/forget (breaking a Tier-0 handler mid-flight, or
-    // failing a send() for a delivered message). The in-memory state is authoritative.
+  const serialize = () => [...entries].map(([id, e]) => ({ id, sealKey: e.sealKey, approved: e.approved, conflict: e.conflict, name: e.name, record: e.record ?? null, at: e.at ?? 0 }));
+  /**
+   * Persist the current snapshot, best-effort. A persist failure must not propagate out of
+   * observe/approve/forget (breaking a Tier-0 handler mid-flight, or failing a send() for a
+   * delivered message) — the in-memory state is authoritative. `meta.restricting` marks a
+   * write that VOIDS a key (a conflict transition, a forget): the daemon's sidecar wrapper
+   * surfaces and retries a failed restricting persist, because a restart before it lands
+   * could resurrect a revoked key (F2). The module itself stays pure — it never does I/O and
+   * never throws; durability policy lives in the injected `persist`.
+   * @param {{ restricting?: boolean }} [meta]
+   */
+  const persistNow = (meta) => {
     if (!persist) return;
     try {
-      persist(serialize());
+      persist(serialize(), meta);
     } catch {
       /* durability is best-effort; the in-memory state stands */
     }
@@ -100,8 +112,9 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
   if (Array.isArray(initial)) {
     for (const it of initial) {
       if (!it || !isKeyId(it.id) || entries.has(it.id) || entries.size >= maxEntries) continue;
+      const at = typeof it.at === "number" && Number.isFinite(it.at) ? it.at : 0;
       if (it.conflict === true) {
-        entries.set(it.id, { sealKey: null, approved: false, conflict: true, name: typeof it.name === "string" ? it.name : "", record: null });
+        entries.set(it.id, { sealKey: null, approved: false, conflict: true, name: typeof it.name === "string" ? it.name : "", record: null, at });
         continue;
       }
       if (!it.record) continue; // a usable/pending entry with no record to re-prove is dropped
@@ -116,7 +129,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       if (identityKeyId !== it.id) continue;
       const sealKey = rec.record.sealPublicKey ?? null;
       if (!sealKey) continue;
-      entries.set(it.id, { sealKey, approved: it.approved === true, conflict: false, name: rec.record.name, record: it.record });
+      entries.set(it.id, { sealKey, approved: it.approved === true, conflict: false, name: rec.record.name, record: it.record, at });
     }
   }
 
@@ -172,7 +185,8 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
         // one — it is retriable on the next probe.
         if (entries.size >= maxEntries && !evictOldest()) return "at-capacity";
         // Keep the signed envelope so the binding is re-provable on restart, not just trusted.
-        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name, record: envelope });
+        // Stamp `at` so a re-discovery AFTER an offline forget outranks that forget's tombstone.
+        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name, record: envelope, at: Date.now() });
         persistNow();
         return "record-carried";
       }
@@ -186,7 +200,11 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       existing.approved = false;
       existing.conflict = true;
       existing.record = null; // a conflict seals to nothing; it carries no key to re-prove
-      persistNow();
+      existing.at = Date.now(); // the conflict is a fresh, restricting claim
+      // A restricting transition: it VOIDS an approved key. Unlike the adding path, a
+      // swallowed persist here could let a restart resurrect the revoked key — flag it so
+      // the daemon's sidecar wrapper surfaces and retries the write (F2).
+      persistNow({ restricting: true });
       return "record-conflict";
     },
 
@@ -211,6 +229,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       }
       if (!e.approved) {
         e.approved = true;
+        e.at = Date.now(); // a deliberate approval re-establishes the claim (outranks an older forget)
         persistNow(); // persist only a real transition, not an idempotent re-approval
       }
       return { ok: true, sealKey: e.sealKey };
@@ -266,7 +285,42 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
      * @param {string} targetKeyId
      */
     forget(targetKeyId) {
-      if (entries.delete(targetKeyId)) persistNow();
+      // A forget VOIDS a key, so its persist is restricting (F2). It also self-heals at the
+      // next start via the directory tombstone that drives an operator forget, but flagging
+      // it keeps a live conflict/rotation-driven forget durable within this run too.
+      if (entries.delete(targetKeyId)) persistNow({ restricting: true });
+    },
+
+    /**
+     * Forget every entry a durable identity tombstone retires — the cold-start half of
+     * Tier-1 invalidation (F1). A tombstone is written when a directory record is forgotten
+     * or its key rotated, which offline never reaches this daemon-owned store. An entry is
+     * forgotten only when the tombstone is at least as new as the entry's own claim
+     * (`entry.at <= t.at`), so a deliberate RE-approval after the forget (a newer `at`) is
+     * NOT undone; a tie breaks toward forgetting (`<=`, fail-closed). A pre-upgrade entry
+     * (`at` 0) is always outranked by a post-upgrade tombstone — the correct migration.
+     * Tombstones can only ever REMOVE a key, never bind one, so a hand-edited directory.json
+     * stays monotone-safe. Never throws.
+     * @param {{ keyId?: string, at?: number }[]} tombstones
+     * @returns {string[]} the ids forgotten (for the daemon's startup log)
+     */
+    applyTombstones(tombstones) {
+      /** @type {string[]} */
+      const forgotten = [];
+      if (Array.isArray(tombstones)) {
+        for (const t of tombstones) {
+          if (!t || !isKeyId(t.keyId)) continue;
+          const e = entries.get(t.keyId);
+          if (!e) continue;
+          const tAt = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
+          if ((e.at ?? 0) <= tAt) {
+            entries.delete(t.keyId);
+            forgotten.push(t.keyId);
+          }
+        }
+      }
+      if (forgotten.length) persistNow(); // one convergent write; the tombstone itself is the durable source
+      return forgotten;
     },
 
     /** Tracked-destination count — for tests and diagnostics. */

@@ -357,9 +357,16 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   if (manifest.payloadMode === "clear" && requireSealed) return refuse("cleartext-refused");
   // The per-origin downgrade floor (M3a): a clear message from an origin this destination has
   // learned to expect sealed from is a possible strip-attack, refused. Off unless a policy is
-  // supplied; the observation that feeds it is recorded on sealed delivery, below.
-  if (manifest.payloadMode === "clear" && typeof requireSealFrom === "function" && requireSealFrom(recKeyId) === true) {
-    return refuse("downgrade-refused");
+  // supplied; the observation that feeds it is recorded on sealed delivery, below. Guarded like
+  // `authorizeOrigin`: a policy that throws fails CLOSED (refuse the clear), never escaping.
+  if (manifest.payloadMode === "clear" && typeof requireSealFrom === "function") {
+    let floored = false;
+    try {
+      floored = requireSealFrom(recKeyId) === true;
+    } catch {
+      floored = true; // a policy error refuses the clear downgrade rather than admitting it
+    }
+    if (floored) return refuse("downgrade-refused");
   }
 
   // 6. Reject expiry, replay, and capacity before decoding/hashing a large body,

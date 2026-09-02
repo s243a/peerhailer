@@ -8,9 +8,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createDirectory } from "../src/directory.js";
+import { createDirectory, reconcilePersist } from "../src/directory.js";
 import { mergePeerRecord, publicRecord } from "../src/peerRecord.js";
 import { generateIdentity, sameKey } from "../src/identity.js";
+import { keyId } from "../src/routeManifest.js";
 
 const at = (t) => () => t;
 
@@ -347,4 +348,93 @@ test("read views are immutable — mutating what a getter returns cannot corrupt
   const t = dir.trust();
   assert.throws(() => { t.settings.vouchesRequired = 99; }, TypeError);
   assert.equal(dir.trust().settings.vouchesRequired, 2, "the live trust settings are untouched");
+});
+
+// --- Durable identity tombstones (F1): a forget/rotation done while a daemon is DOWN must
+// leave a trace that lets the next start invalidate the retired Tier-1 sealing key. ---
+
+test("forgetting an admitted peer records a tombstone that round-trips through snapshot/constructor/adopt", () => {
+  const peer = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" }, now: at(1000) });
+  dir.admit({ name: "peer", publicKey: peer.publicKey });
+  assert.deepEqual(dir.tombstones(), [], "no tombstone until a retirement");
+  assert.equal(dir.forget("peer"), true);
+  assert.deepEqual(dir.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+
+  // Round-trips to disk and back through a fresh constructor…
+  const reloaded = createDirectory(dir.snapshot());
+  assert.deepEqual(reloaded.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+  // …and through the daemon's real commit path, adopt.
+  const live = createDirectory({ self: { name: "me" } });
+  live.adopt(dir.snapshot());
+  assert.deepEqual(live.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+});
+
+test("forgetting a mere candidate leaves no tombstone (admitted-only, like the live notify)", () => {
+  const dir = createDirectory({ self: { name: "me" } });
+  dir.learnFrom("sol", [{ name: "luna", publicKey: generateIdentity().publicKey }]);
+  assert.equal(dir.forget("luna"), true);
+  assert.deepEqual(dir.tombstones(), [], "a candidate never conferred Tier-0 authority");
+});
+
+test("rotateKey tombstones the OLD identity's key id only; the new identity has none", () => {
+  const oldId = generateIdentity();
+  const newId = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" }, now: at(2000) });
+  dir.admit({ name: "peer", publicKey: oldId.publicKey });
+  dir.rotateKey("peer", newId.publicKey);
+  const tombs = dir.tombstones();
+  assert.equal(tombs.length, 1);
+  assert.equal(tombs[0].keyId, keyId(oldId.publicKey), "the retired identity is tombstoned");
+  assert.equal(tombs[0].reason, "rotate");
+  assert.ok(!tombs.some((t) => t.keyId === keyId(newId.publicKey)), "the new identity is NOT tombstoned");
+});
+
+test("tombstones are capped, dropping the oldest by `at`", () => {
+  // Seed a directory already at the cap with synthetic tombstones, then push one past it.
+  const cap = 256;
+  const seeded = Array.from({ length: cap }, (_, i) => ({ keyId: "a".repeat(43), at: i + 1, reason: "forget" }))
+    // distinct keyIds so none dedupe: vary a base64url char deterministically.
+    .map((t, i) => ({ ...t, keyId: (i.toString(36).padStart(43, "0")) }));
+  const peer = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" }, tombstones: seeded, now: at(10_000) });
+  assert.equal(dir.tombstones().length, cap);
+  dir.admit({ name: "peer", publicKey: peer.publicKey });
+  dir.forget("peer"); // pushes past the cap -> the oldest (at:1) is evicted
+  const tombs = dir.tombstones();
+  assert.equal(tombs.length, cap, "still capped");
+  assert.ok(tombs.some((t) => t.keyId === keyId(peer.publicKey)), "the newest was kept");
+  assert.ok(!tombs.some((t) => t.at === 1), "the oldest was dropped");
+});
+
+test("reconcilePersist union-merges tombstones so a race cannot shed a restriction", () => {
+  const bob = { keyId: "b".repeat(43), at: 100, reason: "forget" };
+  const alice = { keyId: "c".repeat(43), at: 200, reason: "rotate" };
+  // Baseline had neither; disk gained bob (a concurrent writer), this command gained alice.
+  const onDisk = { tombstones: [bob] };
+  const baseline = { tombstones: [] };
+  const current = { tombstones: [alice] };
+  const result = reconcilePersist(onDisk, baseline, current);
+  const ids = result.tombstones.map((t) => t.keyId).sort();
+  assert.deepEqual(ids, [bob.keyId, alice.keyId].sort(), "both survive the merge");
+  // And the newest `at` wins for a shared keyId.
+  const shared = reconcilePersist(
+    { tombstones: [{ keyId: bob.keyId, at: 100, reason: "forget" }] },
+    { tombstones: [] },
+    { tombstones: [{ keyId: bob.keyId, at: 300, reason: "rotate" }] },
+  );
+  assert.deepEqual(shared.tombstones, [{ keyId: bob.keyId, at: 300, reason: "rotate" }]);
+});
+
+test("a malformed tombstone entry is dropped on load, never fatal", () => {
+  const good = keyId(generateIdentity().publicKey);
+  const dir = createDirectory({
+    self: { name: "me" },
+    tombstones: [null, { at: 1 }, { keyId: "too-short" }, { keyId: good, at: "nope" }, { keyId: good, at: 5, reason: "forget" }],
+  });
+  // The last two share a keyId; loadTombstones keeps both entries but only the well-formed
+  // shapes survive — the point is that no malformed entry threw.
+  const tombs = dir.tombstones();
+  assert.ok(tombs.every((t) => /^[A-Za-z0-9_-]{43}$/.test(t.keyId)), "every surviving keyId is well-formed");
+  assert.ok(tombs.some((t) => t.keyId === good), "the well-formed entry loaded");
 });

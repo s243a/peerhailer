@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -72,4 +72,24 @@ test("hail route reports a clear error when the daemon control API is unreachabl
     .then((r) => r.stdout + r.stderr, (e) => `${e.stdout ?? ""}${e.stderr ?? ""}`);
   assert.match(out, /could not reach the daemon control API/);
   assert.match(out, /--ui/);
+});
+
+test("hail forget writes a durable identity tombstone into directory.json (F1)", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "peerhailer-forget-tombstone-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const state = join(dir, "directory.json");
+
+  // Admit a peer with a real key, no daemon in sight — the pure CLI path.
+  const peer = generateIdentity();
+  const keyFile = join(dir, "peer.pem");
+  writeFileSync(keyFile, peer.publicKey);
+  const cli = (...args) => run(process.execPath, [CLI, "--state", state, ...args]).then((r) => r.stdout + r.stderr);
+  await cli("add", "peer", "--key-file", keyFile);
+  await cli("forget", "peer");
+
+  const stored = JSON.parse(readFileSync(state, "utf8"));
+  assert.ok(Array.isArray(stored.tombstones), "directory.json carries a tombstones array");
+  assert.equal(stored.tombstones.length, 1);
+  assert.equal(stored.tombstones[0].keyId, keyId(peer.publicKey), "the forgotten identity's keyId is tombstoned");
+  assert.equal(stored.tombstones[0].reason, "forget");
 });

@@ -26,6 +26,85 @@ import {
   TARGET_BINDING_VERSION,
 } from "./peerRecord.js";
 import { fingerprint, normalizeKey, sameCanonicalKey, sameKey } from "./identity.js";
+import { keyId } from "./routeManifest.js";
+
+/**
+ * Durable identity tombstones (routing review, Sol finding F1).
+ *
+ * When a peer is forgotten or its key rotated, a *live* daemon's seal-posture listener
+ * drops the now-moot Tier-1 routed sealing key at once. But a `hail forget`/`hail rotate`
+ * run while the daemon is DOWN has no listener to fire, writes only directory.json (never
+ * the daemon-owned route-keys.json), and leaves the approved key on disk — so the next
+ * daemon start rehydrates a key its operator already retired. A tombstone is the durable,
+ * CLI-writable, daemon-read trace that lets a cold start invalidate it: the retired
+ * identity's `keyId`, plus when it was retired. It can only ever *remove* a Tier-1 key,
+ * never bind one, so a hand-edited directory.json remains monotone-safe.
+ *
+ * @typedef {{ keyId: string, at: number, reason: "forget" | "rotate" }} Tombstone
+ */
+
+/** A keyId is a SHA-256 of SPKI DER as unpadded base64url: 43 chars. */
+const TOMBSTONE_KEYID = /^[A-Za-z0-9_-]{43}$/;
+/** Ceiling on tracked tombstones. A tombstone is ~120 bytes; 256 is ~30KB worst case.
+ * No age-based expiry in v1 — a tombstone's whole value is recency versus an entry's own
+ * claim, and an expiry would add a clock policy for no security gain. Past the cap the
+ * OLDEST by `at` is dropped: reaching it needs 256 forgets while the daemon never once
+ * starts to apply them, an accepted residual. */
+const MAX_TOMBSTONES = 256;
+
+/**
+ * Validate and normalise a stored tombstone list — a malformed entry is dropped, never
+ * fatal (the "a bad file must not crash the daemon" ethos). Pruned to the cap on load.
+ * Pure.
+ * @param {unknown} raw
+ * @returns {Tombstone[]}
+ */
+function loadTombstones(raw) {
+  /** @type {Tombstone[]} */
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const t of raw) {
+      if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
+      const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
+      out.push({ keyId: t.keyId, at, reason: t.reason === "rotate" ? "rotate" : "forget" });
+    }
+  }
+  return pruneTombstones(out);
+}
+
+/**
+ * Keep at most `MAX_TOMBSTONES`, dropping the oldest by `at`. Returns the input unchanged
+ * when under the cap (preserving order); otherwise a newest-first-cap slice. Pure.
+ * @param {Tombstone[]} list
+ * @returns {Tombstone[]}
+ */
+function pruneTombstones(list) {
+  if (list.length <= MAX_TOMBSTONES) return list;
+  return [...list].sort((a, b) => a.at - b.at).slice(list.length - MAX_TOMBSTONES);
+}
+
+/**
+ * Union-merge two tombstone lists by `keyId`, keeping the newest `at` for each — so a CLI
+ * forget racing a daemon page-forget cannot drop the other's restriction (the exact race
+ * `reconcilePersist` exists for). Pure.
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {Tombstone[]}
+ */
+function mergeTombstones(a, b) {
+  /** @type {Map<string, Tombstone>} */
+  const byId = new Map();
+  for (const src of [a, b]) {
+    if (!Array.isArray(src)) continue;
+    for (const t of src) {
+      if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
+      const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
+      const prev = byId.get(t.keyId);
+      if (!prev || at > prev.at) byId.set(t.keyId, { keyId: t.keyId, at, reason: t.reason === "rotate" ? "rotate" : "forget" });
+    }
+  }
+  return [...byId.values()];
+}
 
 /**
  * What `blockPeer` did, honest about what it blocked and why — so a caller can
@@ -122,6 +201,7 @@ export function reconcilePersist(onDisk, baseline, current) {
   const has = (/** @type {any} */ o, /** @type {string} */ k) => Object.prototype.hasOwnProperty.call(o ?? {}, k);
   for (const key of new Set([...Object.keys(baseline ?? {}), ...Object.keys(current ?? {})])) {
     if (key === "admitted") continue; // reconciled below, not diffed wholesale
+    if (key === "tombstones") continue; // union-merged below — a restriction must not be lost to a race
     const inCur = has(current, key);
     if (inCur === has(baseline, key) && JSON.stringify(current?.[key]) === JSON.stringify(baseline?.[key])) continue;
     if (inCur) result[key] = current[key];
@@ -139,6 +219,14 @@ export function reconcilePersist(onDisk, baseline, current) {
   // never carried the key round-trips unchanged rather than gaining an empty [].
   if (admitted.length || has(onDisk, "admitted") || has(current, "admitted") || has(baseline, "admitted")) {
     result.admitted = admitted;
+  }
+  // Tombstones are additive and restrictive: union disk and this writer's set (a CLI
+  // forget and a concurrent daemon page-forget must both survive), keep the newest `at`
+  // per key, re-prune. A legacy file that never carried the key round-trips unchanged.
+  if (has(onDisk, "tombstones") || has(current, "tombstones") || has(baseline, "tombstones")) {
+    const merged = pruneTombstones(mergeTombstones(onDisk?.tombstones, current?.tombstones));
+    if (merged.length) result.tombstones = merged;
+    else delete result.tombstones;
   }
   return result;
 }
@@ -305,6 +393,7 @@ function sameSeal(a, b) {
  *   profiles?: Record<string, any>,
  *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string,
  *           admitProfile?: string, candidateProfile?: string},
+ *   tombstones?: any[],
  *   now?: () => number,
  * }} [state]
  */
@@ -364,6 +453,42 @@ export function createDirectory(state = {}) {
   const blocklist = {
     names: [...(state.blocklist?.names ?? [])],
     keys: [...(state.blocklist?.keys ?? [])],
+  };
+  /** @type {Tombstone[]} Retired-identity tombstones (F1) — see the module note. */
+  const tombstones = loadTombstones(state.tombstones);
+  /**
+   * Record that an ADMITTED identity was retired, so a daemon that was DOWN when the
+   * forget/rotation happened still invalidates the stale Tier-1 key at its next start.
+   * The keyId is the same id the Tier-1 store is keyed by (`keyId(publicKey)`), so the
+   * cold-start reconcile is a direct map lookup. A non-Ed25519 or unparseable key throws
+   * in `keyId` and is skipped — it can hold no Tier-1 entry anyway (those ids are Ed25519
+   * keyIds). Deduped by keyId, keeping the newest `at`; pruned to the cap.
+   * @param {string | null | undefined} publicKey
+   * @param {"forget" | "rotate"} reason
+   */
+  const tombstone = (publicKey, reason) => {
+    if (!publicKey) return;
+    let id;
+    try {
+      id = keyId(publicKey);
+    } catch {
+      return;
+    }
+    const at = now();
+    const existing = tombstones.find((t) => t.keyId === id);
+    if (existing) {
+      if (at > existing.at) {
+        existing.at = at;
+        existing.reason = reason;
+      }
+      return;
+    }
+    tombstones.push({ keyId: id, at, reason });
+    if (tombstones.length > MAX_TOMBSTONES) {
+      const pruned = pruneTombstones(tombstones);
+      tombstones.length = 0;
+      tombstones.push(...pruned);
+    }
   };
   /**
    * Profiles this directory resolves against.
@@ -516,7 +641,10 @@ export function createDirectory(state = {}) {
   function forget(name) {
     const record = admitted.get(name);
     const removed = admitted.delete(name) || candidates.delete(name);
-    if (record) notifySeal(record.publicKey);
+    if (record) {
+      notifySeal(record.publicKey); // the live path: a running daemon drops the Tier-1 key now
+      tombstone(record.publicKey, "forget"); // the durable path: a down daemon drops it at restart
+    }
     return removed;
   }
 
@@ -610,7 +738,8 @@ export function createDirectory(state = {}) {
     // the window before that walk — its seal state becomes `reverify`, which
     // fails sends closed until a key is verified again.
     const { conflicts: _dropped, sealPublicKey: _sk, sealSeen: _ss, sealConflict: _sc, ...rest } = record;
-    notifySeal(record.publicKey); // the OLD identity's routed Tier-1 entry is now moot
+    notifySeal(record.publicKey); // the OLD identity's routed Tier-1 entry is now moot (live path)
+    tombstone(record.publicKey, "rotate"); // and durably, so a down daemon retires it at restart too
     return commit(name, { ...rest, publicKey: key });
   }
 
@@ -1098,6 +1227,7 @@ export function createDirectory(state = {}) {
       }
       const nextNames = [...(state?.blocklist?.names ?? [])];
       const nextKeys = [...(state?.blocklist?.keys ?? [])];
+      const nextTombstones = loadTombstones(state?.tombstones);
       const incomingSelf = state?.self ? makePeerRecord(state.self) : null;
 
       // Snapshot the identities we currently hold, so after the swap we can notify the
@@ -1113,6 +1243,10 @@ export function createDirectory(state = {}) {
       for (const [name, entry] of nextCandidates) candidates.set(name, entry);
       blocklist.names = nextNames;
       blocklist.keys = nextKeys;
+      // Replace-as-unit like the blocklist. adopt's incoming state is a full snapshot, so
+      // this carries a page/CLI forget's tombstone into the running daemon's directory.
+      tombstones.length = 0;
+      tombstones.push(...nextTombstones);
       // Adopt what a rename or address edit changed about us — but keep the
       // running daemon's identity. Its signing and sealing public keys are what it
       // actually holds *this process*; a persisted `self` copy must never override
@@ -1304,6 +1438,9 @@ export function createDirectory(state = {}) {
       };
     },
     blocklist: () => ({ names: [...blocklist.names], keys: [...blocklist.keys] }),
+    /** The retired-identity tombstones — read by the daemon's cold-start Tier-1 reconcile
+     * and by tests. A shallow-cloned copy, so a caller cannot mutate the live list. */
+    tombstones: () => tombstones.map((t) => ({ ...t })),
     trust: () => readView({ ...trust }),
     /**
      * Change the trust policy through the directory, so a `snapshot()` reflects
@@ -1334,6 +1471,7 @@ export function createDirectory(state = {}) {
           name,
           heardFrom: entry.heardFrom,
         })),
+        tombstones: tombstones.map((t) => ({ ...t })),
       }),
   };
 

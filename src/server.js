@@ -122,6 +122,7 @@ async function readJson(request) {
  *   onReload?: () => any | Promise<any>,
  *   applyChange?: (mutate: (directory: any) => any) => any,
  *   gateConfig?: () => ({ passwordHash: string, secret: string } | null | undefined),
+ *   routePersistDegraded?: () => boolean,
  *   tunnelPipeCommand?: any,
  *   log?: (message: string) => void,
  * }} options
@@ -155,6 +156,10 @@ export function createDaemon({
   applyChange,
   /** Session composer: whether a gate password is set, for the optional bastion. */
   gateConfig = () => null,
+  /** F2: whether a key-restricting Tier-1 persist is currently un-landed on disk (a
+   * conflict/forget whose sidecar write failed and is retry-armed) — surfaced in the seal
+   * status so an operator sees a durability-degraded daemon. Defaults to never-degraded. */
+  routePersistDegraded = () => false,
   /** Builds `{command,args}` for `hail tunnel <peer> <name> pipe` — enables remote workers. */
   tunnelPipeCommand = null,
   log = () => {},
@@ -1076,7 +1081,7 @@ export function createDaemon({
             throw error;
           }
         }
-        return send(response, 200, { state: router.routedSealState(dest), detail: router.routedSealDetail(dest) });
+        return send(response, 200, { state: router.routedSealState(dest), detail: router.routedSealDetail(dest), persistDegraded: routePersistDegraded() === true });
       }
 
       // Approve a discovered Tier-1 key for sealing — the manual gate. Optionally pinned to

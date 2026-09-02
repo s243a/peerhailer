@@ -1,19 +1,24 @@
 # Routing security roadmap: from admission-gated delivery to authenticated sealed relay
 
-**Status: M0–M2 merged to `main`; M3b (sealed routed payload) + the confidential-by-default
-hardening implemented on `routing-m3b-sealed`, in review.** `docs/routing.md` is the full
-routing roadmap. This security-focused companion sequences *origin authentication*,
-*duplicate suppression (replay)*, *key trust*, and *confidentiality* by their dependencies.
-Kimi corrected the original spine (signing was conflated with sealing); Sol then corrected
-several over-strong claims and, in an integrated review, surfaced the system-level
-composition gaps folded in below.
+**Status: M0–M3b merged to `main`, plus signed delivery receipts, durable
+(restart-safe) replay/Tier-1, the High-1 causal identity/seal merge, and the M3a observation
+seam (mechanism; enforcement not yet armed). Latest: durable Tier-1 *invalidation* fixes the
+ordinary offline forget/rotate path, with three retirement/restart corner cases still open
+(see the What-is-true-today bullet).** `docs/routing.md` is the full routing roadmap. This
+security-focused companion sequences *origin authentication*, *duplicate suppression
+(replay)*, *key trust*, and *confidentiality* by their dependencies. Kimi corrected the
+original spine (signing was conflated with sealing); Sol then corrected several over-strong
+claims and, in successive integrated reviews, surfaced the system-level composition gaps
+folded in below.
 
 **What is true today (m3b branch):** routed application data is **confidential by default** —
 a send with no *usable* key (Tier-0 walk-verified, or a Tier-1 discovered key an operator
 has **approved**) is refused, never sent in the clear; cleartext requires an explicit
 `public` opt-out, which is also how a **data-free discovery probe** learns a peer's key.
-Tier-0 posture is aggregated per identity key; a Tier-0 event invalidates a stale Tier-1
-key synchronously; the resolver fails closed on any ambiguous or incoherent input. Bodies
+Tier-0 posture is aggregated per identity key; a Tier-0 event invalidates a stale Tier-1 key
+synchronously in a running daemon, and an *offline* forget/rotation is reconciled at the next
+cold start via durable identity tombstones (below); the resolver fails closed on any ambiguous
+or incoherent input. Bodies
 are cleartext only when explicitly public; the *response* path now carries a **signed
 delivery receipt** (below). Replay and Tier-1 are **restart-safe**: both persist to a
 daemon-owned sidecar beside `directory.json`, so a bounce neither reopens a still-unexpired
@@ -58,19 +63,51 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   response body** is still later work.
 - Sealing to a **Tier-1** destination now survives a restart. The record-carried key store
   persists to a sidecar (`route-keys.json`), so an **approved** key is usable immediately on
-  restart — no first send resolving `cleartext` and re-discovering — and a **conflict**
-  (security evidence) cannot be shed by a bounce. This extends Tier-1's existing no-liveness
-  property across the restart: a merely *pending* key is still unusable until approved, and a
-  Tier-0 event still supersedes (a persisted `forget` removes the moot entry durably).
-- **Multi-writer state can restore a retired Tier-0 sealing key (pre-existing, out of
-  routing scope).** The directory merges concurrent state via a per-record monotone `rev`
-  (higher wins). That is not a causal clock: a process that loaded a stale snapshot and
-  made several mutations reaches a higher `rev` than another process's newer one-step
-  identity rotation, and its OLD identity/sealing key wins the merge. This predates the
-  routing work and affects all sealed state, not just routed keys; a real fix is a
-  directory-concurrency change (causal ordering, or a single-writer discipline where the
-  CLI signals the daemon rather than writing disk itself — the SIGHUP reload is a step
-  toward that). Tracked separately, not in this branch.
+  restart — no first send resolving `cleartext` and re-discovering. A merely *pending* key is
+  still unusable until approved, and its binding is re-verified against the signed record on
+  load, so a hand edit cannot inject an unsigned key.
+- **Tier-1 *invalidation* is now durable for the normal path; three retirement/restart corner
+  cases remain (Sol's M3a re-review — F1 cap + clock HIGH, F2 window medium).** The mechanism:
+  `forget`/`rotateKey` write durable identity **tombstones** (`{keyId, at, reason}`, union-merged
+  in `reconcilePersist`) into `directory.json` — the CLI-writable, daemon-read channel that needs
+  no sidecar write; Tier-1 entries carry an `at` stamp; a daemon **cold-start reconcile** forgets
+  any entry a tombstone at least as new as its claim retires (so a deliberate re-approval, a newer
+  `at`, survives), plus a Tier-0 posture sweep, before serving. A never-walked entry has no
+  tombstone and no posture, so absence-from-directory is never a forget signal. The conflict/forget
+  persist is flagged `restricting`; a forget self-heals from its tombstone, and a failed conflict
+  persist arms a bounded daemon retry + a `SECURITY` warning + a `persistDegraded` flag in
+  `/api/route/seal`. **What that fixes:** the ordinary offline forget/rotate then restart now
+  refuses instead of sealing to the retired key; no accepted-cleartext path exists (a retired key
+  still seals *to the retired key*, never clear). **Residual corner cases, NOT yet closed:**
+  1. *Tombstone-cap eviction (HIGH).* Tombstones are capped (256) below the Tier-1 store (4096);
+     past the cap the oldest is dropped, so >256 offline retirements — or forged shape-valid newer
+     tombstones — can evict a genuine retirement's evidence while its approved key survives,
+     resurrecting it at a later cold start. So a hand-edited `directory.json` can *under*-forget
+     (crowd out a tombstone), not only over-forget. A safe fix needs cap-aware pruning (never drop
+     a tombstone for a key still in the store, e.g. consume-after-durable-store-persist) or a cap
+     ≥ the store.
+  2. *Wall-clock ordering (HIGH).* `at` is `Date.now()` on both sides; the reconcile's
+     `entry.at <= tombstone.at` assumes a non-regressing clock. A clock set ahead at approval then
+     corrected back before a later forget inverts causal order and keeps the retired key. A durable
+     logical generation / re-approval epoch is the real fix.
+  3. *Conflict restart window (medium).* A crash/restart in the retry window *before* the first
+     successful rewrite still sheds a conflict (a transient failure suffices, not only a
+     stays-full disk); a conflict has no durable source like a forget's tombstone. And `saveState`
+     is temp+rename without `fsync`, so power-loss durability is out of scope. These are tracked
+     for a follow-up (logical-generation ordering + safe tombstone pruning + a durable conflict
+     record).
+- **Multi-writer identity/seal merge is now causal (High-1, `48f25a5`); a non-security
+  residual remains.** The directory once merged concurrent state by a per-record monotone
+  `rev` (higher wins), which is not a causal clock — a stale multi-writer could restore a
+  retired Tier-0 identity/sealing key. That is fixed: `mergeByRevision` uses the writer's
+  baseline as a causal ancestor so whichever side actually rotated the identity carries the
+  identity+seal unit, and a same-identity seal is a fail-closed 3-way merge
+  (`directory.js` sameCanonicalKey/sealUnit). Residual (pre-existing, non-security): the
+  *non-security* record fields (profile/addresses/note) still follow whole-record `rev`, so a
+  stale writer can clobber a concurrent non-security edit, and two concurrent rotations to
+  *different* identities fall back to `rev`. A full causal directory (vector clocks, or a
+  single-writer CLI-signals-daemon discipline) is the larger optional workstream — and is where
+  the F1/F2 corner cases above (a durable logical generation) would naturally be solved together.
 - **A keyless current record does not drop an approved routed key, deliberately.** If a
   discovered record for a destination arrives with no sealing key, an already-approved key
   is kept — because a relay can replay an *old* keyless record, and letting that drop an
@@ -227,8 +264,10 @@ State model and rules: `record-approved` / `record-carried` (pending) / `record-
 are distinct from the Tier-0 `verified`/`reverify`/`conflict` states; Tier 0 always wins
 over Tier 1; a matching Tier-1 record adds no authority; differing Tier-1 records cause
 Tier-1 refusal (not auto-selection) and void any approval; a Tier-0 event (walk, accept,
-rotation, forget) invalidates the Tier-1 entry synchronously; two conflicting Tier-0 keys
-keep the existing deliberate-resolution path. (Signed key epochs / short-lived
+rotation, forget) invalidates the Tier-1 entry synchronously in a running daemon, and an
+*offline* forget/rotation is reconciled at the next cold start via durable identity
+tombstones + a startup Tier-1 reconcile; two conflicting Tier-0 keys keep the existing
+deliberate-resolution path. (Signed key epochs / short-lived
 records reduce stale exposure but cannot fully solve first-observation revocation without
 an online authority, a transparency log, or a prior monotonic observation.)
 
