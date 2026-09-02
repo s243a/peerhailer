@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory, reconcileBaseline, reconcilePersist, MAX_TOMBSTONES } from "../src/directory.js";
+import { createDirectory, finalizeRouteGens, reconcileBaseline, reconcilePersist, MAX_TOMBSTONES } from "../src/directory.js";
 import { parseArgs, CliError } from "../src/cliArgs.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
@@ -1115,7 +1115,10 @@ switch (command) {
             const fresh = createDirectory({ ...onDisk, profiles: onDisk.profiles ?? {} });
             fresh.useProfiles(mergeProfiles(plugins, onDisk));
             result = mutate(fresh);
-            return { ...onDisk, ...fresh.snapshot() };
+            // A page/API forget/rotate mints a PROVISIONAL tombstone on `fresh`; finalize it
+            // under this lock so its generation lands strictly above on-disk truth and no
+            // `gen: null` ever reaches directory.json (the invariant both write paths share).
+            return finalizeRouteGens({ ...onDisk, ...fresh.snapshot() });
           },
           { log },
         );

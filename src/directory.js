@@ -41,12 +41,23 @@ import { keyId } from "./routeManifest.js";
  * retired. It can only ever *remove* a Tier-1 key, never bind one, so a hand-edited
  * directory.json remains monotone-safe.
  *
- * `gen` is the ordering primitive (R2): a file-global `routeGen` counter (below), bumped on
- * every retirement and stamped on both the tombstone and — through the store's injected
- * `gen` port — every Tier-1 claim, so a retirement is ordered against an approval CAUSALLY
- * (did the approver see it?) rather than by a wall clock that can run backward.
+ * `gen` is the ordering primitive (R2): a file-global `routeGen` counter (below) stamped on
+ * both the tombstone and — through the store's injected `gen` port — every Tier-1 claim, so a
+ * retirement is ordered against an approval CAUSALLY (did the approver see it?) rather than by
+ * a wall clock that can run backward. A tombstone's `gen` moves through THREE states:
  *
- * @typedef {{ keyId: string, at: number, reason: "forget" | "rotate", gen?: number }} Tombstone
+ *   - a **number** — FINALIZED: the generation allocated under the state lock at write time
+ *     (`finalizeRouteGens`), strictly above everything the file had recorded. Only finalized
+ *     gens ever reach disk.
+ *   - **null** — PROVISIONAL: minted in memory by `tombstone()` before any lock is held. The
+ *     retirement is recorded, but its generation is not yet allocated. `tombstone()` no longer
+ *     bumps `routeGen` or stamps a number, because a pre-lock snapshot can be stale: two
+ *     concurrent writers reading the same `routeGen` would mint the same number and break
+ *     causal ordering. Finalization (below), under the lock, allocates from on-disk truth.
+ *   - **absent** — LEGACY: a pre-upgrade tombstone written before generations existed. It
+ *     flows through the store's fail-closed legacy cases, never promoted to a number.
+ *
+ * @typedef {{ keyId: string, at: number, reason: "forget" | "rotate", gen?: number | null }} Tombstone
  */
 
 /** A keyId is a SHA-256 of SPKI DER as unpadded base64url: 43 chars. */
@@ -89,7 +100,12 @@ function loadTombstones(raw) {
       if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
       const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
       const reason = /** @type {"forget"|"rotate"} */ (t.reason === "rotate" ? "rotate" : "forget");
-      const gen = normGen(t.gen);
+      // A `gen: null` never reaches disk (every write path finalizes first), but if one ever
+      // leaked, PRESERVE it as provisional rather than normalising it to legacy-absent: a
+      // provisional fails CLOSED on read (`applyTombstones` always-forgets it) and is
+      // re-finalized on the next write, whereas demotion to legacy-absent would silently
+      // *under*-forget (case 3: a gen-less tombstone loses to a gen-bearing entry).
+      const gen = t.gen === null ? null : normGen(t.gen);
       out.push(gen === undefined ? { keyId: t.keyId, at, reason } : { keyId: t.keyId, at, reason, gen });
     }
   }
@@ -111,10 +127,15 @@ function pruneTombstones(list, routeGenApplied = 0) {
 }
 
 /**
- * Union-merge two tombstone lists by `keyId`, keeping the HIGHEST `gen` for each (a fresh
- * retirement outranks the old one), falling back to the newest `at` when both are legacy —
- * so a CLI forget racing a daemon page-forget cannot drop the other's restriction (the exact
- * race `reconcilePersist` exists for). Pure.
+ * Union-merge two tombstone lists by `keyId` — so a CLI forget racing a daemon page-forget
+ * cannot drop the other's restriction (the exact race `reconcilePersist` exists for). The
+ * per-keyId winner, over-forget being the safe direction:
+ *   - a PROVISIONAL (`gen === null`) candidate supersedes any existing tombstone: it is by
+ *     definition the freshest retirement this writer knows of, and finalization re-stamps it
+ *     strictly above on-disk truth. Two provisionals for one keyId collapse to one.
+ *   - otherwise the HIGHEST `gen` wins (a fresh finalized retirement outranks the old one), a
+ *     gen-bearing tombstone beats a legacy one, and two legacy ones fall back to newest `at`.
+ * Pure.
  * @param {unknown} a
  * @param {unknown} b
  * @returns {Tombstone[]}
@@ -128,7 +149,9 @@ function mergeTombstones(a, b) {
       if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
       const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
       const reason = /** @type {"forget"|"rotate"} */ (t.reason === "rotate" ? "rotate" : "forget");
-      const gen = normGen(t.gen);
+      // A provisional carries `gen: null` explicitly; anything else normalises to a number or
+      // (legacy) drops the key entirely.
+      const gen = t.gen === null ? null : normGen(t.gen);
       const cand = gen === undefined ? { keyId: t.keyId, at, reason } : { keyId: t.keyId, at, reason, gen };
       const prev = byId.get(t.keyId);
       if (!prev) {
@@ -137,8 +160,12 @@ function mergeTombstones(a, b) {
       }
       const candGen = cand.gen;
       const prevGen = prev.gen;
-      if (candGen !== undefined && prevGen !== undefined) {
-        if (candGen > prevGen) byId.set(t.keyId, cand); // both gen — highest wins
+      if (candGen === null) {
+        byId.set(t.keyId, cand); // a provisional is the freshest retirement — supersede
+      } else if (prevGen === null) {
+        /* keep prev — it is provisional, the freshest */
+      } else if (candGen !== undefined && prevGen !== undefined) {
+        if (candGen > prevGen) byId.set(t.keyId, cand); // both finalized — highest wins
       } else if (candGen !== undefined) {
         byId.set(t.keyId, cand); // a gen-bearing tombstone supersedes a legacy one
       } else if (prevGen !== undefined) {
@@ -283,7 +310,66 @@ export function reconcilePersist(onDisk, baseline, current) {
     if (merged.length) result.tombstones = merged;
     else delete result.tombstones;
   }
-  return result;
+  // Finalize any provisional (gen: null) tombstone this writer minted, allocating its
+  // generation from the merged on-disk truth while the caller holds the state lock — so the
+  // gen lands strictly above whatever a concurrent writer committed first (`result` and its
+  // tombstone objects are all fresh, never aliased live state).
+  return finalizeRouteGens(result);
+}
+
+/**
+ * Allocate a generation for every PROVISIONAL (`gen === null`) tombstone in `state`, stamping
+ * each strictly above `max(routeGen, routeGenApplied, every present tombstone gen)`, and raise
+ * `state.routeGen` to the highest allocated. The caller MUST hold the state lock and pass a
+ * freshly-built, about-to-be-written state object (never live/aliased state) — the base read
+ * from the merged result is what rebases a stale writer: whatever a concurrent writer committed
+ * first is already reflected, so the allocation lands strictly above it, globally unique and
+ * increasing in file-write order. Including `routeGenApplied` preserves the self-heal — a new
+ * retirement can never mint a gen at or below the applied high-water. Reassigns `state.tombstones`
+ * (a new array whose finalized entries are fresh copies) and `state.routeGen` on the passed
+ * object — the tombstone objects themselves are never mutated, because `snapshot()` hands back
+ * frozen ones and `applyChange` spreads exactly those into `state`.
+ *
+ * (Lock-uniqueness is best-effort under `withStateLock`'s ~20s give-up fallback — the same
+ * extreme that already risks losing whole tombstones to a torn read-modify-write; no new class.)
+ *
+ * Pure w.r.t. everything but `state`; exported so both write paths (CLI `reconcilePersist`,
+ * daemon `applyChange`) can guarantee no directory.json is written with a provisional gen.
+ * @param {any} state the fresh, about-to-be-written state object (never live/aliased state)
+ * @returns {any} the same `state`
+ */
+export function finalizeRouteGens(state) {
+  /** @type {Tombstone[]} */
+  const list = Array.isArray(state.tombstones) ? state.tombstones : [];
+  const pending = list.filter((t) => t && t.gen === null);
+  if (!pending.length) return state;
+  let g = clampGen(
+    Math.max(
+      numOr0(state.routeGen),
+      numOr0(state.routeGenApplied),
+      ...list.map(genOf), // genOf: null/absent contribute 0
+    ),
+  );
+  // Deterministic order for multiple provisionals in one write: by `at`, then keyId. Ordering
+  // among same-write retirements has no security meaning — only that each gets a unique gen.
+  const ordered = [...pending].sort((a, b) => a.at - b.at || (a.keyId < b.keyId ? -1 : 1));
+  /** @type {Map<Tombstone, number>} */
+  const allocated = new Map();
+  // `clampGen` SATURATES at MAX_SAFE_INTEGER-1: if `g` is already there (only reachable by a
+  // hand-edited near-ceiling counter — organic use adds one per operator retirement and never
+  // approaches it), two provisionals in one write clamp to the same gen and degrade to tie
+  // semantics. Not defended in code — the ceiling is a trusted-local-editor edge (Kimi F3).
+  for (const t of ordered) {
+    g = clampGen(g + 1);
+    allocated.set(t, g);
+  }
+  // Replace each provisional with a finalized COPY rather than mutating it: `snapshot()` hands
+  // back deeply-frozen tombstone objects, and the daemon's `applyChange` path spreads exactly
+  // those into the state passed here — so a source object may be frozen. The outer `state` is
+  // always the fresh, about-to-be-written object, so reassigning its fields is safe.
+  state.tombstones = list.map((t) => (allocated.has(t) ? { ...t, gen: allocated.get(t) } : t));
+  state.routeGen = g; // the counter records the highest allocated gen
+  return state;
 }
 
 /**
@@ -534,11 +620,15 @@ export function createDirectory(state = {}) {
    * The keyId is the same id the Tier-1 store is keyed by (`keyId(publicKey)`), so the
    * cold-start reconcile is a direct map lookup. A non-Ed25519 or unparseable key throws
    * in `keyId` and is skipped — it can hold no Tier-1 entry anyway (those ids are Ed25519
-   * keyIds), and it records no retirement, so it does NOT burn a generation. A real
-   * retirement bumps `routeGen` FIRST, then stamps that gen: any Tier-1 claim made without
-   * having seen this tombstone stamps a strictly smaller gen, which is what makes the
-   * comparison causal. Re-tombstoning an existing keyId updates it to the new, higher gen.
-   * No count-based eviction — the list is pruned only by CONSUMPTION.
+   * keyIds), and it records no retirement. It records a PROVISIONAL tombstone (`gen: null`):
+   * the retirement is durable, but its generation is NOT allocated here. `tombstone()` runs
+   * pre-lock, from an in-memory `routeGen` snapshot that may be stale — two concurrent writers
+   * reading the same value would mint the same gen and break causal ordering (a retirement
+   * pruned as "already applied", or a spurious approval/retirement tie). The gen is allocated
+   * later, under the state lock, by `finalizeRouteGens`, strictly above whatever any concurrent
+   * writer committed first. Re-tombstoning an existing keyId RESETS its gen to null — a fresh
+   * retirement must be re-finalized above current disk. No count-based eviction — the list is
+   * pruned only by CONSUMPTION.
    * @param {string | null | undefined} publicKey
    * @param {"forget" | "rotate"} reason
    */
@@ -550,16 +640,15 @@ export function createDirectory(state = {}) {
     } catch {
       return;
     }
-    routeGen = clampGen(routeGen + 1);
     const at = now();
     const existing = tombstones.find((t) => t.keyId === id);
     if (existing) {
-      existing.gen = routeGen;
+      existing.gen = null; // provisional again — a fresh retirement must be re-finalized above current disk
       existing.at = at;
       existing.reason = reason;
       return;
     }
-    tombstones.push({ keyId: id, at, reason, gen: routeGen });
+    tombstones.push({ keyId: id, at, reason, gen: null });
   };
   /**
    * Profiles this directory resolves against.

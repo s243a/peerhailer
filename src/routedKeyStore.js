@@ -316,12 +316,14 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
      * this daemon-owned store. Whether a tombstone outranks an entry is decided by LOGICAL
      * GENERATION, not the wall clock, in four explicit cases:
      *
-     *   1. both carry `gen` → forget iff `entry.gen < tombstone.gen` (STRICT). A retirement
-     *      bumps the counter *before* stamping, so a claim made without having seen the
-     *      tombstone stamps a strictly smaller gen; a claim by a daemon that adopted the
-     *      tombstone stamps `>= t.gen` and survives. A tie means the approval was made with
-     *      the tombstone already known → keep. This is the real causal property: an approval
-     *      outranks a retirement iff the approver had seen the retirement.
+     *   1. both carry `gen` → forget iff `entry.gen < tombstone.gen` (STRICT). Generations are
+     *      allocated under the state lock at write time (`finalizeRouteGens`), strictly above
+     *      everything the file had recorded, so a claim made without having seen the tombstone
+     *      stamps a strictly smaller gen; a claim by a daemon that adopted the tombstone stamps
+     *      `>= t.gen` and survives. A tie means the approval was made with the tombstone already
+     *      known → keep — a tie is no longer spurious BECAUSE lock-allocation makes every gen
+     *      unique and write-ordered. This is the real causal property: an approval outranks a
+     *      retirement iff the approver had seen the retirement.
      *   2. tombstone has `gen`, entry lacks it → forget. Every post-upgrade claim stamps a
      *      gen, so a gen-less entry is pre-upgrade and causally earlier. Fail-closed.
      *   3. tombstone lacks `gen`, entry has one → keep. The entry's claim is post-upgrade.
@@ -345,7 +347,11 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
           const tGen = typeof t.gen === "number" && Number.isFinite(t.gen) && t.gen >= 0 ? Math.floor(t.gen) : undefined;
           const eGen = e.gen;
           let forget;
-          if (eGen !== undefined && tGen !== undefined) forget = eGen < tGen; // 1: strict, causal
+          // Defensive: a leaked PROVISIONAL (gen: null — never expected here, finalized before
+          // any write) must fail closed. A just-minted provisional outranks anything; without
+          // this it would fall to case 3 (gen-less tombstone loses) and UNDER-forget.
+          if (t.gen === null) forget = true;
+          else if (eGen !== undefined && tGen !== undefined) forget = eGen < tGen; // 1: strict, causal
           else if (tGen !== undefined) forget = true; // 2: gen tombstone beats gen-less entry
           else if (eGen !== undefined) forget = false; // 3: gen-less tombstone loses to gen entry
           else {

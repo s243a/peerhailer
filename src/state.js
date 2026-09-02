@@ -135,12 +135,19 @@ const LOCK_RETRY_MS = 25;
  * a tool that stays broken until somebody finds a file they have never heard
  * of.
  *
+ * Both loss-of-exclusivity paths are LOGGED, not silent: stealing a stale lock, and giving up
+ * after sustained contention and writing lock-less. Downstream this file's write serialises
+ * `routeGen` allocation (the routed Tier-1 causal-invalidation generation), so a lock-less
+ * write is exactly where its gen-uniqueness guarantee degrades to best-effort — that must not
+ * pass unrecorded, even though proceeding (over refusing forever) is the deliberate tradeoff.
+ *
  * @template T
  * @param {string} path
  * @param {() => T} change
+ * @param {{log?: (message: string) => void}} [options]
  * @returns {T}
  */
-export function withStateLock(path, change) {
+export function withStateLock(path, change, { log = () => {} } = {}) {
   const lockPath = `${path}.lock`;
   mkdirSync(dirname(path), { recursive: true });
 
@@ -158,12 +165,17 @@ export function withStateLock(path, change) {
         continue; // it went away between failing and asking; try again
       }
       if (age > LOCK_STALE_MS) {
+        // The holder looks dead (its lock aged past the stale window). Steal it, but say so —
+        // if it was actually alive, two writers are now inside the critical section.
+        log(`[state] stole a stale lock on ${path} (age ${Math.round(age)}ms > ${LOCK_STALE_MS}ms) — a live holder would make this write concurrent`);
         rmSync(lockPath, { force: true });
         continue;
       }
       if (Date.now() > deadline) {
-        // Better to write and risk a lost update than to refuse forever over a
-        // lock this process cannot explain.
+        // Better to write and risk a lost update than to refuse forever over a lock this
+        // process cannot explain. Loud, because this is where routeGen gen-uniqueness (and a
+        // clean read-modify-write) becomes best-effort — a concurrent writer here can collide.
+        log(`[state] SECURITY: gave up waiting for the lock on ${path} after sustained contention — writing WITHOUT the lock; a concurrent write can now collide (routeGen uniqueness and this update are best-effort)`);
         break;
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
@@ -189,10 +201,14 @@ export function withStateLock(path, change) {
  * @param {{log?: (message: string) => void}} [options]
  */
 export function updateState(path, mutate, { log = () => {} } = {}) {
-  return withStateLock(path, () => {
-    const current = loadState(path, { log });
-    const next = mutate(current);
-    saveState(next, path);
-    return next;
-  });
+  return withStateLock(
+    path,
+    () => {
+      const current = loadState(path, { log });
+      const next = mutate(current);
+      saveState(next, path);
+      return next;
+    },
+    { log },
+  );
 }

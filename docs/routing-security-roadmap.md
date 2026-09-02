@@ -66,9 +66,10 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   restart — no first send resolving `cleartext` and re-discovering. A merely *pending* key is
   still unusable until approved, and its binding is re-verified against the signed record on
   load, so a hand edit cannot inject an unsigned key.
-- **Tier-1 *invalidation* is durable, cap-safe against count/forged crowding, and clock-
-  independent on the sequential path; a multi-writer concurrency residual and a narrowed conflict
-  crash-window remain open (Sol's second re-review — folded into the causal-merge workstream).**
+- **Tier-1 *invalidation* is durable, cap-safe against count/forged crowding, clock-
+  independent, and now causal under concurrent writers (generations are allocated under the
+  state lock); a narrowed conflict crash-window and a pre-fix persisted-collision residual
+  remain (Sol's re-reviews — the lock-allocation primitive seeds the causal-merge workstream).**
   The mechanism: `forget`/`rotateKey` write durable identity
   **tombstones** (`{keyId, at, reason, gen}`, union-merged in `reconcilePersist`) into
   `directory.json` — the CLI-writable, daemon-read channel that needs no sidecar write; a daemon
@@ -77,28 +78,40 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   tombstone and no posture, so absence-from-directory is never a forget signal. **Status of the
   residuals (sequential path robust; a concurrency residual remains — Sol's second re-review):**
   1. *Tombstone-cap eviction (R1, HIGH) — count-based crowding CLOSED; concurrent-writer
-     consumption OPEN.* Count-based eviction is abolished: a tombstone is dropped only once the
-     daemon has DURABLY applied it (`routeGenApplied`, a `directory.json` high-water integer, gates
-     a `gen <= routeGenApplied` prune), so nothing pending is ever evicted and 256 forged tombstones
-     cannot crowd a real one out. `MAX_TOMBSTONES` (256) is now an advisory warn-once threshold; the
-     startup sequence (apply → durable sidecar persist → consume under the lock →
-     `markTombstonesApplied`) loses neither a tombstone nor its forget to a crash. **Open:**
-     consumption treats the scalar `routeGen` as a contiguous global prefix, which is unsafe under
-     concurrent stale writers (see residual 2) — a retirement minted at a colliding `gen` can be
-     pruned as "already applied" though it never reached Tier-1.
-  2. *Wall-clock ordering (R2, HIGH) — wall-clock hazard CLOSED; the generation is not causal under
-     concurrency, OPEN.* A file-global monotone `routeGen` counter (load-as-max over the field, the
-     tombstones' gens, AND `routeGenApplied`, max-merge everywhere) stamps every retirement and
-     every Tier-1 claim; the reconcile compares by `gen` not the wall clock (an approval outranks a
-     retirement iff `gen >= t.gen`), so the clock-regression hazard is gone. **Open (Sol F1):** the
-     generation is allocated from each process's in-memory snapshot *before* it takes the state-file
-     lock, so two stale writers (e.g. a CLI `forget` racing a page-driven `forget`) can both mint
-     `N+1`. The strict `<` then reads a tie as "the approver had seen the retirement" and keeps a
-     retired key, and a second `N+1` retirement can be discarded as already-applied. A scalar
-     Lamport counter minted pre-lock is *not* a causal clock under concurrent retirements — the fix
-     is to rebase/allocate the generation UNDER the state lock (or track exact retirements, not a
-     scalar prefix). This is the same multi-writer causal-ordering problem as the deferred
-     directory causal-merge workstream, and is folded into it.
+     consumption CLOSED (for forward writes).* Count-based eviction is abolished: a tombstone is
+     dropped only once the daemon has DURABLY applied it (`routeGenApplied`, a `directory.json`
+     high-water integer, gates a `gen <= routeGenApplied` prune), so nothing pending is ever evicted
+     and 256 forged tombstones cannot crowd a real one out. `MAX_TOMBSTONES` (256) is now an advisory
+     warn-once threshold; the startup sequence (apply → durable sidecar persist → consume under the
+     lock → `markTombstonesApplied`) loses neither a tombstone nor its forget to a crash. Consumption
+     treats the scalar `routeGen` as a contiguous global prefix — now SOUND, because generations are
+     lock-allocated (residual 2): a retirement finalized after this boot's load reads a disk whose max
+     is `>= N` and allocates `>= N+1`, so no unseen retirement can carry a gen `<= N` and be pruned as
+     already-applied.
+  2. *Wall-clock ordering (R2, HIGH) — wall-clock hazard CLOSED; the generation is now causal under
+     concurrency, CLOSED for forward writes (Sol F1).* A file-global monotone `routeGen` counter
+     (load-as-max over the field, the tombstones' gens, AND `routeGenApplied`, max-merge everywhere)
+     stamps every retirement and every Tier-1 claim; the reconcile compares by `gen` not the wall
+     clock (an approval outranks a retirement iff `gen >= t.gen`), so the clock-regression hazard is
+     gone. **The concurrent-writer gen-collision is now closed:** `tombstone()` mints a PROVISIONAL
+     tombstone (`gen: null`) and defers allocation to `finalizeRouteGens`, which runs UNDER the state
+     lock (in both `reconcilePersist` and the daemon's `applyChange`) and stamps each provisional
+     strictly above the merged on-disk `max(routeGen, routeGenApplied, tombstone gens)`. Writes to
+     `directory.json` are serialized by that lock, so allocated generations are globally unique and
+     strictly increasing in file-write order — two stale writers (a CLI `forget` racing a page-driven
+     `forget`) can no longer both mint `N+1`, the strict `<` no longer reads a spurious tie as "the
+     approver had seen the retirement", and a second retirement can no longer be discarded as
+     already-applied. **Residuals:** (a) a gen collision *already persisted by the old racing code
+     before this fix* keeps its spurious tie-keep — undetectable after the fact (it required running
+     the pre-fix code under a concurrent race) and accepted; no migration rewrite. (b) The
+     uniqueness guarantee holds while the state lock is actually held; `withStateLock` gives up after
+     ~20s of continuous contention (or steals a stale lock) and proceeds lock-less, where two writers
+     could again collide — but that same fallback already permits a torn read-modify-write that loses
+     whole tombstones (a strictly worse outcome), so it adds no new failure class. Both losses of
+     exclusivity now emit a loud `[state]` log line (a silent give-up would have turned the causal
+     invariant best-effort with nothing in the audit trail). The proper close is the deferred
+     causal-merge workstream (lock-serialized per-record allocation), for which `finalizeRouteGens`
+     is the first primitive.
   3. *Conflict restart window (R3, medium) — power-loss durability improved; the crash window
      remains, narrower.* `saveState(_, _, { durable })` fsyncs the temp fd before the rename and
      best-effort fsyncs the parent directory after, on the restricting sidecar persists, the retry
@@ -113,7 +126,10 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
 
   `routeGen` is the shared **logical-generation primitive** the deferred directory causal-merge
   workstream (below) would generalize per-record — the max-merge discipline here is exactly what
-  that work needs and is not throwaway.
+  that work needs and is not throwaway. `finalizeRouteGens` (lock-serialized allocation that
+  rebases pending claims against on-disk truth) is that workstream's first primitive: the
+  per-record `rev` machinery would apply the same "allocate/rebase under the lock" discipline
+  instead of trusting a stale writer's pre-lock number.
 - **Multi-writer identity/seal merge is now causal (High-1, `48f25a5`); a non-security
   residual remains.** The directory once merged concurrent state by a per-record monotone
   `rev` (higher wins), which is not a causal clock — a stale multi-writer could restore a

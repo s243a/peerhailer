@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createDirectory, reconcilePersist } from "../src/directory.js";
+import { createDirectory, finalizeRouteGens, reconcileBaseline, reconcilePersist } from "../src/directory.js";
 import { generateIdentity, normalizeKey } from "../src/identity.js";
 import { keyId } from "../src/routeManifest.js";
 import { signRecord } from "../src/peerRecord.js";
@@ -119,7 +119,11 @@ test("a deliberate re-approval AFTER a forget survives later restarts (a claim t
 
   const directory = createDirectory({ self: { name: "me" }, now: () => 1000 });
   directory.admit({ name: "alice", publicKey: alice.publicKey });
-  directory.forget("alice"); // tombstone gen 1 (at t=1000)
+  directory.forget("alice"); // provisional tombstone (at t=1000)
+  // The forget is finalized under the state lock at write time; the running daemon then adopts
+  // the written state, so its routeGen reflects the retirement (gen 1).
+  directory.adopt(finalizeRouteGens({ ...directory.snapshot() }));
+  assert.equal(directory.routeGen(), 1, "the finalized forget is gen 1");
 
   // Later, alice is re-discovered and DELIBERATELY re-approved — a claim made by a daemon that
   // has ADOPTED the tombstone, so it stamps gen == the tombstone's (a tie keeps). The gen
@@ -297,10 +301,11 @@ test("R2 kill shot: a forget forgets a stale approval even when the wall clock i
   const directory = createDirectory({ self: { name: "me" }, now: () => 1000, routeGen: 5 });
   directory.admit({ name: "alice", publicKey: alice.publicKey });
   directory.forget("alice");
-  assert.equal(directory.tombstones()[0].gen, 6, "the forget minted gen 6");
+  const finalized = finalizeRouteGens({ ...directory.snapshot() });
+  assert.equal(finalized.tombstones[0].gen, 6, "finalization minted gen 6 (strictly above routeGen 5)");
 
   const restarted = createRoutedKeyStore({ initial: persisted });
-  const dropped = restarted.applyTombstones(directory.tombstones());
+  const dropped = restarted.applyTombstones(finalized.tombstones);
   assert.deepEqual(dropped, [kid], "forgotten by causal order despite the inverted wall clock");
   assert.equal(restarted.recordState(kid), "none");
 });
@@ -386,12 +391,14 @@ test("R1: forged tombstones cannot crowd out a genuine one, and the genuine one 
   store.approve(kid); // gen 0
 
   directory.admit({ name: "alice", publicKey: alice.publicKey });
-  directory.forget("alice"); // genuine tombstone, gen 1
-  const genuine = directory.tombstones()[0];
+  directory.forget("alice"); // provisional; finalized to the genuine gen-1 tombstone
+  const finalized = finalizeRouteGens({ ...directory.snapshot() });
+  const genuine = finalized.tombstones[0];
+  assert.equal(genuine.gen, 1, "the genuine tombstone is gen 1");
 
   // 300 shape-valid forged tombstones with huge `at`/gen, hand-injected alongside the genuine one.
   const forged = Array.from({ length: 300 }, (_, i) => ({ keyId: i.toString(36).padStart(43, "0"), at: 9e12, reason: "forget", gen: 9e9 + i }));
-  const reloaded = createDirectory({ ...directory.snapshot(), tombstones: [...forged, genuine] });
+  const reloaded = createDirectory({ ...finalized, tombstones: [...forged, genuine] });
   assert.equal(reloaded.tombstones().length, 301, "the genuine tombstone survives load beside 300 forged ones");
   assert.ok(reloaded.tombstones().some((t) => t.keyId === kid), "the genuine tombstone is not crowded out");
 
@@ -454,8 +461,8 @@ test("R1 consume-after-durable: a failed durable persist SKIPS consumption; a he
 
   const directory = createDirectory({ self: { name: "me" } });
   directory.admit({ name: "alice", publicKey: alice.publicKey });
-  directory.forget("alice"); // tombstone gen 1
-  saveState(directory.snapshot(), statePath); // the CLI's directory.json is on disk
+  directory.forget("alice"); // provisional; finalized to gen 1 at write
+  saveState(finalizeRouteGens({ ...directory.snapshot() }), statePath); // the CLI's finalized directory.json on disk
 
   // A stale sidecar still holding the approved key.
   const seed = createRoutedKeyStore();
@@ -463,9 +470,11 @@ test("R1 consume-after-durable: a failed durable persist SKIPS consumption; a he
   seed.approve(kid);
   const staleDisk = seed.snapshot();
 
-  // Boot 1: the durable sidecar write THROWS. Consumption must be skipped.
+  // Boot 1: reload the finalized directory from disk (as the daemon does); the durable sidecar
+  // write THROWS, so consumption must be skipped.
+  const dir1 = createDirectory(loadState(statePath));
   const boot1 = createRoutedKeyStore({ initial: staleDisk });
-  const r1 = consumeAfterDurable(boot1, directory, statePath, () => {
+  const r1 = consumeAfterDurable(boot1, dir1, statePath, () => {
     throw new Error("disk full");
   });
   assert.deepEqual(r1.dropped, [kid], "the tombstone was applied in memory");
@@ -495,7 +504,7 @@ test("R1 crash-window equivalence: a durable-persist-then-crash (consume never r
   const directory = createDirectory({ self: { name: "me" } });
   directory.admit({ name: "alice", publicKey: alice.publicKey });
   directory.forget("alice");
-  saveState(directory.snapshot(), statePath);
+  saveState(finalizeRouteGens({ ...directory.snapshot() }), statePath); // finalized: tombstone gen 1
 
   // The forget IS durably in the sidecar (step 2 succeeded), but the process crashed before
   // step 3 — so the tombstone is still on disk and the sidecar no longer holds alice.
@@ -516,8 +525,9 @@ test("R1: a concurrent CLI forget (gen N+1) during consumption survives the filt
 
   const directory = createDirectory({ self: { name: "me" } });
   directory.admit({ name: "alice", publicKey: alice.publicKey });
-  directory.forget("alice"); // gen 1 — this boot processes N=1
-  saveState(directory.snapshot(), statePath);
+  directory.forget("alice"); // provisional; finalized to gen 1 — this boot processes N=1
+  saveState(finalizeRouteGens({ ...directory.snapshot() }), statePath);
+  const booted = createDirectory(loadState(statePath)); // the daemon boots the finalized directory (routeGen 1)
 
   const seed = createRoutedKeyStore();
   seed.observe(kid, recordOf(alice));
@@ -528,7 +538,7 @@ test("R1: a concurrent CLI forget (gen N+1) during consumption survives the filt
   // tombstone for the SAME id on disk (simulated by editing statePath just before consume).
   saveState({ ...loadState(statePath), tombstones: [{ keyId: kid, at: 2, reason: "forget", gen: 2 }], routeGen: 2 }, statePath);
 
-  consumeAfterDurable(boot, directory, statePath, () => {});
+  consumeAfterDurable(boot, booted, statePath, () => {});
   const after = loadState(statePath).tombstones ?? [];
   assert.deepEqual(after, [{ keyId: kid, at: 2, reason: "forget", gen: 2 }], "the gen-2 concurrent forget survives (gen 2 > N=1)");
 });
@@ -579,4 +589,264 @@ test("routeGen load-as-max is floored by routeGenApplied — a rolled-back field
   // genuine forget would mint a gen already <= applied and be pruned before it is ever applied.
   const directory = createDirectory({ self: { name: "me" }, routeGen: 0, routeGenApplied: 5 });
   assert.equal(directory.routeGen(), 5, "routeGen is floored by routeGenApplied on load");
+});
+
+// =======================================================================================
+// gen-under-lock: generations are ALLOCATED under the state lock (Sol HIGH — concurrent
+// retirements collide). tombstone() mints a PROVISIONAL (gen: null); finalizeRouteGens, run
+// inside reconcilePersist (CLI) and applyChange (daemon) under withStateLock, allocates it
+// strictly above on-disk truth. The two kill shots reproduce the exact CLI race.
+// =======================================================================================
+
+/** A stale CLI writer, the exact bin/hail.js shape: it reads state once at "startup" (its
+ * `baseline`), mutates a long-lived directory, and persists via `reconcilePersist` under the
+ * state lock — so a second writer that loaded the same stale snapshot rebases against whatever
+ * the first committed. */
+const staleWriter = (statePath) => {
+  const stored = loadState(statePath);
+  const dir = createDirectory(stored);
+  const baseline = reconcileBaseline(stored, dir.snapshot());
+  return {
+    dir,
+    persist: () => updateState(statePath, (onDisk) => reconcilePersist(onDisk, baseline, { ...stored, ...dir.snapshot() })),
+  };
+};
+
+/** The boot consume (bin/hail.js step 3), driven directly: raise `routeGenApplied` to the
+ * directory's routeGen and drop every tombstone with `gen <= that`. */
+const bootConsume = (statePath) => {
+  const N = createDirectory(loadState(statePath)).routeGen();
+  updateState(statePath, (onDisk) => ({
+    ...onDisk,
+    routeGenApplied: Math.max(Number(onDisk?.routeGenApplied) || 0, N),
+    tombstones: (Array.isArray(onDisk?.tombstones) ? onDisk.tombstones : []).filter((t) => !(typeof t?.gen === "number" && t.gen <= N)),
+  }));
+  return N;
+};
+
+test("gen-under-lock kill shot (repro 1): a stale second writer's retirement lands ABOVE routeGenApplied, not pruned-as-applied", () => {
+  const { statePath } = scratch();
+  const alice = generateIdentity();
+  const bob = generateIdentity();
+  const bobKid = keyId(bob.publicKey);
+
+  // Seed: two admitted peers, routeGen N = 5.
+  const seed = createDirectory({ self: { name: "me" }, routeGen: 5 });
+  seed.admit({ name: "alice", publicKey: alice.publicKey });
+  seed.admit({ name: "bob", publicKey: bob.publicKey });
+  saveState(seed.snapshot(), statePath);
+
+  // Writers A and B BOTH load the stale routeGen = 5.
+  const a = staleWriter(statePath);
+  const b = staleWriter(statePath);
+
+  // A forgets alice and persists → tombstone finalized at gen 6; disk routeGen 6.
+  a.dir.forget("alice");
+  a.persist();
+  // The daemon boots, applies + durably persists + consumes alice: routeGenApplied = 6.
+  const applied = bootConsume(statePath);
+  assert.equal(applied, 6, "the boot consumed through gen 6");
+  assert.equal(loadState(statePath).routeGenApplied, 6);
+
+  // B forgets bob from its STALE snapshot and persists. Pre-fix, B would mint gen 6 (5 + 1) and
+  // reconcilePersist would prune it as `gen 6 <= routeGenApplied 6` — bob's retirement never
+  // reaches disk, and its approved Tier-1 key resurrects. Post-fix, B's provisional is finalized
+  // strictly above the on-disk max → gen 7 > routeGenApplied 6, so it survives.
+  b.dir.forget("bob");
+  b.persist();
+  const onDisk = loadState(statePath);
+  const bobTomb = (onDisk.tombstones ?? []).find((t) => t.keyId === bobKid);
+  assert.ok(bobTomb, "bob's tombstone is on disk — NOT pruned as already-applied");
+  assert.equal(bobTomb.gen, 7, "finalized to N+2, strictly above routeGenApplied");
+  assert.ok(bobTomb.gen > onDisk.routeGenApplied, "the retirement is not consumable");
+
+  // A store holding bob's approved key (stamped at or below N) is invalidated by the surviving tombstone.
+  const store = createRoutedKeyStore({ gen: () => 5 });
+  store.observe(bobKid, recordOf(bob));
+  store.approve(bobKid);
+  assert.deepEqual(store.applyTombstones(onDisk.tombstones), [bobKid], "the surviving tombstone drops the stale key");
+  assert.equal(store.recordSealKey(bobKid), null, "the resurrected key is gone");
+});
+
+test("gen-under-lock kill shot (repro 2): a stale forget's finalized gen exceeds an earlier approval — no spurious tie", () => {
+  const { statePath } = scratch();
+  const bob = generateIdentity();
+  const cpeer = generateIdentity();
+  const bobKid = keyId(bob.publicKey);
+
+  // Seed: routeGen N = 5, bob and cpeer admitted.
+  const seed = createDirectory({ self: { name: "me" }, routeGen: 5 });
+  seed.admit({ name: "bob", publicKey: bob.publicKey });
+  seed.admit({ name: "cpeer", publicKey: cpeer.publicKey });
+  saveState(seed.snapshot(), statePath);
+
+  // The stale CLI writer loads at N = 5 (the sharp case) — BEFORE the daemon advances routeGen.
+  const writer = staleWriter(statePath);
+
+  // The daemon retires an UNRELATED key (cpeer), advancing routeGen to N+1 = 6, and approves
+  // bob's Tier-1 key at that gen — WITHOUT having seen any retirement of bob.
+  const daemonDir = createDirectory(loadState(statePath));
+  daemonDir.forget("cpeer");
+  const afterCpeer = finalizeRouteGens({ ...daemonDir.snapshot() });
+  daemonDir.adopt(afterCpeer);
+  saveState(afterCpeer, statePath);
+  assert.equal(daemonDir.routeGen(), 6, "the unrelated retirement advanced routeGen to N+1");
+  const store = createRoutedKeyStore({ gen: () => daemonDir.routeGen() });
+  store.observe(bobKid, recordOf(bob));
+  store.approve(bobKid); // entry gen 6 (== N+1)
+
+  // The stale writer forgets bob. Pre-fix it would also stamp gen 6 (its stale 5 + 1) → a tie
+  // with the approval → KEEP → the retired key survives. Post-fix its provisional is finalized
+  // above the on-disk max (6) → gen 7 > 6 → strict-less forgets the approval.
+  writer.dir.forget("bob");
+  const written = writer.persist();
+  const bobTomb = (written.tombstones ?? []).find((t) => t.keyId === bobKid);
+  assert.equal(bobTomb.gen, 7, "the stale forget finalized strictly above the daemon's approval gen");
+  assert.deepEqual(store.applyTombstones([bobTomb]), [bobKid], "the retired key is forgotten (7 > 6), no spurious tie");
+
+  // Counter-test — the LEGITIMATE tie still keeps. The daemon adopts the written state: bob
+  // disappears, the seal-posture diff drops the live entry, and routeGen reaches the tombstone's
+  // gen. A deliberate post-retirement re-approval then stamps gen == the tombstone's → keep.
+  daemonDir.setSealPostureListener((pk) => {
+    try {
+      store.forget(keyId(pk));
+    } catch {
+      /* non-Ed25519 keys hold no routed entry */
+    }
+  });
+  daemonDir.adopt(written);
+  assert.equal(store.recordState(bobKid), "none", "adopt's disappeared-identity diff dropped the live entry");
+  assert.equal(daemonDir.routeGen(), 7, "the daemon adopted the tombstone's gen");
+  store.observe(bobKid, recordOf(bob));
+  store.approve(bobKid); // gen 7 == the tombstone's gen
+  assert.deepEqual(store.applyTombstones(daemonDir.tombstones()), [], "a re-approval that saw the retirement (tie) is kept");
+});
+
+test("gen-under-lock: three interleaved stale writers get three strictly-increasing, unique gens", () => {
+  const { statePath } = scratch();
+  const peers = [generateIdentity(), generateIdentity(), generateIdentity()];
+  const seed = createDirectory({ self: { name: "me" } });
+  peers.forEach((p, i) => seed.admit({ name: `p${i}`, publicKey: p.publicKey }));
+  saveState(seed.snapshot(), statePath);
+
+  // All three load the same stale state (routeGen 0), then persist one after another.
+  const writers = [staleWriter(statePath), staleWriter(statePath), staleWriter(statePath)];
+  writers.forEach((w, i) => {
+    w.dir.forget(`p${i}`);
+    w.persist();
+  });
+
+  const onDisk = loadState(statePath);
+  const gens = (onDisk.tombstones ?? []).map((t) => t.gen).sort((x, y) => x - y);
+  assert.deepEqual(gens, [1, 2, 3], "each writer rebased above the last — unique, strictly increasing");
+  assert.equal(new Set(gens).size, 3, "no two writers minted the same gen");
+  assert.equal(onDisk.routeGen, 3, "routeGen equals the highest allocated");
+});
+
+test("gen-under-lock: tombstone() records a provisional and does NOT bump routeGen; reconcilePersist emits no null gens", () => {
+  const p = generateIdentity();
+  const dir = createDirectory({ self: { name: "me" }, now: () => 4242 });
+  dir.admit({ name: "p", publicKey: p.publicKey });
+  dir.forget("p");
+  assert.equal(dir.routeGen(), 0, "routeGen is untouched pre-lock");
+  assert.deepEqual(dir.tombstones(), [{ keyId: keyId(p.publicKey), at: 4242, reason: "forget", gen: null }], "a provisional tombstone, gen: null");
+
+  // The provisional round-trips through snapshot() as JSON-serializable null…
+  assert.equal(JSON.parse(JSON.stringify(dir.snapshot())).tombstones[0].gen, null);
+  // …but reconcilePersist finalizes it — no null ever reaches the written state.
+  const result = reconcilePersist({}, reconcileBaseline({}, createDirectory({ self: { name: "me" } }).snapshot()), { ...dir.snapshot() });
+  assert.ok(result.tombstones.every((t) => typeof t.gen === "number"), "no provisional gen in the reconcilePersist output");
+  assert.equal(result.tombstones[0].gen, 1);
+});
+
+test("gen-under-lock: a provisional supersedes a finalized same-keyId tombstone and is re-stamped higher (double-persist is benign)", () => {
+  const kid = "a".repeat(43);
+  // mergeTombstones: a provisional candidate outranks an on-disk finalized tombstone for the
+  // same keyId; finalize then re-stamps it one above the file max.
+  const result = reconcilePersist(
+    { tombstones: [{ keyId: kid, at: 1, reason: "forget", gen: 5 }], routeGen: 5, routeGenApplied: 0 },
+    { tombstones: [{ keyId: kid, at: 1, reason: "forget", gen: 5 }] },
+    { tombstones: [{ keyId: kid, at: 9, reason: "forget", gen: null }], routeGen: 0 },
+  );
+  assert.equal(result.tombstones.length, 1, "the two collapse to one");
+  assert.equal(result.tombstones[0].gen, 6, "the provisional superseded gen 5 and finalized to 6");
+
+  // Double-persist by the same CLI process: its directory keeps the provisional after the first
+  // persist (persist does not adopt back), so a second persist re-stamps one higher — benign,
+  // over-forget-safe, still unique.
+  const { statePath } = scratch();
+  const p = generateIdentity();
+  const seed = createDirectory({ self: { name: "me" } });
+  seed.admit({ name: "p", publicKey: p.publicKey });
+  saveState(seed.snapshot(), statePath);
+  const w = staleWriter(statePath);
+  w.dir.forget("p");
+  assert.equal(w.persist().tombstones.find((t) => t.keyId === keyId(p.publicKey)).gen, 1, "first persist finalizes to gen 1");
+  assert.equal(w.persist().tombstones.find((t) => t.keyId === keyId(p.publicKey)).gen, 2, "second persist re-stamps to gen 2 (benign re-forget)");
+});
+
+test("gen-under-lock: the applyChange path allocates above a fresher on-disk routeGen and adopt raises the live counter", () => {
+  const { statePath } = scratch();
+  const p = generateIdentity();
+  const pKid = keyId(p.publicKey);
+
+  // The live directory a stale daemon holds saw routeGen 0…
+  const liveDir = createDirectory({ self: { name: "me" } });
+  liveDir.admit({ name: "p", publicKey: p.publicKey });
+  // …but disk has since advanced to routeGen 10 (another writer).
+  const onDiskSeed = createDirectory({ self: { name: "me" }, routeGen: 10 });
+  onDiskSeed.admit({ name: "p", publicKey: p.publicKey });
+  saveState(onDiskSeed.snapshot(), statePath);
+
+  // The daemon's applyChange (bin/hail.js): fresh from onDisk, mutate, finalize under the lock.
+  const applyChange = (mutate) => {
+    let result;
+    const next = updateState(statePath, (onDisk) => {
+      const fresh = createDirectory({ ...onDisk });
+      result = mutate(fresh);
+      return finalizeRouteGens({ ...onDisk, ...fresh.snapshot() });
+    });
+    liveDir.adopt(next);
+    return { result, next };
+  };
+
+  const { next } = applyChange((dir) => dir.forget("p"));
+  const tomb = (next.tombstones ?? []).find((t) => t.keyId === pKid);
+  assert.equal(tomb.gen, 11, "allocated strictly above the fresher on-disk routeGen 10");
+  assert.equal(next.routeGen, 11);
+  assert.equal(liveDir.routeGen(), 11, "adopt raised the live counter to the finalized gen");
+});
+
+test("gen-under-lock: consumption stays a true prefix — prune drops only gens <= applied, keeps higher and finalizes provisionals above", () => {
+  const kidLow = "a".repeat(43);
+  const kidHigh = "b".repeat(43);
+  const kidProv = "c".repeat(43);
+  const result = reconcilePersist(
+    {
+      tombstones: [
+        { keyId: kidLow, at: 1, reason: "forget", gen: 3 }, // gen 3 <= applied 5 -> consumed
+        { keyId: kidHigh, at: 2, reason: "forget", gen: 7 }, // gen 7 > applied -> kept
+      ],
+      routeGen: 7,
+      routeGenApplied: 5,
+    },
+    { tombstones: [] },
+    { tombstones: [{ keyId: kidProv, at: 3, reason: "forget", gen: null }], routeGen: 0 }, // provisional -> finalized above, never consumed
+  );
+  const byId = Object.fromEntries(result.tombstones.map((t) => [t.keyId, t.gen]));
+  assert.ok(!(kidLow in byId), "gen 3 <= routeGenApplied 5 was consumed");
+  assert.equal(byId[kidHigh], 7, "gen 7 above the high-water survives");
+  assert.equal(byId[kidProv], 8, "the provisional finalized to 8 (above the file max 7), never pruned");
+  assert.ok(result.tombstones.every((t) => typeof t.gen === "number"), "no null gen in the output");
+});
+
+test("gen-under-lock defensive: a leaked provisional (gen: null) tombstone forgets a gen-bearing entry (fail closed)", () => {
+  const alice = generateIdentity();
+  const kid = keyId(alice.publicKey);
+  const store = createRoutedKeyStore({ gen: () => 9 });
+  store.observe(kid, recordOf(alice));
+  store.approve(kid); // entry gen 9
+  const dropped = store.applyTombstones([{ keyId: kid, at: 1, reason: "forget", gen: null }]);
+  assert.deepEqual(dropped, [kid], "a provisional outranks anything — it must not degrade to the gen-less-tombstone-loses case");
+  assert.equal(store.recordState(kid), "none");
 });

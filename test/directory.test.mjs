@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createDirectory, reconcilePersist } from "../src/directory.js";
+import { createDirectory, finalizeRouteGens, reconcilePersist } from "../src/directory.js";
 import { mergePeerRecord, publicRecord } from "../src/peerRecord.js";
 import { generateIdentity, sameKey } from "../src/identity.js";
 import { keyId } from "../src/routeManifest.js";
@@ -359,17 +359,23 @@ test("forgetting an admitted peer records a tombstone that round-trips through s
   dir.admit({ name: "peer", publicKey: peer.publicKey });
   assert.deepEqual(dir.tombstones(), [], "no tombstone until a retirement");
   assert.equal(dir.forget("peer"), true);
+  // The forget records a PROVISIONAL tombstone (gen: null) and does NOT bump routeGen pre-lock.
+  assert.deepEqual(dir.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget", gen: null }], "a provisional tombstone, no synchronous gen");
+  assert.equal(dir.routeGen(), 0, "routeGen is not bumped pre-lock");
+
+  // finalizeRouteGens (the under-lock write step) allocates its generation and advances routeGen.
+  const finalized = finalizeRouteGens({ ...dir.snapshot() });
   const expected = [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget", gen: 1 }];
-  assert.deepEqual(dir.tombstones(), expected, "the retirement bumped routeGen to 1 and stamped it");
-  assert.equal(dir.routeGen(), 1, "routeGen counts the one retirement");
+  assert.deepEqual(finalized.tombstones, expected, "finalization stamped gen 1");
+  assert.equal(finalized.routeGen, 1, "routeGen records the one retirement after finalize");
 
   // Round-trips to disk and back through a fresh constructor…
-  const reloaded = createDirectory(dir.snapshot());
+  const reloaded = createDirectory(finalized);
   assert.deepEqual(reloaded.tombstones(), expected);
   assert.equal(reloaded.routeGen(), 1, "routeGen round-trips");
   // …and through the daemon's real commit path, adopt.
   const live = createDirectory({ self: { name: "me" } });
-  live.adopt(dir.snapshot());
+  live.adopt(finalized);
   assert.deepEqual(live.tombstones(), expected);
   assert.equal(live.routeGen(), 1, "adopt max-merges routeGen");
 });
@@ -409,7 +415,7 @@ test("tombstones are NOT count-evicted (R1): genuine retirement evidence is neve
   assert.equal(tombs.length, cap + 1, "the list grew past the cap rather than evicting");
   assert.ok(tombs.some((t) => t.keyId === keyId(peer.publicKey)), "the new tombstone is present");
   assert.ok(tombs.some((t) => t.at === 1), "the oldest genuine tombstone is NOT dropped");
-  assert.equal(dir.routeGen(), cap + 1, "routeGen advanced past the seeded max");
+  assert.equal(finalizeRouteGens({ ...dir.snapshot() }).routeGen, cap + 1, "finalization advanced routeGen past the seeded max");
 });
 
 test("tombstones are pruned only by CONSUMPTION (gen <= routeGenApplied)", () => {
