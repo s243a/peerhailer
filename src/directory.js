@@ -37,25 +37,47 @@ import { keyId } from "./routeManifest.js";
  * the daemon-owned route-keys.json), and leaves the approved key on disk — so the next
  * daemon start rehydrates a key its operator already retired. A tombstone is the durable,
  * CLI-writable, daemon-read trace that lets a cold start invalidate it: the retired
- * identity's `keyId`, plus when it was retired. It can only ever *remove* a Tier-1 key,
- * never bind one, so a hand-edited directory.json remains monotone-safe.
+ * identity's `keyId`, a logical generation (`gen`) and — as a diagnostic — when it was
+ * retired. It can only ever *remove* a Tier-1 key, never bind one, so a hand-edited
+ * directory.json remains monotone-safe.
  *
- * @typedef {{ keyId: string, at: number, reason: "forget" | "rotate" }} Tombstone
+ * `gen` is the ordering primitive (R2): a file-global `routeGen` counter (below), bumped on
+ * every retirement and stamped on both the tombstone and — through the store's injected
+ * `gen` port — every Tier-1 claim, so a retirement is ordered against an approval CAUSALLY
+ * (did the approver see it?) rather than by a wall clock that can run backward.
+ *
+ * @typedef {{ keyId: string, at: number, reason: "forget" | "rotate", gen?: number }} Tombstone
  */
 
 /** A keyId is a SHA-256 of SPKI DER as unpadded base64url: 43 chars. */
 const TOMBSTONE_KEYID = /^[A-Za-z0-9_-]{43}$/;
-/** Ceiling on tracked tombstones. A tombstone is ~120 bytes; 256 is ~30KB worst case.
- * No age-based expiry in v1 — a tombstone's whole value is recency versus an entry's own
- * claim, and an expiry would add a clock policy for no security gain. Past the cap the
- * OLDEST by `at` is dropped: reaching it needs 256 forgets while the daemon never once
- * starts to apply them, an accepted residual. */
-const MAX_TOMBSTONES = 256;
+/** Advisory-only ceiling on tracked tombstones (R1). It NO LONGER evicts: eviction by count
+ * could shed genuine retirement evidence, and let 256 forged shape-valid tombstones crowd a
+ * real one out (an under-forget = a resurrection). Pruning is now CONSUMPTION — a tombstone
+ * is dropped only once the daemon has durably applied it (`gen <= routeGenApplied`). This cap
+ * is only the level past which the daemon warns that it has not completed a startup reconcile
+ * in a while; growth is otherwise bounded by operator retirements between boots (~120 bytes
+ * each). */
+export const MAX_TOMBSTONES = 256;
+
+/** A non-negative safe integer, or 0 — for the file-global `routeGen`/`routeGenApplied`
+ * counters read from a possibly hand-edited file. */
+const numOr0 = (/** @type {unknown} */ v) => (typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0);
+/** A validated tombstone/entry generation: a non-negative safe integer, or undefined (= a
+ * pre-upgrade, gen-less record). */
+const normGen = (/** @type {unknown} */ v) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
+/** Clamp a counter to [0, MAX_SAFE_INTEGER - 1] so it stays an exact safe integer. This
+ * SATURATES at the ceiling: a hand-edited near-MAX gen would let a later retirement tie a
+ * prior approval (case-1 keeps on a tie), so the ceiling is a trusted-local-editor edge only —
+ * organic use adds one per operator retirement and never approaches it (Sol F5, informational). */
+const clampGen = (/** @type {number} */ v) => Math.min(Math.max(0, Math.floor(v)), Number.MAX_SAFE_INTEGER - 1);
+/** The gen of a tombstone as a plain number for max-folding (a gen-less one contributes 0). */
+const genOf = (/** @type {Tombstone} */ t) => (typeof t.gen === "number" ? t.gen : 0);
 
 /**
  * Validate and normalise a stored tombstone list — a malformed entry is dropped, never
- * fatal (the "a bad file must not crash the daemon" ethos). Pruned to the cap on load.
- * Pure.
+ * fatal (the "a bad file must not crash the daemon" ethos). No count-based prune here: the
+ * caller prunes only CONSUMED tombstones once `routeGenApplied` is known. Pure.
  * @param {unknown} raw
  * @returns {Tombstone[]}
  */
@@ -66,27 +88,33 @@ function loadTombstones(raw) {
     for (const t of raw) {
       if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
       const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
-      out.push({ keyId: t.keyId, at, reason: t.reason === "rotate" ? "rotate" : "forget" });
+      const reason = /** @type {"forget"|"rotate"} */ (t.reason === "rotate" ? "rotate" : "forget");
+      const gen = normGen(t.gen);
+      out.push(gen === undefined ? { keyId: t.keyId, at, reason } : { keyId: t.keyId, at, reason, gen });
     }
   }
-  return pruneTombstones(out);
+  return out;
 }
 
 /**
- * Keep at most `MAX_TOMBSTONES`, dropping the oldest by `at`. Returns the input unchanged
- * when under the cap (preserving order); otherwise a newest-first-cap slice. Pure.
+ * Drop only CONSUMED tombstones — those the daemon has durably applied to its sidecar
+ * (`gen <= routeGenApplied`). Never by count or `at`: shedding a pending tombstone could
+ * resurrect a retired key, and count-eviction is the R1 forged-crowding lever. A gen-less
+ * (pre-upgrade) tombstone is never consumed here — it is consumed at the first post-upgrade
+ * boot by a keyId match (bin/hail.js). Pure.
  * @param {Tombstone[]} list
+ * @param {number} [routeGenApplied]
  * @returns {Tombstone[]}
  */
-function pruneTombstones(list) {
-  if (list.length <= MAX_TOMBSTONES) return list;
-  return [...list].sort((a, b) => a.at - b.at).slice(list.length - MAX_TOMBSTONES);
+function pruneTombstones(list, routeGenApplied = 0) {
+  return list.filter((t) => !(typeof t.gen === "number" && t.gen <= routeGenApplied));
 }
 
 /**
- * Union-merge two tombstone lists by `keyId`, keeping the newest `at` for each — so a CLI
- * forget racing a daemon page-forget cannot drop the other's restriction (the exact race
- * `reconcilePersist` exists for). Pure.
+ * Union-merge two tombstone lists by `keyId`, keeping the HIGHEST `gen` for each (a fresh
+ * retirement outranks the old one), falling back to the newest `at` when both are legacy —
+ * so a CLI forget racing a daemon page-forget cannot drop the other's restriction (the exact
+ * race `reconcilePersist` exists for). Pure.
  * @param {unknown} a
  * @param {unknown} b
  * @returns {Tombstone[]}
@@ -99,8 +127,25 @@ function mergeTombstones(a, b) {
     for (const t of src) {
       if (!t || typeof t.keyId !== "string" || !TOMBSTONE_KEYID.test(t.keyId)) continue;
       const at = typeof t.at === "number" && Number.isFinite(t.at) ? t.at : 0;
+      const reason = /** @type {"forget"|"rotate"} */ (t.reason === "rotate" ? "rotate" : "forget");
+      const gen = normGen(t.gen);
+      const cand = gen === undefined ? { keyId: t.keyId, at, reason } : { keyId: t.keyId, at, reason, gen };
       const prev = byId.get(t.keyId);
-      if (!prev || at > prev.at) byId.set(t.keyId, { keyId: t.keyId, at, reason: t.reason === "rotate" ? "rotate" : "forget" });
+      if (!prev) {
+        byId.set(t.keyId, cand);
+        continue;
+      }
+      const candGen = cand.gen;
+      const prevGen = prev.gen;
+      if (candGen !== undefined && prevGen !== undefined) {
+        if (candGen > prevGen) byId.set(t.keyId, cand); // both gen — highest wins
+      } else if (candGen !== undefined) {
+        byId.set(t.keyId, cand); // a gen-bearing tombstone supersedes a legacy one
+      } else if (prevGen !== undefined) {
+        /* keep prev — it is gen-bearing */
+      } else if (at > prev.at) {
+        byId.set(t.keyId, cand); // both legacy — newest `at`
+      }
     }
   }
   return [...byId.values()];
@@ -202,6 +247,7 @@ export function reconcilePersist(onDisk, baseline, current) {
   for (const key of new Set([...Object.keys(baseline ?? {}), ...Object.keys(current ?? {})])) {
     if (key === "admitted") continue; // reconciled below, not diffed wholesale
     if (key === "tombstones") continue; // union-merged below — a restriction must not be lost to a race
+    if (key === "routeGen" || key === "routeGenApplied") continue; // max-merged below — a counter never regresses to a race
     const inCur = has(current, key);
     if (inCur === has(baseline, key) && JSON.stringify(current?.[key]) === JSON.stringify(baseline?.[key])) continue;
     if (inCur) result[key] = current[key];
@@ -220,11 +266,20 @@ export function reconcilePersist(onDisk, baseline, current) {
   if (admitted.length || has(onDisk, "admitted") || has(current, "admitted") || has(baseline, "admitted")) {
     result.admitted = admitted;
   }
-  // Tombstones are additive and restrictive: union disk and this writer's set (a CLI
-  // forget and a concurrent daemon page-forget must both survive), keep the newest `at`
-  // per key, re-prune. A legacy file that never carried the key round-trips unchanged.
+  // The routeGen/routeGenApplied counters are monotone: max-merge disk, this writer, and the
+  // baseline so a stale writer never regresses a counter another writer advanced in a race.
+  for (const counter of /** @type {const} */ (["routeGen", "routeGenApplied"])) {
+    if (has(onDisk, counter) || has(current, counter) || has(baseline, counter)) {
+      result[counter] = Math.max(numOr0(onDisk?.[counter]), numOr0(current?.[counter]), numOr0(baseline?.[counter]));
+    }
+  }
+  // Tombstones are additive and restrictive: union disk and this writer's set (a CLI forget
+  // and a concurrent daemon page-forget must both survive), keep the highest `gen` per key,
+  // then drop only those already durably CONSUMED (`gen <= routeGenApplied`). A legacy file
+  // that never carried the key round-trips unchanged.
   if (has(onDisk, "tombstones") || has(current, "tombstones") || has(baseline, "tombstones")) {
-    const merged = pruneTombstones(mergeTombstones(onDisk?.tombstones, current?.tombstones));
+    const applied = numOr0(result.routeGenApplied);
+    const merged = pruneTombstones(mergeTombstones(onDisk?.tombstones, current?.tombstones), applied);
     if (merged.length) result.tombstones = merged;
     else delete result.tombstones;
   }
@@ -394,6 +449,8 @@ function sameSeal(a, b) {
  *   trust?: {model?: string, settings?: Record<string, unknown>, unknownProfile?: string,
  *           admitProfile?: string, candidateProfile?: string},
  *   tombstones?: any[],
+ *   routeGen?: number,
+ *   routeGenApplied?: number,
  *   now?: () => number,
  * }} [state]
  */
@@ -454,15 +511,34 @@ export function createDirectory(state = {}) {
     names: [...(state.blocklist?.names ?? [])],
     keys: [...(state.blocklist?.keys ?? [])],
   };
-  /** @type {Tombstone[]} Retired-identity tombstones (F1) — see the module note. */
-  const tombstones = loadTombstones(state.tombstones);
+  /** @type {Tombstone[]} Retired-identity tombstones — see the module note. */
+  const tombstonesRaw = loadTombstones(state.tombstones);
+  /**
+   * The file-global logical generation (R2) — "the number of Tier-1-relevant identity
+   * retirements this directory has recorded". Load-as-MAX over the stored field, the
+   * tombstones' own gens, AND `routeGenApplied`, clamped: flooring by the durable evidence
+   * self-heals a hand-rolled-back or deleted counter field (see the edge cases in the design).
+   * `routeGenApplied` matters here because a *consumed* tombstone is gone, so it is the only
+   * remaining lower bound — without it a rolled-back field would let the NEXT genuine forget
+   * mint a gen already below the applied high-water and be consumed before it is ever applied.
+   */
+  let routeGen = clampGen(Math.max(numOr0(state.routeGen), numOr0(state.routeGenApplied), ...tombstonesRaw.map(genOf)));
+  /** The daemon's durable high-water mark (R1): every tombstone with `gen <= routeGenApplied`
+   * has been durably applied to this state dir's sidecar, and is therefore consumable. */
+  let routeGenApplied = clampGen(numOr0(state.routeGenApplied));
+  /** @type {Tombstone[]} The pending (unconsumed) tombstones. */
+  const tombstones = pruneTombstones(tombstonesRaw, routeGenApplied);
   /**
    * Record that an ADMITTED identity was retired, so a daemon that was DOWN when the
    * forget/rotation happened still invalidates the stale Tier-1 key at its next start.
    * The keyId is the same id the Tier-1 store is keyed by (`keyId(publicKey)`), so the
    * cold-start reconcile is a direct map lookup. A non-Ed25519 or unparseable key throws
    * in `keyId` and is skipped — it can hold no Tier-1 entry anyway (those ids are Ed25519
-   * keyIds). Deduped by keyId, keeping the newest `at`; pruned to the cap.
+   * keyIds), and it records no retirement, so it does NOT burn a generation. A real
+   * retirement bumps `routeGen` FIRST, then stamps that gen: any Tier-1 claim made without
+   * having seen this tombstone stamps a strictly smaller gen, which is what makes the
+   * comparison causal. Re-tombstoning an existing keyId updates it to the new, higher gen.
+   * No count-based eviction — the list is pruned only by CONSUMPTION.
    * @param {string | null | undefined} publicKey
    * @param {"forget" | "rotate"} reason
    */
@@ -474,21 +550,16 @@ export function createDirectory(state = {}) {
     } catch {
       return;
     }
+    routeGen = clampGen(routeGen + 1);
     const at = now();
     const existing = tombstones.find((t) => t.keyId === id);
     if (existing) {
-      if (at > existing.at) {
-        existing.at = at;
-        existing.reason = reason;
-      }
+      existing.gen = routeGen;
+      existing.at = at;
+      existing.reason = reason;
       return;
     }
-    tombstones.push({ keyId: id, at, reason });
-    if (tombstones.length > MAX_TOMBSTONES) {
-      const pruned = pruneTombstones(tombstones);
-      tombstones.length = 0;
-      tombstones.push(...pruned);
-    }
+    tombstones.push({ keyId: id, at, reason, gen: routeGen });
   };
   /**
    * Profiles this directory resolves against.
@@ -1227,7 +1298,7 @@ export function createDirectory(state = {}) {
       }
       const nextNames = [...(state?.blocklist?.names ?? [])];
       const nextKeys = [...(state?.blocklist?.keys ?? [])];
-      const nextTombstones = loadTombstones(state?.tombstones);
+      const nextTombstonesRaw = loadTombstones(state?.tombstones);
       const incomingSelf = state?.self ? makePeerRecord(state.self) : null;
 
       // Snapshot the identities we currently hold, so after the swap we can notify the
@@ -1243,8 +1314,15 @@ export function createDirectory(state = {}) {
       for (const [name, entry] of nextCandidates) candidates.set(name, entry);
       blocklist.names = nextNames;
       blocklist.keys = nextKeys;
-      // Replace-as-unit like the blocklist. adopt's incoming state is a full snapshot, so
-      // this carries a page/CLI forget's tombstone into the running daemon's directory.
+      // Max-merge the counters (R1/R2) BEFORE swapping tombstones — load-as-max over the
+      // incoming field and the incoming tombstones' own gens, so a running daemon adopting
+      // page/CLI state never regresses a counter (and self-heals a rolled-back field).
+      routeGen = clampGen(Math.max(routeGen, numOr0(state?.routeGen), ...nextTombstonesRaw.map(genOf)));
+      routeGenApplied = clampGen(Math.max(routeGenApplied, numOr0(state?.routeGenApplied)));
+      // Replace-as-unit like the blocklist, dropping any already-consumed tombstone. adopt's
+      // incoming state is a full snapshot, so this carries a page/CLI forget's tombstone into
+      // the running daemon's directory.
+      const nextTombstones = pruneTombstones(nextTombstonesRaw, routeGenApplied);
       tombstones.length = 0;
       tombstones.push(...nextTombstones);
       // Adopt what a rename or address edit changed about us — but keep the
@@ -1441,6 +1519,26 @@ export function createDirectory(state = {}) {
     /** The retired-identity tombstones — read by the daemon's cold-start Tier-1 reconcile
      * and by tests. A shallow-cloned copy, so a caller cannot mutate the live list. */
     tombstones: () => tombstones.map((t) => ({ ...t })),
+    /** The file-global logical generation (R2). The daemon wires this into the Tier-1 store's
+     * `gen` port so every claim is stamped with the retirement count it was made under. */
+    routeGen: () => routeGen,
+    /** The durable high-water mark (R1): tombstones with `gen <= routeGenApplied` are consumed. */
+    routeGenApplied: () => routeGenApplied,
+    /** Sync the live directory to a completed durable consumption (R1): raise the high-water
+     * mark and drop the now-consumed tombstones from the in-memory list, to MATCH the daemon's
+     * state-file consume write. Deliberately narrow — NOT a full `adopt` (which fires the
+     * notifySeal sweeps; too blunt for a bookkeeping sync). Idempotent; never regresses.
+     * @param {number} gen the generation applied through (the daemon's `routeGen` at reconcile) */
+    markTombstonesApplied: (gen) => {
+      const g = clampGen(numOr0(gen));
+      if (g > routeGenApplied) routeGenApplied = g;
+      const kept = pruneTombstones(tombstones, routeGenApplied);
+      if (kept.length !== tombstones.length) {
+        tombstones.length = 0;
+        tombstones.push(...kept);
+      }
+      return routeGenApplied;
+    },
     trust: () => readView({ ...trust }),
     /**
      * Change the trust policy through the directory, so a `snapshot()` reflects
@@ -1472,6 +1570,8 @@ export function createDirectory(state = {}) {
           heardFrom: entry.heardFrom,
         })),
         tombstones: tombstones.map((t) => ({ ...t })),
+        routeGen,
+        routeGenApplied,
       }),
   };
 

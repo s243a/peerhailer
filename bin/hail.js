@@ -20,7 +20,7 @@ import { createServer as createHttpsServer } from "node:https";
 import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
-import { createDirectory, reconcileBaseline, reconcilePersist } from "../src/directory.js";
+import { createDirectory, reconcileBaseline, reconcilePersist, MAX_TOMBSTONES } from "../src/directory.js";
 import { parseArgs, CliError } from "../src/cliArgs.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
@@ -703,7 +703,10 @@ switch (command) {
       (/** @type {string} */ path, /** @type {string} */ what, /** @type {{ note: (ok: boolean, restricting: boolean) => void } | undefined} */ durability) =>
       (/** @type {any[]} */ entries, /** @type {{ restricting?: boolean } | undefined} */ meta) => {
         try {
-          saveState({ entries }, path);
+          // A key-restricting write is made durable (fsync'd, R3): a conflict void or a
+          // forget must survive power loss, and not be reordered against a later write. The
+          // adding hot path passes no restricting meta and stays purely best-effort.
+          saveState({ entries }, path, { durable: meta?.restricting === true });
           durability?.note(true, meta?.restricting === true);
         } catch (cause) {
           process.stderr.write(`[route] could not persist ${what}: ${cause instanceof Error ? cause.message : String(cause)}\n`);
@@ -741,7 +744,8 @@ switch (command) {
         try {
           // Re-write the store's CURRENT snapshot, so any later state (a further conflict)
           // rides the same recovery; persist always writes the full set, so one success heals.
-          saveState({ entries: routedKeyStore.snapshot() }, routeKeysPath);
+          // Durable (R3) — this is the recovery of a key-restricting write.
+          saveState({ entries: routedKeyStore.snapshot() }, routeKeysPath, { durable: true });
           clearRouteKeysDegraded();
           process.stderr.write(`[route] a key-restricting change is now on disk — durability recovered\n`);
         } catch {
@@ -753,10 +757,14 @@ switch (command) {
     const routeKeysDurability = {
       /** @param {boolean} ok @param {boolean} restricting */
       note: (ok, restricting) => {
-        // Any successful write (retry OR an organic later persist) carries the full snapshot,
-        // so it includes the pending restriction — clear the degraded state and its timer.
+        // Only a DURABLE write heals the degraded state. In this wiring a durable write is
+        // exactly a restricting one (`persistSidecar` passes `durable: restricting`), so a
+        // non-durable additive persist succeeding must NOT clear it — otherwise it would cancel
+        // the retry while the conflict is still only in a non-fsync'd snapshot, and a power
+        // loss could then restore the revoked key (Sol F3). The armed retry writes durably and
+        // clears the flag itself; a later restricting persist landing durably clears it here.
         if (ok) {
-          if (routeKeysDegraded) clearRouteKeysDegraded();
+          if (ok && restricting && routeKeysDegraded) clearRouteKeysDegraded();
           return;
         }
         if (restricting && !routeKeysDegraded) {
@@ -771,6 +779,9 @@ switch (command) {
     const routedKeyStore = createRoutedKeyStore({
       initial: loadState(routeKeysPath, { log: (m) => process.stderr.write(`${m}\n`) }).entries,
       persist: persistSidecar(routeKeysPath, "routed key store", routeKeysDurability),
+      // The directory's logical generation stamps every Tier-1 claim, so a retirement is
+      // ordered against an approval causally, not by a wall clock (R2).
+      gen: () => directory.routeGen?.() ?? 0,
     });
     // The observation seam (M3a): opening a sealed body from an origin is recorded durably
     // (per-origin, OR-floored) as "this origin seals to us". Recording is on; ENFORCEMENT (the
@@ -796,15 +807,83 @@ switch (command) {
         /* a non-key input cannot have a routed entry to forget */
       }
     });
-    // Cold-start Tier-1 reconcile (F1): a forget/rotation done while this daemon was DOWN
-    // wrote a tombstone into directory.json but never reached the daemon-owned route-keys.json,
-    // so a naive rehydrate would resurrect a retired approved key. Apply the tombstones, then
-    // mirror the lazy send-time Tier-0 rule (a walked/disputed identity supersedes Tier 1) —
-    // both run here, once, BEFORE any serving, so no stale key is ever resolvable.
+    // Cold-start Tier-1 reconcile (R1/R2/R3): consume-after-durable. A forget/rotation done
+    // while this daemon was DOWN wrote a tombstone (+ bumped routeGen) into directory.json but
+    // never reached the daemon-owned route-keys.json, so a naive rehydrate would resurrect a
+    // retired approved key. The four steps below apply the tombstones by logical generation,
+    // persist the result DURABLY, and only THEN consume them — ordered so no crash can lose
+    // BOTH a tombstone and the forget it drove. Runs once, BEFORE any serving.
     try {
-      const dropped = routedKeyStore.applyTombstones(directory.tombstones?.() ?? []);
+      const pending = directory.tombstones?.() ?? [];
+      const appliedThrough = directory.routeGen?.() ?? 0; // N: the generation this boot processes
+      // The cap no longer evicts (R1); past it, only warn that a reconcile has not completed.
+      if (pending.length > MAX_TOMBSTONES) {
+        process.stderr.write(
+          `[route] ${pending.length} pending identity tombstones exceed the advisory ${MAX_TOMBSTONES} — a startup reconcile has not completed in a while\n`,
+        );
+      }
+      // 1. Apply in memory (gen comparison per the four-case rule).
+      const dropped = routedKeyStore.applyTombstones(pending);
       if (dropped.length) {
         log(`[route] startup: dropped ${dropped.length} Tier-1 key(s) retired (forget/rotate) while offline`);
+      }
+      // 2. Persist the sidecar DURABLY. This fsync'd write is what makes "durable before
+      //    consume" real under power loss. Skip only when nothing changed AND no tombstone
+      //    matches a live entry: a moot tombstone's later removal loses nothing, since a
+      //    FUTURE entry for that keyId stamps gen >= N >= t.gen and survives it anyway.
+      const anyMatch = pending.some((t) => {
+        try {
+          return t && typeof t.keyId === "string" && routedKeyStore.recordState(t.keyId) !== "none";
+        } catch {
+          return false;
+        }
+      });
+      let durablyPersisted = true;
+      if (dropped.length || anyMatch) {
+        try {
+          saveState({ entries: routedKeyStore.snapshot() }, routeKeysPath, { durable: true });
+        } catch (cause) {
+          // The forget is NOT yet durable — never consume it. Arm the restricting retry and
+          // leave the tombstones pending; the next boot retries the whole sequence.
+          durablyPersisted = false;
+          routeKeysDurability.note(false, true);
+          process.stderr.write(
+            `[route] startup reconcile persist failed — tombstones stay pending until it lands: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+        }
+      }
+      // 3 & 4. Consume: raise routeGenApplied and drop the tombstones this boot processed, in
+      //    the state file (under the lock) and in the live directory. Only after step 2 is
+      //    durable — and step 3's own loss is safe (the tombstones are merely reapplied next
+      //    boot). A concurrent CLI forget under the lock has gen >= N+1 and survives the filter.
+      if (durablyPersisted && pending.length) {
+        try {
+          updateState(
+            statePath,
+            (onDisk) => {
+              const applied = Math.max(Number(onDisk?.routeGenApplied) || 0, appliedThrough);
+              const processed = new Set(pending.map((t) => t.keyId));
+              const keep = (/** @type {any} */ t) => {
+                if (!t || typeof t.keyId !== "string" || !processed.has(t.keyId)) return true;
+                // Consumable iff durably applied (gen <= N) or gen-less (pre-upgrade, applied
+                // by keyId match). A fresh concurrent re-forget writes gen > N and is kept.
+                const consumable = typeof t.gen === "number" ? t.gen <= appliedThrough : true;
+                return !consumable;
+              };
+              return {
+                ...onDisk,
+                routeGenApplied: applied,
+                tombstones: (Array.isArray(onDisk?.tombstones) ? onDisk.tombstones : []).filter(keep),
+              };
+            },
+            { log: (m) => process.stderr.write(`${m}\n`) },
+          );
+          directory.markTombstonesApplied?.(appliedThrough);
+        } catch (cause) {
+          process.stderr.write(
+            `[route] startup reconcile consume failed (safe — tombstones reapply next boot): ${cause instanceof Error ? cause.message : String(cause)}\n`,
+          );
+        }
       }
     } catch (cause) {
       process.stderr.write(`[route] startup tombstone reconcile failed: ${cause instanceof Error ? cause.message : String(cause)}\n`);

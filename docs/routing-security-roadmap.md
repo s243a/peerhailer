@@ -66,36 +66,54 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   restart — no first send resolving `cleartext` and re-discovering. A merely *pending* key is
   still unusable until approved, and its binding is re-verified against the signed record on
   load, so a hand edit cannot inject an unsigned key.
-- **Tier-1 *invalidation* is now durable for the normal path; three retirement/restart corner
-  cases remain (Sol's M3a re-review — F1 cap + clock HIGH, F2 window medium).** The mechanism:
-  `forget`/`rotateKey` write durable identity **tombstones** (`{keyId, at, reason}`, union-merged
-  in `reconcilePersist`) into `directory.json` — the CLI-writable, daemon-read channel that needs
-  no sidecar write; Tier-1 entries carry an `at` stamp; a daemon **cold-start reconcile** forgets
-  any entry a tombstone at least as new as its claim retires (so a deliberate re-approval, a newer
-  `at`, survives), plus a Tier-0 posture sweep, before serving. A never-walked entry has no
-  tombstone and no posture, so absence-from-directory is never a forget signal. The conflict/forget
-  persist is flagged `restricting`; a forget self-heals from its tombstone, and a failed conflict
-  persist arms a bounded daemon retry + a `SECURITY` warning + a `persistDegraded` flag in
-  `/api/route/seal`. **What that fixes:** the ordinary offline forget/rotate then restart now
-  refuses instead of sealing to the retired key; no accepted-cleartext path exists (a retired key
-  still seals *to the retired key*, never clear). **Residual corner cases, NOT yet closed:**
-  1. *Tombstone-cap eviction (HIGH).* Tombstones are capped (256) below the Tier-1 store (4096);
-     past the cap the oldest is dropped, so >256 offline retirements — or forged shape-valid newer
-     tombstones — can evict a genuine retirement's evidence while its approved key survives,
-     resurrecting it at a later cold start. So a hand-edited `directory.json` can *under*-forget
-     (crowd out a tombstone), not only over-forget. A safe fix needs cap-aware pruning (never drop
-     a tombstone for a key still in the store, e.g. consume-after-durable-store-persist) or a cap
-     ≥ the store.
-  2. *Wall-clock ordering (HIGH).* `at` is `Date.now()` on both sides; the reconcile's
-     `entry.at <= tombstone.at` assumes a non-regressing clock. A clock set ahead at approval then
-     corrected back before a later forget inverts causal order and keeps the retired key. A durable
-     logical generation / re-approval epoch is the real fix.
-  3. *Conflict restart window (medium).* A crash/restart in the retry window *before* the first
-     successful rewrite still sheds a conflict (a transient failure suffices, not only a
-     stays-full disk); a conflict has no durable source like a forget's tombstone. And `saveState`
-     is temp+rename without `fsync`, so power-loss durability is out of scope. These are tracked
-     for a follow-up (logical-generation ordering + safe tombstone pruning + a durable conflict
-     record).
+- **Tier-1 *invalidation* is durable, cap-safe against count/forged crowding, and clock-
+  independent on the sequential path; a multi-writer concurrency residual and a narrowed conflict
+  crash-window remain open (Sol's second re-review — folded into the causal-merge workstream).**
+  The mechanism: `forget`/`rotateKey` write durable identity
+  **tombstones** (`{keyId, at, reason, gen}`, union-merged in `reconcilePersist`) into
+  `directory.json` — the CLI-writable, daemon-read channel that needs no sidecar write; a daemon
+  **cold-start reconcile** forgets any entry a tombstone causally outranks (below), runs a Tier-0
+  posture sweep, then durably persists and consumes, before serving. A never-walked entry has no
+  tombstone and no posture, so absence-from-directory is never a forget signal. **Status of the
+  residuals (sequential path robust; a concurrency residual remains — Sol's second re-review):**
+  1. *Tombstone-cap eviction (R1, HIGH) — count-based crowding CLOSED; concurrent-writer
+     consumption OPEN.* Count-based eviction is abolished: a tombstone is dropped only once the
+     daemon has DURABLY applied it (`routeGenApplied`, a `directory.json` high-water integer, gates
+     a `gen <= routeGenApplied` prune), so nothing pending is ever evicted and 256 forged tombstones
+     cannot crowd a real one out. `MAX_TOMBSTONES` (256) is now an advisory warn-once threshold; the
+     startup sequence (apply → durable sidecar persist → consume under the lock →
+     `markTombstonesApplied`) loses neither a tombstone nor its forget to a crash. **Open:**
+     consumption treats the scalar `routeGen` as a contiguous global prefix, which is unsafe under
+     concurrent stale writers (see residual 2) — a retirement minted at a colliding `gen` can be
+     pruned as "already applied" though it never reached Tier-1.
+  2. *Wall-clock ordering (R2, HIGH) — wall-clock hazard CLOSED; the generation is not causal under
+     concurrency, OPEN.* A file-global monotone `routeGen` counter (load-as-max over the field, the
+     tombstones' gens, AND `routeGenApplied`, max-merge everywhere) stamps every retirement and
+     every Tier-1 claim; the reconcile compares by `gen` not the wall clock (an approval outranks a
+     retirement iff `gen >= t.gen`), so the clock-regression hazard is gone. **Open (Sol F1):** the
+     generation is allocated from each process's in-memory snapshot *before* it takes the state-file
+     lock, so two stale writers (e.g. a CLI `forget` racing a page-driven `forget`) can both mint
+     `N+1`. The strict `<` then reads a tie as "the approver had seen the retirement" and keeps a
+     retired key, and a second `N+1` retirement can be discarded as already-applied. A scalar
+     Lamport counter minted pre-lock is *not* a causal clock under concurrent retirements — the fix
+     is to rebase/allocate the generation UNDER the state lock (or track exact retirements, not a
+     scalar prefix). This is the same multi-writer causal-ordering problem as the deferred
+     directory causal-merge workstream, and is folded into it.
+  3. *Conflict restart window (R3, medium) — power-loss durability improved; the crash window
+     remains, narrower.* `saveState(_, _, { durable })` fsyncs the temp fd before the rename and
+     best-effort fsyncs the parent directory after, on the restricting sidecar persists, the retry
+     write, and the startup reconcile persist; and `persistDegraded` now clears only on a DURABLE
+     write, so a non-durable additive persist can no longer cancel a pending recovery (Sol F3).
+     **Honest residuals:** (a) ANY initial restricting-write failure followed by a restart *before
+     the first successful retry* still sheds a conflict — not only permanently-failing media, just
+     a narrower window, flagged by the `SECURITY` log and `persistDegraded`; (b) the parent-dir
+     fsync is best-effort and its error is swallowed, so the rename-survival guarantee holds only
+     where directory fsync succeeds (POSIX journaling filesystems; degraded elsewhere). A durable
+     conflict marker was deliberately not added (relay-forceable DoS surface).
+
+  `routeGen` is the shared **logical-generation primitive** the deferred directory causal-merge
+  workstream (below) would generalize per-record — the max-merge discipline here is exactly what
+  that work needs and is not throwaway.
 - **Multi-writer identity/seal merge is now causal (High-1, `48f25a5`); a non-security
   residual remains.** The directory once merged concurrent state by a per-record monotone
   `rev` (higher wins), which is not a causal clock — a stale multi-writer could restore a
@@ -106,8 +124,9 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   *non-security* record fields (profile/addresses/note) still follow whole-record `rev`, so a
   stale writer can clobber a concurrent non-security edit, and two concurrent rotations to
   *different* identities fall back to `rev`. A full causal directory (vector clocks, or a
-  single-writer CLI-signals-daemon discipline) is the larger optional workstream — and is where
-  the F1/F2 corner cases above (a durable logical generation) would naturally be solved together.
+  single-writer CLI-signals-daemon discipline) is the larger optional workstream — and would
+  generalize the Tier-1 `routeGen` logical generation (above) per-record, reusing its max-merge
+  discipline rather than reinventing it.
 - **A keyless current record does not drop an approved routed key, deliberately.** If a
   discovered record for a destination arrives with no sealing key, an already-approved key
   is kept — because a relay can replay an *old* keyless record, and letting that drop an

@@ -359,15 +359,19 @@ test("forgetting an admitted peer records a tombstone that round-trips through s
   dir.admit({ name: "peer", publicKey: peer.publicKey });
   assert.deepEqual(dir.tombstones(), [], "no tombstone until a retirement");
   assert.equal(dir.forget("peer"), true);
-  assert.deepEqual(dir.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+  const expected = [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget", gen: 1 }];
+  assert.deepEqual(dir.tombstones(), expected, "the retirement bumped routeGen to 1 and stamped it");
+  assert.equal(dir.routeGen(), 1, "routeGen counts the one retirement");
 
   // Round-trips to disk and back through a fresh constructor…
   const reloaded = createDirectory(dir.snapshot());
-  assert.deepEqual(reloaded.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+  assert.deepEqual(reloaded.tombstones(), expected);
+  assert.equal(reloaded.routeGen(), 1, "routeGen round-trips");
   // …and through the daemon's real commit path, adopt.
   const live = createDirectory({ self: { name: "me" } });
   live.adopt(dir.snapshot());
-  assert.deepEqual(live.tombstones(), [{ keyId: keyId(peer.publicKey), at: 1000, reason: "forget" }]);
+  assert.deepEqual(live.tombstones(), expected);
+  assert.equal(live.routeGen(), 1, "adopt max-merges routeGen");
 });
 
 test("forgetting a mere candidate leaves no tombstone (admitted-only, like the live notify)", () => {
@@ -390,21 +394,41 @@ test("rotateKey tombstones the OLD identity's key id only; the new identity has 
   assert.ok(!tombs.some((t) => t.keyId === keyId(newId.publicKey)), "the new identity is NOT tombstoned");
 });
 
-test("tombstones are capped, dropping the oldest by `at`", () => {
-  // Seed a directory already at the cap with synthetic tombstones, then push one past it.
+test("tombstones are NOT count-evicted (R1): genuine retirement evidence is never shed by the cap", () => {
+  // Past the advisory cap, nothing is dropped — count eviction could shed a genuine
+  // retirement's tombstone while its approved entry still sits in the sidecar, and let 256
+  // forged tombstones crowd a real one out. Pruning is CONSUMPTION only.
   const cap = 256;
-  const seeded = Array.from({ length: cap }, (_, i) => ({ keyId: "a".repeat(43), at: i + 1, reason: "forget" }))
-    // distinct keyIds so none dedupe: vary a base64url char deterministically.
-    .map((t, i) => ({ ...t, keyId: (i.toString(36).padStart(43, "0")) }));
+  const seeded = Array.from({ length: cap }, (_, i) => ({ keyId: i.toString(36).padStart(43, "0"), at: i + 1, reason: "forget", gen: i + 1 }));
   const peer = generateIdentity();
-  const dir = createDirectory({ self: { name: "me" }, tombstones: seeded, now: at(10_000) });
-  assert.equal(dir.tombstones().length, cap);
+  const dir = createDirectory({ self: { name: "me" }, tombstones: seeded, routeGen: cap, now: at(10_000) });
+  assert.equal(dir.tombstones().length, cap, "all seeded tombstones load — no count prune on load");
   dir.admit({ name: "peer", publicKey: peer.publicKey });
-  dir.forget("peer"); // pushes past the cap -> the oldest (at:1) is evicted
+  dir.forget("peer"); // pushes past the cap — but nothing is evicted
   const tombs = dir.tombstones();
-  assert.equal(tombs.length, cap, "still capped");
-  assert.ok(tombs.some((t) => t.keyId === keyId(peer.publicKey)), "the newest was kept");
-  assert.ok(!tombs.some((t) => t.at === 1), "the oldest was dropped");
+  assert.equal(tombs.length, cap + 1, "the list grew past the cap rather than evicting");
+  assert.ok(tombs.some((t) => t.keyId === keyId(peer.publicKey)), "the new tombstone is present");
+  assert.ok(tombs.some((t) => t.at === 1), "the oldest genuine tombstone is NOT dropped");
+  assert.equal(dir.routeGen(), cap + 1, "routeGen advanced past the seeded max");
+});
+
+test("tombstones are pruned only by CONSUMPTION (gen <= routeGenApplied)", () => {
+  const seeded = [
+    { keyId: "a".repeat(43), at: 1, reason: "forget", gen: 1 },
+    { keyId: "b".repeat(43), at: 2, reason: "forget", gen: 2 },
+    { keyId: "c".repeat(43), at: 3, reason: "forget", gen: 3 },
+  ];
+  // routeGenApplied 2 -> gens 1 and 2 are consumed on load; gen 3 stays pending.
+  const dir = createDirectory({ self: { name: "me" }, tombstones: seeded, routeGen: 3, routeGenApplied: 2 });
+  assert.deepEqual(
+    dir.tombstones().map((t) => t.gen),
+    [3],
+    "only the unconsumed tombstone survives load",
+  );
+  // markTombstonesApplied consumes the rest and never regresses.
+  assert.equal(dir.markTombstonesApplied(3), 3);
+  assert.deepEqual(dir.tombstones(), [], "gen 3 is now consumed too");
+  assert.equal(dir.markTombstonesApplied(1), 3, "the high-water mark never regresses");
 });
 
 test("reconcilePersist union-merges tombstones so a race cannot shed a restriction", () => {

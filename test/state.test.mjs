@@ -45,6 +45,18 @@ test("keys nobody touched are left alone", () => {
   assert.equal(after.trust.model, "direct");
 });
 
+test("a durable write is fsync'd, renamed, and readable (R3)", () => {
+  // The restricting path (a conflict void, a forget's startup reconcile) writes with
+  // `durable: true` so the contents survive power loss and are not reordered against a later
+  // write. The observable contract here is simply: it writes, renames atomically, and reads back.
+  const path = scratch();
+  const payload = { entries: [{ id: "x", gen: 7 }], routeGenApplied: 7 };
+  assert.equal(saveState(payload, path, { durable: true }), path);
+  assert.deepEqual(loadState(path), payload, "the durable write is readable after fsync+rename");
+  // The temp file must not linger — rename consumed it.
+  assert.throws(() => readFileSync(`${path}.tmp-${process.pid}`), /ENOENT/);
+});
+
 test("the lock is released even when a change throws", () => {
   const path = scratch();
   saveState({ admitted: [] }, path);

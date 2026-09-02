@@ -11,7 +11,7 @@
  *
  * @module state
  */
-import { mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, openSync, closeSync, fsyncSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -69,14 +69,51 @@ export function loadState(path = defaultStatePath(), { log = () => {} } = {}) {
  * A directory truncated by a crash mid-write is a machine that has quietly
  * forgotten every peer it knew; rename is atomic on the platforms this runs on.
  *
+ * With `durable`, the write also survives *power loss* and is not reordered
+ * against a later write: the temp file's contents are `fsync`'d before the
+ * rename, and the parent directory is `fsync`'d after (best-effort — directory
+ * fsync is unsupported on some platforms/filesystems, e.g. Windows, so it
+ * degrades silently there). Reserved for the rare key-RESTRICTING writes (a
+ * conflict void, a forget's startup reconcile) where a lost or reordered write
+ * could resurrect a revoked key; the best-effort adding hot path never asks for
+ * it (the extra fsyncs are not free).
+ *
  * @param {unknown} state
  * @param {string} [path]
+ * @param {{durable?: boolean}} [options]
  */
-export function saveState(state, path = defaultStatePath()) {
+export function saveState(state, path = defaultStatePath(), { durable = false } = {}) {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}`;
-  writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  const body = `${JSON.stringify(state, null, 2)}\n`;
+  if (!durable) {
+    writeFileSync(temporary, body, "utf8");
+    renameSync(temporary, path);
+    return path;
+  }
+  // Durable: the contents must be on the platter before the rename makes them the file, or a
+  // power loss between write and rename could leave the rename pointing at unflushed garbage.
+  const fd = openSync(temporary, "w");
+  try {
+    writeFileSync(fd, body, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(temporary, path);
+  // And the rename itself must be durable, or the file could revert to the old contents after
+  // a crash — an fsync of the parent directory does that. Best-effort: some filesystems refuse
+  // to open a directory for fsync; degrading there is better than failing the write outright.
+  try {
+    const dirFd = openSync(dirname(path), "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    /* directory fsync unsupported here; the content fsync above is the part that matters most */
+  }
   return path;
 }
 
