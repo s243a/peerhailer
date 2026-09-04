@@ -30,6 +30,7 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
   const recordFor = new Map();
   const delivered = {};
   let relayedToD = null; // the envelope B forwards to D on the sealed round
+  let relayedBackFromD = null; // D's reply as B relays it back toward A
   const plugin = {};
   for (const k of ["a", "b", "d"]) {
     const as = { name: k, publicKey: id[k].publicKey, privateKey: id[k].privateKey };
@@ -41,8 +42,9 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
       neighbors: () => dir[k].listAdmitted().map((p) => norm(p.publicKey)),
       isBlocked: () => false,
       authorizeOrigin: () => true,
-      // D can open sealed blocks with its X25519 key.
-      ...(k === "d" ? { sealPrivateKey: id.d.sealPrivateKey } : {}),
+      // D opens the sealed request; A holds its own X25519 key so it can originate a confidential
+      // send (carry a response key) and open D's sealed reply. B is only a relay, so it needs none.
+      ...(k === "a" || k === "d" ? { sealPrivateKey: id[k].sealPrivateKey } : {}),
       // Tier-0 lookup by identity (none of these peers has walked D's sealing key).
       tier0Seal: (destKey) => {
         const peer = dir[k].getByKey?.(destKey);
@@ -54,6 +56,7 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
         if (!rec) return { delivered: false, reason: "unknown peer", spent: 0 };
         if (k === "b" && peerKey === norm(id.d.publicKey)) relayedToD = env;
         const r = await callPeer(rec, "/route/relay", env, { as });
+        if (k === "b" && peerKey === norm(id.d.publicKey) && r.ok) relayedBackFromD = r.response;
         return r.ok ? r.response : { delivered: false, reason: r.error, spent: 0 };
       },
       deliver: (payload, meta) => {
@@ -103,4 +106,12 @@ test("A seals a routed message to D through B; the relay carries only ciphertext
   assert.ok(relayedToD, "B forwarded the sealed message to D");
   assert.equal(relayedToD.payload.manifest.payloadMode, "sealed", "the routed wrapper was sealed");
   assert.ok(!JSON.stringify(relayedToD).includes(marker), "the plaintext never crossed the relay");
+
+  // The response is sealed too: A opened D's sealed reply (sealer == D, messageId bound), so the
+  // consumer's ack surfaces at the origin — while B relayed only ciphertext back, no clear `received`.
+  assert.equal(sealedRes.responseSeal.state, "sealed", "the origin opened D's sealed reply");
+  assert.equal(sealedRes.response.received, true, "D's ack surfaced at the origin");
+  assert.equal(sealedRes.response.at, "d");
+  assert.ok(relayedBackFromD, "B relayed D's reply back toward A");
+  assert.ok(!JSON.stringify(relayedBackFromD).includes('"received"'), "the ack did not travel back in the clear");
 });

@@ -19,11 +19,21 @@
  *    The manifest commits to `originKeyId`, so a relay cannot substitute a record for
  *    a *different* key — but it could substitute an older self-signed record of the
  *    *same* origin (stale addresses, an older sealing key). `open` therefore exposes
- *    only `body` and `originKeyId`; a caller must not read address/seal fields out of
- *    the wrapper as if they were message-fresh.
+ *    only `body`, `originKeyId`, and — for a sealed request that carried one — a
+ *    `responseSealKey`; a caller must not read address/seal fields out of the *wrapper*
+ *    as if they were message-fresh.
  *  - **The body must be JSON-representable.** `wrap` serialises with `JSON.stringify`,
  *    so `-0`, `NaN`, `Date`, `undefined` properties, etc. are lost the usual way; the
  *    destination always receives the parse of exactly the bytes the origin signed.
+ *
+ * Response sealing: a sealed request may carry a routing header
+ * (`__routedResponseSealKey`) naming the X25519 key the destination must seal its
+ * *response* to. It rides *inside* the origin-signed seal, so — unlike the attached
+ * record's `sealPublicKey` — it *is* message-fresh (per-message authenticated,
+ * relay-invisible), and `open` returns it as `responseSealKey`. `sealRoutedResponse`
+ * (destination) frames `{messageId, body}`, seals it to that key, and signs with the
+ * destination identity; `openRoutedResponse` (origin) verifies sealer == routing target
+ * and the messageId before decrypting, fail-closed.
  *
  * Trust note: `open` recovers the origin's key from the *self-certifying* attached
  * record (trust-on-first-use for its self-consistency) and binds it to the manifest.
@@ -64,7 +74,28 @@ const ED25519_SIGNATURE_BASE64_LENGTH = 88;
 const BASE64_SHAPE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const WRAPPER_FIELDS = /** @type {const} */ (["manifest", "manifestSignature", "originRecord", "payload"]);
 const SIGNED_RECORD_FIELDS = /** @type {const} */ (["record", "signature"]);
+
+/**
+ * Reserved key inside a SEALED request plaintext: the X25519 SPKI PEM the destination must
+ * seal its *response* to. Present only when the origin can receive confidentially; the exact
+ * two-key `{__routedResponseSealKey, body}` shape is the discriminator `open` strips on.
+ */
+export const ROUTED_RESPONSE_SEAL_KEY_FIELD = "__routedResponseSealKey";
+const RESPONSE_HEADER_FIELDS = /** @type {const} */ ([ROUTED_RESPONSE_SEAL_KEY_FIELD, "body"]);
+const RESPONSE_ENVELOPE_FIELDS = /** @type {const} */ (["messageId", "body"]);
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+/** The PEM back if `value` is a string that parses as an X25519 public key, else `null`.
+ * Validates a response-sealing key at wrap (throw) and at open (refuse).
+ * @param {unknown} value */
+const x25519PublicPem = (value) => {
+  if (typeof value !== "string") return null;
+  try {
+    return createPublicKey(value).asymmetricKeyType === "x25519" ? value : null;
+  } catch {
+    return null;
+  }
+};
 
 /** @param {any} value @param {readonly string[]} fields */
 const hasExactly = (value, fields) =>
@@ -131,6 +162,10 @@ const bodyToBytes = (body) => {
  * signature stays outside the seal (verify-before-decrypt). Without it, the body is
  * cleartext (signed, not private) as at M1/M2. The signed `payloadMode` records which.
  *
+ * With `sealTo.responseSealKey`, the sealed plaintext is `{__routedResponseSealKey, body}`
+ * so the destination can seal its reply to that key (§response sealing); the header rides
+ * inside the seal, so it is authenticated and relay-invisible like the body.
+ *
  * @param {{
  *   self: any,               // this machine's own record ({name, publicKey, ...})
  *   privateKey: string,      // its Ed25519 private key (PEM)
@@ -139,7 +174,7 @@ const bodyToBytes = (body) => {
  *   messageId: string,       // exactly 16 random bytes as 22-char base64url
  *   now: number,
  *   validityMs: number,
- *   sealTo?: { recipientKey: string },  // the destination's X25519 sealing key; seals when present
+ *   sealTo?: { recipientKey: string, responseSealKey?: string },  // the destination's X25519 sealing key (seals when present), and optionally the origin's own X25519 key the destination should seal its reply to
  * }} input
  * @returns {{ manifest: any, manifestSignature: string, originRecord: any, payload: string }}
  */
@@ -167,7 +202,16 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
     privateKey,
   );
   if (!originRecord) throw new Error("cannot sign the origin record");
-  const bodyBytes = bodyToBytes(body);
+
+  // A sealed request may carry the origin's own X25519 key so the destination can seal its
+  // reply to it. It lives INSIDE the sealed plaintext (authenticated per-message, unseen by
+  // relays); a bad key is an origin config error, thrown, not a wire refusal.
+  let inner = body;
+  if (sealTo?.responseSealKey !== undefined) {
+    if (x25519PublicPem(sealTo.responseSealKey) === null) throw new Error("cannot use the response sealing key");
+    inner = { [ROUTED_RESPONSE_SEAL_KEY_FIELD]: sealTo.responseSealKey, body };
+  }
+  const bodyBytes = bodyToBytes(inner);
 
   // The exact bytes the manifest commits to and the wire carries: the plaintext for a
   // clear send, or the serialized sealed object for a sealed one. The digest is over
@@ -265,7 +309,11 @@ export function wrapRoutedMessage({ self, privateKey, destinationKeyId, body, me
  * per-origin downgrade floor: a clear message from an origin it returns `true` for is refused
  * `downgrade-refused` (post-authentication, so receiptable), alongside the global `requireSealed`.
  *
- * @returns {{ ok: true, body: any, originKeyId: string, messageId: string, blockIndex: number, sealed: boolean, proof: { originKeyId: string } }
+ * A sealed request may also carry `responseSealKey` (the origin's X25519 key the destination
+ * should seal its reply to), stripped out of the plaintext and returned on `ok`; present only
+ * when the header rode inside the seal.
+ *
+ * @returns {{ ok: true, body: any, originKeyId: string, messageId: string, blockIndex: number, sealed: boolean, proof: { originKeyId: string }, responseSealKey?: string }
  *   | { ok: false, reason: string, authenticated?: { originKeyId: string, messageId: string, blockIndex: number } }}
  */
 export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, sealPrivateKey, requireSealed, requireSealFrom }) {
@@ -389,6 +437,7 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
   // origin, not merely *some* key. Strict UTF-8 avoids replacement-character decoding;
   // JSON may still parse `1e400` to Infinity, so representability is enforced after.
   let body;
+  let responseSealKey;
   if (manifest.payloadMode === "sealed") {
     let sealed;
     try {
@@ -414,6 +463,13 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
     } catch {
       return refuse("body");
     }
+    // Strip the response-sealing header if the origin carried one (the exact two-key shape).
+    // A present-but-unusable key is the origin's bug — post-authentication, so receiptable.
+    if (hasExactly(body, RESPONSE_HEADER_FIELDS)) {
+      responseSealKey = x25519PublicPem(body[ROUTED_RESPONSE_SEAL_KEY_FIELD]);
+      if (responseSealKey === null) return refuse("response-key");
+      body = body.body;
+    }
   } else {
     try {
       body = JSON.parse(UTF8.decode(bytes));
@@ -435,5 +491,72 @@ export function openRoutedMessage(wrapper, { selfKeyId, guard, authorizeOrigin, 
     blockIndex: manifest.blockIndex,
     sealed: manifest.payloadMode === "sealed",
     proof: authenticatedOrigin(recKeyId),
+    ...(responseSealKey !== undefined ? { responseSealKey } : {}),
   };
+}
+
+/**
+ * Destination side: seal the consumer's response for the routed origin. Frames `{messageId, body}`
+ * so the origin can bind the reply to the request it minted (a sealed block is a bearer artifact;
+ * without the id a relay could replay an earlier reply), seals to the origin's response key from
+ * the opened request, and signs with the destination's identity key (seal-then-sign) so the origin
+ * verifies the sealer is the routing target before decrypting. `body` may be any JSON value;
+ * `undefined` is sent as `null`.
+ * Throws `RoutedMessageInputError` if the plaintext or the sealed form exceeds MAX_ROUTED_BODY_BYTES,
+ * or a plain Error on a key/config problem — the caller (plugin) withholds the body on either.
+ * @param {{ self: string, privateKey: string, responseSealKey: string, messageId: string, body: any }} input
+ * @returns {ReturnType<typeof seal>}
+ */
+export function sealRoutedResponse({ self, privateKey, responseSealKey, messageId, body }) {
+  const plaintext = bodyToBytes({ messageId, body: body === undefined ? null : body });
+  const sealed = seal(plaintext, responseSealKey, { signer: { publicKey: self, privateKey } });
+  if (Buffer.byteLength(JSON.stringify(sealed), "utf8") > MAX_ROUTED_BODY_BYTES) {
+    throw new RoutedMessageInputError(`sealed response exceeds the ${MAX_ROUTED_BODY_BYTES}-byte limit`);
+  }
+  return sealed;
+}
+
+/**
+ * Origin side: open the destination's sealed response for a send we made. Fail-closed verdicts,
+ * never throws. Order: shape/size → the sealer named in the block must be the routing target
+ * (`keyId(from) === destinationKeyId`, checked BEFORE any decryption) → `openSigned` (verifies the
+ * signature before decrypting) → strict UTF-8 JSON → exact `{messageId, body}` envelope →
+ * `messageId` must be the one this send minted → JSON-representable body.
+ * @param {unknown} carried the `__routedSealedResponse` value from the outer response
+ * @param {{ destinationKeyId: string, messageId: string, sealPrivateKey: string }} deps
+ * @returns {{ ok: true, body: any }
+ *   | { ok: false, reason: "malformed" | "wrong-sealer" | "unopenable" | "message-mismatch" }}
+ */
+export function openRoutedResponse(carried, { destinationKeyId, messageId, sealPrivateKey }) {
+  if (!carried || typeof carried !== "object" || Array.isArray(carried)) return { ok: false, reason: "malformed" };
+  try {
+    if (Buffer.byteLength(JSON.stringify(carried), "utf8") > MAX_ROUTED_BODY_BYTES) return { ok: false, reason: "malformed" };
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+  // The sealer must be the routing target, checked before any decryption spend.
+  if (typeof (/** @type {any} */ (carried).from) !== "string") return { ok: false, reason: "wrong-sealer" };
+  let sealerKeyId;
+  try {
+    sealerKeyId = keyId(/** @type {any} */ (carried).from);
+  } catch {
+    return { ok: false, reason: "wrong-sealer" };
+  }
+  if (sealerKeyId !== destinationKeyId) return { ok: false, reason: "wrong-sealer" };
+  let opened;
+  try {
+    opened = openSigned(/** @type {any} */ (carried), sealPrivateKey);
+  } catch {
+    return { ok: false, reason: "unopenable" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(UTF8.decode(opened.plaintext));
+  } catch {
+    return { ok: false, reason: "unopenable" };
+  }
+  if (!hasExactly(parsed, RESPONSE_ENVELOPE_FIELDS)) return { ok: false, reason: "malformed" };
+  if (parsed.messageId !== messageId) return { ok: false, reason: "message-mismatch" };
+  if (containsNonFiniteNumber(parsed.body)) return { ok: false, reason: "malformed" };
+  return { ok: true, body: parsed.body };
 }

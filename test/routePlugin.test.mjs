@@ -56,6 +56,9 @@ const cryptoDeps = (self, over = {}) => ({
   neighbors: () => [],
   forward: async () => ({ delivered: false, spent: 0 }),
   deliver: () => ({ received: true }),
+  // The origin needs its own X25519 key to originate a confidential send (it carries a response
+  // key for the destination to seal the reply to); the daemon always has one.
+  sealPrivateKey: self.identity.sealPrivateKey,
   ...over,
 });
 

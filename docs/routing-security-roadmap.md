@@ -3,9 +3,10 @@
 **Status: M0–M3b merged to `main`, plus signed delivery receipts, durable
 (restart-safe) replay/Tier-1, the High-1 causal identity/seal merge, and the M3a observation
 seam — now ARMED: the per-origin `requireSealFrom` downgrade floor is wired and enforcing, with
-an operator `hail route discard` recovery surface. Latest: durable Tier-1 *invalidation* fixes
-the ordinary offline forget/rotate path, with three retirement/restart corner cases still open
-(see the What-is-true-today bullet).** `docs/routing.md` is the full routing roadmap. This
+an operator `hail route discard` recovery surface, and the routed **response body is sealed**
+(symmetric to M3b: sealed request ⇔ sealed reply, withheld otherwise). Latest: durable Tier-1
+*invalidation* fixes the ordinary offline forget/rotate path, with three retirement/restart
+corner cases still open (see the What-is-true-today bullet).** `docs/routing.md` is the full routing roadmap. This
 security-focused companion sequences *origin authentication*, *duplicate suppression
 (replay)*, *key trust*, and *confidentiality* by their dependencies. Kimi corrected the
 original spine (signing was conflated with sealing); Sol then corrected several over-strong
@@ -21,7 +22,9 @@ synchronously in a running daemon, and an *offline* forget/rotation is reconcile
 cold start via durable identity tombstones (below); the resolver fails closed on any ambiguous
 or incoherent input. Bodies
 are cleartext only when explicitly public; the *response* path now carries a **signed
-delivery receipt** (below). Replay and Tier-1 are **restart-safe**: both persist to a
+delivery receipt** and, for a sealed request, a **response body sealed** to the origin's X25519
+key carried *inside* the sealed request — a clear or unverifiable reply to a sealed request is
+**withheld** at the origin, never handed to the caller (below). Replay and Tier-1 are **restart-safe**: both persist to a
 daemon-owned sidecar beside `directory.json`, so a bounce neither reopens a still-unexpired
 replay window nor drops an approved sealing key to a first cleartext re-discovery.
 
@@ -52,16 +55,23 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   visited/TTL/budget as *cooperative routing controls, never authenticated facts*.
 - Endpoint rollout is a flag day until route-version negotiation exists. Old and new
   intermediate relays carry the opaque wrapper, but old/new destination behavior is
-  not interoperable; upgrade destinations before originating M1 messages.
-- The threaded response is still unsigned **and unsealed**. `delivered`, acknowledgements,
-  and refusal reasons are routing feedback, **not cryptographic proof that the destination
-  acted**; an intermediary can forge, alter, or suppress them. And M3b seals only the
-  *request* body — the consumer's response travels back through the same relays in the
-  clear. Today's consumer only acks, but the first content-returning consumer (a routed
-  `files get`) would send its payload back cleartext through the very relays the sealed
-  request bypassed; it must seal its own response. A **signed delivery receipt** now proves
-  *what the destination did* with the request (delivered/refused, implemented); **sealing the
-  response body** is still later work.
+  not interoperable; upgrade destinations before originating M1 messages. Sealing the
+  response body needed **no manifest change** and is *not* a flag day; the deferred
+  `originSealKeyId` manifest field is reserved for the next necessary version bump.
+- The threaded response is now **signed and sealed**. `delivered`, acknowledgements, and
+  refusal reasons are routing feedback, **not cryptographic proof that the destination acted**;
+  an intermediary can forge, alter, or suppress them. Closed: a **signed delivery receipt**
+  proves *what the destination did* with the request, and the **response body is now sealed** —
+  the origin carries its X25519 response key *inside* the sealed request (per-message
+  authenticated, relay-invisible; the attached origin record's key is deliberately NOT used
+  because a relay can replay an older record), the destination frames `{messageId, body}`, seals
+  to it and signs with its identity key, and the origin verifies sealer == routing target and
+  messageId before decrypting. Response mode follows request mode: a clear request gets a clear
+  reply; a sealed request gets a sealed reply or a **withheld** one — never clear. A confidential
+  send requires the origin to hold its sealing key (`seal-refused:no-response-key` otherwise).
+  Rollout is soft: a new origin to an old destination sees a verified `delivered` receipt with
+  `responseSeal: withheld/clear`; an old origin to a new destination gets its reply body withheld
+  (the receipt still proves delivery).
 - Sealing to a **Tier-1** destination now survives a restart. The record-carried key store
   persists to a sidecar (`route-keys.json`), so an **approved** key is usable immediately on
   restart — no first send resolving `cleartext` and re-discovering. A merely *pending* key is
@@ -563,6 +573,10 @@ Tier-1 store is in the daemon's memory), with the response path proven by a sign
 replay + Tier-1 state persisted across a restart, and the durable observation seam recording each
 sealed delivery against a request-scoped authenticated-origin proof and enforcing the per-origin
 `requireSealFrom` downgrade floor (refuse-all-clear, one-way ratchet, `seal`-refusal re-teach,
-operator discard recovery). The remaining work is deferred and named where it arises above:
-binding a receipt to a message's *terminal* outcome on the same durable seam, the signed floor
-*advertisement*, sealing the response *body*, and the later M4+ chunking/anonymity.
+operator discard recovery), and the routed **response body sealed** (sealed request ⇔ sealed
+reply, verify sealer == routing target + messageId before decrypting, withheld otherwise). The
+remaining work is deferred and named where it arises above: binding a receipt to a message's
+*terminal* outcome on the same durable seam (and, with it, binding a reply digest into the
+receipt — a relay can still pair a genuine `delivered` receipt with a withheld/stripped reply),
+the signed floor *advertisement*, flattening a consumer-level refusal carried *inside* a sealed
+reply, signalling an oversize withheld reply, and the later M4+ chunking/anonymity.
