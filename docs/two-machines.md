@@ -99,6 +99,75 @@ your real ones. That is a judgement about your network, not a bug being hidden:
 acceptable on a household LAN and a single-user tailnet, and not acceptable
 anywhere else until the control API is pinned back to loopback.
 
+## Routing and sealed messages across the two machines
+
+A basic hail (`hail walk`) needs only the `trusted` grant every added peer gets.
+Routing a message *to* a peer is a separate grant and a stricter listener — three
+things trip people up, each learned on the first real run:
+
+1. **Serve the route plugin on an *encrypted* arrival, not the page listener.**
+   `--host 0.0.0.0` binds only the page and control API (`/`, `/api/*`); the
+   `route` and `hail` plugin routes set `requiresEncryptedArrival`, so they answer
+   only on `--hail-on-encrypted <iface>` (a tailnet, arrival asserted encrypted) or
+   `--hail-on-tls <iface>` (pinned TLS). On the destination:
+
+   ```sh
+   hail daemon --hail-on-encrypted tailscale0 --port 7645 --route
+   ```
+
+   The tell is a `[daemon] hails on http://<tailnet-ip>:7645` line. Get it wrong
+   and `curl /` still answers 403 while `hail walk` reports `fetch failed` and a
+   routed send comes back `no route`.
+
+2. **`route` is its own capability, distinct from `relay`.** The `trusted` profile
+   grants `hail, directory, introduce`; the built-in `carrier` adds `relay` (a
+   single relay hop) — neither grants the `route` capability the routing plugin
+   checks. A key-only `hail add` therefore leaves the origin at `no route`. Grant
+   it on the destination with a profile that names `route`:
+
+   ```sh
+   hail profiles add route-peer --allows hail,directory,introduce,route
+   hail add <origin> --profile route-peer --key-file <origin>.pub
+   ```
+
+   Only the destination needs this for a direct send: the origin calls the
+   destination's `/route/relay`, and a sealed reply returns on that same
+   connection, so an outbound-only origin (behind NAT, say) never needs an inbound
+   grant of its own.
+
+3. **The daemon does not watch its state file.** A grant or profile edit is on disk
+   but not live until the daemon reloads. Reload in place with `SIGHUP`
+   (`kill -HUP <daemon-pid>` — the old runtime keeps serving if the reload fails),
+   or Ctrl-C and re-run. There is no `hail reload` subcommand; `/api/reload` needs
+   `--ui`.
+
+With those in place, the confidential round-trip is three commands on the origin:
+
+```sh
+hail route discover --dest-file <dest>.pub   # data-free public probe; learns the dest's sealing key (pending)
+hail route approve  --dest-file <dest>.pub   # approve it (--seal-key-file <f> to pin a reviewed fingerprint)
+hail route send     --dest-file <dest>.pub "a secret"   # sealed by default; --public opts out
+```
+
+A successful sealed send prints three lines, each a distinct proof:
+
+```text
+delivered — sealed (tier 1)                               # request encrypted to the approved key
+  receipt: verified delivered — signed by the destination # the destination itself acted, not a relay forgery
+  response: sealed by the destination                     # the reply came back sealed, verified, and decrypted
+```
+
+The last line is the sealed *response*: the origin carries its own sealing key
+inside the sealed request, and the destination seals its reply to that key — so a
+content-returning consumer's answer never crosses the relays in the clear. A clear
+or unverifiable reply where sealed was expected is *withheld*, never handed up. See
+[routing-security-roadmap.md](routing-security-roadmap.md) for the guarantee.
+
+This whole path was first exercised between two real machines — a WSL box and a
+Puppy Linux node over Tailscale — rather than on loopback. WSL2 reaches the tailnet
+outbound but not the host LAN, which is fine: the origin only ever dials the
+destination.
+
 ## Android phones
 
 The Android Tailscale app and Termux do not share a `tailscaled` daemon. The app
