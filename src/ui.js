@@ -7,10 +7,11 @@
  * refused" and "what did I actually grant" are hard to hold in your head and
  * trivial to read from a table.
  *
- * Deliberately read-mostly. The actions it offers are the ones that are safe to
- * take quickly — admit a candidate, change a profile, block, unblock — and each
- * is the same call the CLI makes. Anything whose consequences deserve thought
- * stays where thought is easier.
+ * It reads state, and drives the everyday actions the CLI exposes — admit a
+ * candidate, change a profile, block/unblock, send and clear chat, accept a seal,
+ * launch and stop a composer worker, mount a share, reload config — each the same
+ * call the CLI makes. Anything whose consequences deserve real thought stays
+ * where thought is easier.
  *
  * @module ui
  */

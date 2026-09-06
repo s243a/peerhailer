@@ -309,19 +309,19 @@ roadmap is shared, not scattered across PR threads.
 
 ## Minor / taste (batch opportunistically)
 
-- `[fable]` `server.js` finds the chat plugin by duck-typing but the route plugin by name — one convention.
-- `[fable]` `bin/hail.js` calls `publicKeyFromFlags()` twice — hoist.
-- `[fable]` `directory.js` `profileFor` computes the resolved profile then feeds raw `record.profile`
-  to `allows` — reuse the resolved one.
-- `[fable]` `unblock` can't remove the key of a *forgotten* peer — accept a key/fingerprint argument.
-- `[fable]` `admit` with `until` but no profile silently produces no elevation — guard in the library.
-- `[fable]` `MAX_MESSAGE` is documented as 4 KB but compared against UTF-16 `.length` — note it.
-- `[sol]` an invalid file op silently becomes `list`; `block()` isn't idempotent; a few overview
-  comments have drifted (`ui.js` "read-mostly", `directory.js` "only names/routes/timestamps",
-  `server.js` "every refusal is a 404").
-- `[fable, from #27 review]` `composer.closeAll` does `void stop(id)` on async teardown; the one
-  unguarded call inside (`entry.gate?.close()`, `composer.js:294`) could surface as an unhandled
-  rejection (process-fatal under default Node) on shutdown. Guard it. Marginal.
+- **TODO (left — touchier than the batch)** — `[fable]` `server.js` finds the chat plugin by duck-typing but the route plugin by name — one convention.
+- **DONE** — `[fable]` `bin/hail.js` called `publicKeyFromFlags()` twice — hoisted to a single call.
+- **DONE** — `[fable]` `directory.js` snapshot/gossip filter resolved the profile then fed raw `record.profile`
+  to `allows` — now computed once and reused for both the blocked gate and `allows("hail")`.
+- **DONE (already implemented)** — `[fable]` `unblock` accepts `--key` (PEM or fingerprint) via `directory.unblockKey()`, so a forgotten peer's key can be unblocked.
+- **DONE** — `[fable]` `admit` with `until` but no profile now throws at the library boundary (`admit: \`until\` needs a profile to raise to`); regression test added.
+- **DONE** — `[fable]` `MAX_MESSAGE` comment now notes the check is UTF-16 code units (`String.length`), not bytes (limit/comparison unchanged).
+- **DONE (comments) / already-correct (behaviors)** — `[sol]` an invalid file op already `fail()`s (not a silent `list`) and `block()` is already idempotent; the three drifted overview
+  comments (`ui.js` "read-mostly", `directory.js` "only names/routes/timestamps",
+  `server.js` "every refusal is a 404") are corrected.
+- **DONE** — `[fable, from #27 review]` `composer.closeAll`'s unguarded `entry.gate?.close()` (`composer.js:293`)
+  is wrapped in try/catch (`http.Server.close()` throws synchronously when not running, so a sync
+  guard is correct) — shutdown can no longer throw.
 - `[fable, from #29 review]` `loadState` returns `{}` on a read failure (never throws), so a
   transiently-unreadable state file at a reload's commit degrades to a near-empty runtime and
   `adopt({})` clears the admitted peers — fail-closed and near-unreachable (atomic-rename writes +

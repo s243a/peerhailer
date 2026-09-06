@@ -12,11 +12,12 @@
  * default, because a directory that can be edited remotely is a way to admit a
  * peer without anybody agreeing to it.
  *
- * An unauthenticated caller learns nothing. Announcing "invalid token" would
- * confirm a peer is here and that tokens are the way in, which is a scanner's
- * reason to come back; every rejection returns the same 404 a bare host would.
- * That is the `anonymous` posture — honest about what a listening TCP service
- * can achieve, and no more.
+ * An unauthenticated caller on the `/hail` face learns nothing. Announcing
+ * "invalid token" would confirm a peer is here and that tokens are the way in,
+ * which is a scanner's reason to come back; every refusal there returns the same
+ * 404 a bare host would. That is the `anonymous` posture — honest about what a
+ * listening TCP service can achieve, and no more. (The loopback `/api` scope is
+ * not concealed: a local script gets actionable 400/413/500 statuses.)
  *
  * @module server
  */

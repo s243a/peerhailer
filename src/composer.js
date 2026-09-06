@@ -291,7 +291,11 @@ export function createComposer({ gateConfig = () => null, identity, log = () => 
     if (!entry) return { stopped: false };
     launches.delete(launchId);
     kill(entry.t3);
-    entry.gate?.close();
+    // A closed/never-listening http.Server throws on close(); on shutdown that
+    // would surface as a process-fatal error. Teardown is best-effort.
+    try {
+      entry.gate?.close();
+    } catch {}
     if (entry.remote) {
       try {
         entry.remote.seatForward?.close?.();

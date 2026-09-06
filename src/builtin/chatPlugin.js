@@ -19,7 +19,11 @@ import { normalizeKey, sameKey } from "../identity.js";
 import { REFUSE } from "../plugins.js";
 import { openSigned } from "../sealing.js";
 
-/** A message longer than this is a payload, not a note. */
+/**
+ * A message longer than this is a payload, not a note. Compared against
+ * `String.length` (UTF-16 code units), not bytes — so the effective byte ceiling
+ * runs higher for multi-byte text. It is a sanity bound, not a wire budget.
+ */
 export const MAX_MESSAGE = 4 * 1024;
 
 /** How many to keep per peer. A chat is not a log; older ones fall off. */

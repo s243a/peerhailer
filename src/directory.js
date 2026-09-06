@@ -13,8 +13,9 @@
  * gossip that also carried trust would turn one compromised peer into a way to
  * introduce arbitrary machines.
  *
- * The directory holds no credentials, only names, routes and when each was last
- * seen. See `peerRecord`.
+ * The directory holds no secrets, only public identity: names, routes, the public
+ * key bound to each peer, its assigned profile, when it was last seen, and the
+ * blocklist. See `peerRecord`.
  *
  * @module directory
  */
@@ -1006,6 +1007,10 @@ export function createDirectory(state = {}) {
     // trusted default instead of the arrival-based fallback below.
     const asName = (/** @type {any} */ value) => (typeof value === "string" ? value : undefined);
     const requestedProfile = asName(profile) ?? asName(peer?.profile);
+    // An `until` with no profile to raise to can't elevate anything; silently
+    // storing no elevation hides the caller's mistake. Refuse at the boundary
+    // (the CLI guards this too, but a library caller deserves the same door).
+    if (until && !requestedProfile) throw new Error("admit: `until` needs a profile to raise to");
     // What it reverts to is captured now, while we still know what it was
     // raised from. Working it out at expiry means guessing months later. When the
     // peer is *already* elevated (a live, unlapsed raise), the base to revert to
@@ -1453,9 +1458,12 @@ export function createDirectory(state = {}) {
       // wherever the profile is consulted, not only where it is displayed.
       peers: [...admitted.values()]
         .map(asOfNow)
-        .filter((record) => profileFor({ peer: record, directory: api, blocklist }).profile !== BLOCKED_PROFILE)
-        .filter((record) => allows(record.profile, "hail", profileSet))
-        .map((record) => publicRecord(record))
+        // Resolve the profile once (blocklist + trust model applied) and use that
+        // same value for both gates — the raw `record.profile` skips resolution.
+        .map((record) => ({ record, resolved: profileFor({ peer: record, directory: api, blocklist }).profile }))
+        .filter(({ resolved }) => resolved !== BLOCKED_PROFILE)
+        .filter(({ resolved }) => allows(resolved, "hail", profileSet))
+        .map(({ record }) => publicRecord(record))
         .filter(Boolean),
     };
   }

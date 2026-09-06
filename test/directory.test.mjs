@@ -34,6 +34,14 @@ test("admitting is what promotes a candidate", () => {
   assert.deepEqual(directory.listCandidates(), []);
 });
 
+test("admit rejects `until` with no profile to raise to", () => {
+  const directory = createDirectory({ self: { name: "here" } });
+  // A silent no-op would hide the caller's mistake — the library refuses at the boundary.
+  assert.throws(() => directory.admit({ name: "luna" }, { until: Date.now() + 60_000 }), /`until` needs a profile/);
+  // With a profile to raise to, the elevation is accepted.
+  assert.doesNotThrow(() => directory.admit({ name: "luna" }, { profile: "trusted", until: Date.now() + 60_000 }));
+});
+
 test("a hail answers with admitted peers only", () => {
   const directory = createDirectory({ self: { name: "here" }, now: at(5) });
   directory.admit({ name: "sol", addresses: [{ transport: "tailscale", value: "http://100.1.2.3:8787" }] });

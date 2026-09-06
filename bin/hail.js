@@ -378,11 +378,12 @@ switch (command) {
       directory.useProfiles(resolvable);
     }
 
+    const publicKey = publicKeyFromFlags();
     const admitted = directory.admit(
       {
         name,
         addresses: address ? [{ transport, value: address, lastOk: null }] : [],
-        ...(publicKeyFromFlags() ? { publicKey: publicKeyFromFlags() } : {}),
+        ...(publicKey ? { publicKey } : {}),
       },
       ...(typeof flags.profile === "string"
         ? [{ profile: flags.profile, ...(until ? { until } : {}) }]
