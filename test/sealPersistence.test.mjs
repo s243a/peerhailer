@@ -66,11 +66,17 @@ test("reconcilePersist: this writer's OWN rotation/seal-retirement wins even whe
   );
 });
 
-test("reconcilePersist: a higher-rev edit on the SAME identity still wins (no over-correction)", () => {
-  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 1 }] };
+test("reconcilePersist: a same-field conflict resolves to the committed (disk) side; rev floors to max", () => {
+  // Both sides changed `note` against the baseline — true concurrency on one field.
+  // The per-field 3-way merge resolves it deterministically to disk (the committed
+  // side), and `rev` is the monotone max, not the deciding vote (used to be
+  // "higher rev wins" and would have taken "mine").
+  const baseline = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 1, note: "base" }] };
   const onDisk = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 2, note: "disk" }] };
   const current = { admitted: [{ name: "k", publicKey: bob.publicKey, rev: 4, note: "mine" }] };
-  assert.equal(reconcilePersist(onDisk, baseline, current).admitted[0].rev, 4, "same-identity higher rev still wins");
+  const merged = reconcilePersist(onDisk, baseline, current).admitted[0];
+  assert.equal(merged.rev, 4, "rev floors to the max of both sides");
+  assert.equal(merged.note, "disk", "the same-field conflict resolves to the committed side, not the higher rev");
 });
 
 test("reconcilePersist: a stale writer's higher-rev walk cannot restore a retired seal key on one identity", () => {

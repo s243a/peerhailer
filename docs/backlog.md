@@ -283,20 +283,26 @@ roadmap is shared, not scattered across PR threads.
   event (walk/accept/rotate/forget, including a peer that disappears); reload is atomic (adopt before
   swap), single-snapshot, generation-fenced + serialized, and SIGHUP-reloadable headless; the resolver
   fails closed on incoherent state. All of Sol's re-review highs #2/#3/#4 + the mediums closed.
-- **CONFIDENTIALITY CORE FIXED (`branch directory-causal-merge`, Fable-confirmed) — `[sol]` directory
-  multi-writer merge is not causal.** `mergeByRevision` picked the higher per-record `rev`, but `rev` is a
-  local monotone counter, not a causal clock: a process that loaded a stale snapshot and made several
-  mutations outranked another process's newer one-step rotation, restoring a **retired identity/sealing
-  key**. FIXED for the security-critical fields, using the writer's baseline as the causal common
-  ancestor threaded into the merge: whichever side actually rotated the identity carries the identity+seal
-  unit regardless of `rev` (both directions); a same-identity seal change is a 3-way merge (disk-only →
-  disk, mine-only → mine, both-different → fail-closed conflict). So a retired key can no longer come back
-  from a stale multi-writer, in either direction. **Residual (NOT a confidentiality hole, pre-existing):**
-  non-security record fields (profile, addresses, note) still follow whole-record `rev`, so a stale writer
-  can still clobber a concurrent *non-security* edit; two concurrent rotations to *different* new
-  identities fall to `rev`. The full causal directory (vector clocks, or a single-writer discipline where
-  the CLI signals the daemon instead of writing disk — SIGHUP reload is a first step) remains the larger,
-  optional workstream.
+- **CONFIDENTIALITY CORE FIXED + non-security residual CLOSED — `[sol]` directory multi-writer merge is
+  now causal per field.** `mergeByRevision` picked the higher per-record `rev`, but `rev` is a local
+  monotone counter, not a causal clock: a process that loaded a stale snapshot and made several mutations
+  outranked another process's newer one-step rotation, restoring a **retired identity/sealing key**, and
+  could clobber a concurrent non-security edit. Both fixed. Each record is reconciled through `mergeRecord`
+  using the writer's baseline as the causal common ancestor: it classifies each side by whether its `rev`
+  moved past the fork point, and on true concurrency (both moved) merges *per field*. Security fields keep
+  the High-1 guard — whichever side rotated carries the identity+seal unit regardless of `rev`; a
+  same-identity seal is a fail-closed 3-way merge (`mergeSecurityUnit`). Non-security fields go through a
+  per-field 3-way content diff against the baseline (`mergeFields`): only-one-side-changed keeps that side
+  (so a stale higher-`rev` writer no longer clobbers a concurrent edit it never made), both-changed-equal →
+  disk, both-changed-different → the per-field rule (lastSeen/v max; addresses/conflicts union; the
+  elevation triple as a unit, disk wins; note/anything-else → the committed disk side). The last
+  `rev`-fallback is closed: **two concurrent rotations to *different* identities fail closed** to the disk
+  identity (first committed under the lock), seal cleared to reverify, the losing key surfaced in
+  `conflicts`. No `vc` field, `writer` role, or clock helpers were needed — under the single write lock a
+  bounded vector clock is information-equivalent to `rev` + baseline. **Deferred (designed, not built):** a
+  per-record vector clock, which would matter only for an *ancestor-less* merge — two state dirs syncing,
+  or a phone and a laptop exchanging local directory state with no shared baseline. The on-disk record can
+  gain a `vc` keyed-by-writer object later without a format change.
 - **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
   identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
   (not the direct-chat `from === caller` binding). See `docs/routing.md`.

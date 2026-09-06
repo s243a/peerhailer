@@ -157,19 +157,36 @@ multi-hop delivery over the F2F graph, now with an origin-signed cleartext wrapp
   rebases pending claims against on-disk truth) is that workstream's first primitive: the
   per-record `rev` machinery would apply the same "allocate/rebase under the lock" discipline
   instead of trusting a stale writer's pre-lock number.
-- **Multi-writer identity/seal merge is now causal (High-1, `48f25a5`); a non-security
-  residual remains.** The directory once merged concurrent state by a per-record monotone
+- **Multi-writer directory merge is now causal per field (High-1 `48f25a5`; non-security
+  residual CLOSED).** The directory once merged concurrent state by a per-record monotone
   `rev` (higher wins), which is not a causal clock — a stale multi-writer could restore a
-  retired Tier-0 identity/sealing key. That is fixed: `mergeByRevision` uses the writer's
-  baseline as a causal ancestor so whichever side actually rotated the identity carries the
-  identity+seal unit, and a same-identity seal is a fail-closed 3-way merge
-  (`directory.js` sameCanonicalKey/sealUnit). Residual (pre-existing, non-security): the
-  *non-security* record fields (profile/addresses/note) still follow whole-record `rev`, so a
-  stale writer can clobber a concurrent non-security edit, and two concurrent rotations to
-  *different* identities fall back to `rev`. A full causal directory (vector clocks, or a
-  single-writer CLI-signals-daemon discipline) is the larger optional workstream — and would
-  generalize the Tier-1 `routeGen` logical generation (above) per-record, reusing its max-merge
-  discipline rather than reinventing it.
+  retired Tier-0 identity/sealing key, and could clobber a concurrent non-security edit. Both
+  are fixed. `mergeByRevision` now reconciles each record through `mergeRecord`, using the
+  writer's baseline as the causal common ancestor: it classifies each side by whether its `rev`
+  moved past the fork point, and on true concurrency (both moved) merges *per field*. The
+  identity/seal security unit keeps the High-1 guard (whichever side rotated carries the
+  identity+seal unit; a same-identity seal is a fail-closed 3-way merge —
+  `directory.js` sameCanonicalKey/sealUnit/mergeSecurityUnit), and the non-security fields
+  (profile triple, addresses, lastSeen, note, v, conflicts) go through a per-field 3-way content
+  diff against the baseline (`mergeFields`): only-one-side-changed keeps that side, so a stale
+  higher-`rev` writer can no longer clobber a concurrent edit to a field it never touched;
+  a same-field conflict resolves deterministically to disk (the committed side). The last
+  `rev`-fallback case is closed too: **two concurrent rotations to *different* identities now
+  fail closed** to the disk identity (first committed under the lock) with the seal cleared
+  (reverify posture, sends refuse) and the competing key surfaced in `conflicts`, rather than
+  an arbitrary `rev` pick. `rev` remains, still bumped, as the legacy comparator (no baseline)
+  and a monotone floor.
+  - **Deferred: a full per-record vector clock.** Designed and set aside. Under the current
+    single-lock write model every commit is totally ordered, so each record's committed history
+    is linear and "concurrent" means exactly "one uncommitted CLI branch vs. the committed
+    line" — whose fork point is already the baseline. A bounded vector clock for this system is
+    therefore provably one component wide and information-equivalent to `rev` + baseline; it
+    buys nothing today. It would earn its place only in an **ancestor-less** merge: two separate
+    state directories syncing, or a phone and a laptop exchanging *local* directory state with no
+    shared baseline. The on-disk record can gain a `vc` keyed-by-writer object then without a
+    format change (it is local merge metadata, never gossiped, never signed). This would also
+    generalize the Tier-1 `routeGen` logical generation (above) per-record, reusing its max-merge
+    discipline rather than reinventing it.
 - **A keyless current record does not drop an approved routed key, deliberately.** If a
   discovered record for a destination arrives with no sealing key, an already-approved key
   is kept — because a relay can replay an *old* keyless record, and letting that drop an

@@ -22,6 +22,7 @@ import {
   makePeerRecord,
   MAX_CONFLICTS,
   mergePeerRecord,
+  normalizeAddresses,
   publicRecord,
   TARGET_BINDING_VERSION,
 } from "./peerRecord.js";
@@ -254,9 +255,12 @@ function asRecord(custom) {
  * would silently revert whatever a daemon or another terminal committed since —
  * a `block`, a `trust` change, a `gate` rotation the slow writer never saw. So
  * each top-level key is taken from disk unless this command changed it from the
- * baseline, and admitted peers are revision-merged with deletions as tombstones.
+ * baseline, and admitted peers go through the per-record causal merge (rev vs
+ * baseline; per-field 3-way for non-security fields; High-1 unit for
+ * identity/seal) with deletions as tombstones.
  *
- * Pure and exported for testing.
+ * Pure except for the one `Date.now()` in `mergeByRevision`'s concurrent-different-rotation
+ * conflict append (see there). Exported for testing.
  *
  * @param {any} onDisk state read inside the write lock (current truth)
  * @param {any} baseline state this process read at startup
@@ -399,16 +403,22 @@ export function reconcileBaseline(stored, snapshot) {
 }
 
 /**
- * Merge two views of the admitted set by per-record revision.
+ * Merge two views of the admitted set by per-record causal merge (rev vs
+ * baseline; per-field 3-way for non-security fields; High-1 unit for
+ * identity/seal).
  *
- * Every mutation bumps a monotone `rev` (see `commit`), so the higher `rev` wins
- * per peer and a stale snapshot cannot overwrite newer state. `bindingSeen`
- * (max) and `sealRequired` (or) are monotone floors that never regress even if a
- * concurrent edit wins the revision; the sealing key and any conflict follow
- * `rev`, so a deliberate rotation or `acceptSealKey` (both higher-rev) can change
- * them. A revision tie resolves to disk — the merging process is the staler
- * reader, so it does not overwrite a concurrent committed edit it happens to
- * match. Fails closed for sealing (back to the floor), never open.
+ * Each record present on both sides is reconciled by `mergeRecord`: the writer's
+ * `baseline` is the causal common ancestor, so a side that actually advanced past
+ * it (by `rev`) is told apart from one that merely carries a locally-higher op
+ * count. When both advanced it is true concurrency and the record is merged
+ * per-field (the identity/seal security unit by the High-1 guard, the
+ * non-security fields by a 3-way content diff against the baseline), so a stale
+ * writer can no longer clobber a concurrent edit to a field it never touched.
+ * `bindingSeen` (max), `sealRequired` (or) and `rev` (max) are monotone floors
+ * that never regress. Without a baseline (direct callers, or a name concurrently
+ * added by both sides) the legacy rule holds: higher `rev` wins, a tie resolves
+ * to disk (the merging process is the staler reader). Fails closed for sealing
+ * (back to the floor), never open.
  *
  * Deletion is a *tombstone*, not absence: a one-sided peer is kept by default
  * (so a stale writer cannot drop a peer another added), which would otherwise
@@ -418,7 +428,9 @@ export function reconcileBaseline(stored, snapshot) {
  * *added* it but dropped when another writer *forgot* it while this one ran
  * (otherwise a slow walk resurrects a just-revoked peer).
  *
- * Pure and exported for direct testing.
+ * Pure except for one `Date.now()`: two concurrent rotations to *different* identities
+ * timestamp the losing key appended to `conflicts` (a display/ordering field only, and
+ * no injected clock reaches this deep merge path). Exported for direct testing.
  *
  * @param {any[]} onDisk current on-disk admitted records
  * @param {any[]} snap this writer's admitted snapshot
@@ -441,65 +453,316 @@ export function mergeByRevision(onDisk, snap, { forgotten = new Set(), baselineN
       if (!baselineNames.has(p.name)) byName.set(p.name, p);
       continue;
     }
-    // Causal guard on the identity key. `rev` is a local op-count, not a causal clock, so a
-    // stale writer that made several mutations can reach a higher `rev` than a concurrent
-    // one-step identity rotation. Using the baseline (this writer's common ancestor) as a
-    // reference: if the ON-DISK record advanced past this writer's baseline AND holds a
-    // DIFFERENT identity than the writer's baseline while the writer did NOT itself rotate,
-    // then disk carries a rotation the writer never saw — keep it (identity and its sealing
-    // posture, which is only valid for that identity) rather than let a stale, higher-`rev`
-    // snapshot restore the retired identity. Without a baseline the classic higher-rev-wins
-    // holds, so direct callers are unaffected.
-    const base = baselineByName.get(p.name);
-    let winner = (Number(p.rev) || 0) > (Number(was.rev) || 0) ? p : was;
-    /** @type {any} */
-    let sealOverride = null;
-    if (base && base.publicKey) {
-      const diskRotated = Boolean(was.publicKey) && !sameCanonicalKey(was.publicKey, base.publicKey);
-      const iRotated = Boolean(p.publicKey) && !sameCanonicalKey(p.publicKey, base.publicKey);
-      // The identity key is causal, both ways. Whichever side rotated (and only that side
-      // did) carries the identity+seal unit, regardless of `rev`: a stale higher-`rev`
-      // snapshot cannot undo a concurrent rotation, and this writer's own rotation is not
-      // lost to a concurrent higher-`rev` edit that never touched the identity. (A rotation
-      // bumps `rev`, so a differing identity always implies the other side advanced.)
-      if (diskRotated && !iRotated) winner = was;
-      else if (iRotated && !diskRotated) winner = p;
-      else if (!diskRotated && !iRotated) {
-        // Same identity on both sides: 3-way merge the *sealing key* against the baseline,
-        // both directions, so neither a stale writer nor a concurrent higher-`rev` edit can
-        // restore a retired key. Disagreeing concurrent keys fail closed to a conflict.
-        const diskSealChanged = !sameSeal(was, base);
-        const iSealChanged = !sameSeal(p, base);
-        if (diskSealChanged && iSealChanged) {
-          if (was.sealPublicKey && p.sealPublicKey && !sameCanonicalKey(was.sealPublicKey, p.sealPublicKey)) {
-            sealOverride = { ...sealUnit(was), sealSeen: true, sealConflict: normalizeKey(p.sealPublicKey) };
-          }
-          // else a removal or the same key on both — leave the winner's seal (synthetic today).
-        } else if (diskSealChanged) sealOverride = sealUnit(was); // disk changed it, this writer did not
-        else if (iSealChanged) sealOverride = sealUnit(p); // this writer changed it, disk did not
-      }
-    }
-    const loser = winner === p ? was : p;
-    // Floors are raised from the loser too, so even a disk-winning tie can differ
-    // from the disk record if the snapshot carried a higher floor — that is the
-    // floor doing its job (never regress), not a merge instability. In practice a
-    // floor change bumps `rev`, so the winner already holds it.
-    const bindingSeen = Math.max(Number(winner.bindingSeen) || 0, Number(loser.bindingSeen) || 0);
-    const sealRequired = Boolean(winner.sealRequired || loser.sealRequired);
-    // Start from the winner, then replace the seal unit coherently if the 3-way merge chose
-    // a different one (a plain spread cannot *remove* a field, so strip then re-apply).
-    const merged = { ...winner };
-    if (sealOverride) {
-      delete merged.sealPublicKey;
-      delete merged.sealSeen;
-      delete merged.sealConflict;
-      Object.assign(merged, sealOverride);
-    }
-    if (bindingSeen > 0) merged.bindingSeen = bindingSeen;
-    if (sealRequired) merged.sealRequired = true;
-    byName.set(p.name, merged);
+    // On both sides: `was` is disk (committed under the lock), `p` is this writer's
+    // snapshot, and `baselineByName.get` is their causal common ancestor. `mergeRecord`
+    // classifies against that ancestor and, on true concurrency, merges per field.
+    byName.set(p.name, mergeRecord(was, p, baselineByName.get(p.name)));
   }
   return [...byName.values()];
+}
+
+/** Own-property presence test, shared by the causal-merge helpers.
+ * @param {any} o @param {string} k */
+const hasField = (o, k) => Object.prototype.hasOwnProperty.call(o ?? {}, k);
+
+/** Whether `obj`'s field `f` differs from the baseline `base`, presence-aware
+ * (a field present on one and absent on the other is a change), value by JSON —
+ * the same discipline `reconcilePersist` uses for its top-level diff. A missing
+ * `base` treats every present-and-differing field as changed.
+ * @param {any} obj @param {any} base @param {string} f */
+function fieldChanged(obj, base, f) {
+  const op = hasField(obj, f);
+  const bp = base ? hasField(base, f) : false;
+  if (op !== bp) return true;
+  return JSON.stringify(obj?.[f]) !== JSON.stringify(base?.[f]);
+}
+
+/** Copy `f` from `side` onto `merged`, or remove it if absent on `side` (a plain
+ * spread cannot *remove* a field, so a deletion must delete).
+ * @param {any} merged @param {any} side @param {string} f */
+function setOrDelete(merged, side, f) {
+  if (hasField(side, f)) merged[f] = side[f];
+  else delete merged[f];
+}
+
+/** The larger of two maybe-finite numbers, `null` when neither is finite (the
+ * shape `normalizeAddresses` expects for `lastOk`/`learnedAt`). */
+function maxNum(/** @type {any} */ x, /** @type {any} */ y) {
+  const nx = Number.isFinite(x) ? x : null;
+  const ny = Number.isFinite(y) ? y : null;
+  if (nx === null) return ny;
+  if (ny === null) return nx;
+  return Math.max(nx, ny);
+}
+
+/** Union two address lists by `${transport} ${value}`, taking the max `lastOk`
+ * and `learnedAt` per entry, then re-rank and cap via `normalizeAddresses`.
+ * There is no delete path for addresses (eviction is the cap), so union is exact.
+ * @param {any} a @param {any} b */
+function unionAddresses(a, b) {
+  /** @type {Map<string, any>} */
+  const map = new Map();
+  const add = (/** @type {any} */ list) => {
+    for (const addr of Array.isArray(list) ? list : []) {
+      if (!addr || addr.value == null) continue;
+      const key = `${addr.transport} ${addr.value}`;
+      const prev = map.get(key);
+      if (!prev) map.set(key, { ...addr });
+      else map.set(key, { ...prev, lastOk: maxNum(prev.lastOk, addr.lastOk), learnedAt: maxNum(prev.learnedAt, addr.learnedAt) });
+    }
+  };
+  add(a);
+  add(b);
+  return normalizeAddresses([...map.values()]);
+}
+
+/** Union two conflict lists by canonical key: `count = max`, `lastSeen = max`,
+ * `firstSeen = min`, `via` first seen; newest first, capped at `MAX_CONFLICTS`.
+ * @param {any} a @param {any} b */
+function unionConflicts(a, b) {
+  /** @type {Map<string, any>} */
+  const map = new Map();
+  const add = (/** @type {any} */ list) => {
+    for (const c of Array.isArray(list) ? list : []) {
+      if (!c || !c.key) continue;
+      const k = normalizeKey(c.key) ?? c.key;
+      const prev = map.get(k);
+      if (!prev) map.set(k, { ...c });
+      else {
+        map.set(k, {
+          ...prev,
+          count: Math.max(Number(prev.count) || 0, Number(c.count) || 0),
+          lastSeen: Math.max(Number(prev.lastSeen) || 0, Number(c.lastSeen) || 0),
+          firstSeen: Math.min(
+            Number.isFinite(prev.firstSeen) ? prev.firstSeen : Infinity,
+            Number.isFinite(c.firstSeen) ? c.firstSeen : Infinity,
+          ),
+          ...(prev.via ? { via: prev.via } : c.via ? { via: c.via } : {}),
+        });
+      }
+    }
+  };
+  add(a);
+  add(b);
+  return [...map.values()].sort((x, y) => (Number(y.lastSeen) || 0) - (Number(x.lastSeen) || 0)).slice(0, MAX_CONFLICTS);
+}
+
+/** Append a competing identity key to `merged.conflicts` (deduped by canonical
+ * key), so a concurrent rotation to a different identity is visible in
+ * `hail peers`. Newest first, capped.
+ * @param {any} merged @param {string | null} key */
+function appendConflict(merged, key) {
+  if (!key) return;
+  const nk = normalizeKey(key);
+  if (!nk) return;
+  const list = Array.isArray(merged.conflicts) ? [...merged.conflicts] : [];
+  if (list.some((/** @type {any} */ c) => c.key && normalizeKey(c.key) === nk)) return;
+  const now = Date.now();
+  list.push({ key: nk, firstSeen: now, lastSeen: now, count: 1 });
+  merged.conflicts = list.sort((x, y) => (Number(y.lastSeen) || 0) - (Number(x.lastSeen) || 0)).slice(0, MAX_CONFLICTS);
+}
+
+/** The elevation triple that must stay coherent (an expiring raise is meaningless
+ * without its window). Merged as one unit. */
+const ELEVATION_FIELDS = ["profile", "profileUntil", "profileAfter"];
+/** Fields the per-field merge must not touch: the security unit (identity/seal,
+ * merged by `mergeSecurityUnit`), the monotone floors, the record's own `name`,
+ * and the elevation triple (merged as a unit). Everything else — known
+ * non-security fields and any unknown field, for forward-compat — is 3-way
+ * merged by content. */
+const RESERVED_FIELDS = new Set([
+  "name",
+  "publicKey",
+  "sealPublicKey",
+  "sealSeen",
+  "sealConflict",
+  "bindingSeen",
+  "sealRequired",
+  "rev",
+  ...ELEVATION_FIELDS,
+]);
+
+/**
+ * The identity/seal *security unit*, lifted verbatim from the High-1 guard once in
+ * `mergeByRevision` and extended by one case. Returns which side's identity the
+ * merged record adopts, an optional seal override to apply coherently, whether the
+ * chosen identity differs from the baseline, and (for the new case) a competing key
+ * to surface in `conflicts`.
+ *
+ * The identity key is causal, both ways: whichever side rotated (and only that side
+ * did) carries the identity+seal unit regardless of `rev`. Same identity on both →
+ * a fail-closed 3-way merge of the sealing key against the baseline. The one new
+ * case — two concurrent rotations to *different* identities — fails closed to the
+ * disk identity (first committed under the lock), keeps disk's cleared seal so the
+ * posture stays `reverify`, and lists the loser's key. Neither concurrent rotation
+ * can be a resurrection (both differ from the retired baseline identity), so
+ * High-1's no-resurrection property is preserved by construction.
+ *
+ * @param {any} disk @param {any} mine @param {any} base
+ * @returns {{identityFrom: any, sealOverride: any, conflictKey: string | null, identityChanged: boolean}}
+ */
+function mergeSecurityUnit(disk, mine, base) {
+  /** @type {{identityFrom: any, sealOverride: any, conflictKey: string | null, identityChanged: boolean}} */
+  const out = { identityFrom: disk, sealOverride: null, conflictKey: null, identityChanged: false };
+  if (!(base && base.publicKey)) return out; // no baseline identity: keep disk (the committed side)
+
+  const diskRotated = Boolean(disk.publicKey) && !sameCanonicalKey(disk.publicKey, base.publicKey);
+  const mineRotated = Boolean(mine.publicKey) && !sameCanonicalKey(mine.publicKey, base.publicKey);
+
+  if (diskRotated && !mineRotated) {
+    out.identityFrom = disk; // disk carries a rotation this writer never saw
+    out.identityChanged = true;
+    return out;
+  }
+  if (mineRotated && !diskRotated) {
+    out.identityFrom = mine; // this writer's own rotation is not lost to a higher-rev disk edit
+    out.identityChanged = true;
+    return out;
+  }
+  if (diskRotated && mineRotated && !sameCanonicalKey(disk.publicKey, mine.publicKey)) {
+    // NEW: two concurrent rotations to DIFFERENT identities. Fail closed to the disk
+    // identity (first committed under the lock — the only non-arbitrary order), keep
+    // disk's (already cleared) seal so the posture stays `reverify`, and surface the
+    // losing key in `conflicts` so `hail peers` shows it and the operator can re-rotate.
+    out.identityFrom = disk;
+    out.identityChanged = true;
+    out.sealOverride = sealUnit(disk);
+    out.conflictKey = normalizeKey(mine.publicKey);
+    return out;
+  }
+  // Same identity on both sides (neither rotated, or both rotated to the SAME new
+  // identity): 3-way merge the *sealing key* against the baseline, both directions,
+  // so neither a stale writer nor a concurrent higher-`rev` edit can restore a
+  // retired key. Disagreeing concurrent keys fail closed to a conflict.
+  const diskSealChanged = !sameSeal(disk, base);
+  const mineSealChanged = !sameSeal(mine, base);
+  if (diskSealChanged && mineSealChanged) {
+    if (disk.sealPublicKey && mine.sealPublicKey && !sameCanonicalKey(disk.sealPublicKey, mine.sealPublicKey)) {
+      out.sealOverride = { ...sealUnit(disk), sealSeen: true, sealConflict: normalizeKey(mine.sealPublicKey) };
+    }
+    // else a removal or the same key on both — leave the winner's seal (synthetic today).
+  } else if (diskSealChanged) out.sealOverride = sealUnit(disk);
+  else if (mineSealChanged) out.sealOverride = sealUnit(mine);
+  if (diskRotated && mineRotated) out.identityChanged = true; // both rotated to the same new identity
+  return out;
+}
+
+/** Reconcile `merged.conflicts` from `disk` and `mine` against `base`. A rotation
+ * or accept deliberately CLEARS conflicts (they are relative to an identity), so
+ * when the identity winner changed identity the winner's list stands (already on
+ * `merged`); otherwise 3-way, unioning by key when both sides added one.
+ * @param {any} merged @param {any} disk @param {any} mine @param {any} base @param {boolean} identityChanged */
+function mergeConflictsField(merged, disk, mine, base, identityChanged) {
+  if (identityChanged) return; // keep the identity winner's list (already on `merged`)
+  const dCh = fieldChanged(disk, base, "conflicts");
+  const mCh = fieldChanged(mine, base, "conflicts");
+  if (dCh && mCh) {
+    const union = unionConflicts(disk.conflicts, mine.conflicts);
+    if (union.length) merged.conflicts = union;
+    else delete merged.conflicts;
+  } else if (mCh) setOrDelete(merged, mine, "conflicts");
+  else setOrDelete(merged, disk, "conflicts"); // disk-only or neither → disk
+}
+
+/**
+ * Merge the non-security fields of two concurrent versions by a 3-way content diff
+ * against the baseline. Only-one-side-changed → that side; both-changed-equal →
+ * disk; both-changed-different → the per-field rule: `lastSeen`/`v` take the max,
+ * `addresses` union, `conflicts` follow a rotation else union, the elevation triple
+ * moves as one unit (disk wins), `note` and any unknown field go to the committed
+ * (disk) side. Mutates `merged` in place with delete-then-assign so a removal removes.
+ *
+ * @param {any} merged @param {any} disk @param {any} mine @param {any} base @param {boolean} identityChanged
+ */
+function mergeFields(merged, disk, mine, base, identityChanged) {
+  // The elevation triple moves as one coherent unit.
+  const tripleChanged = (/** @type {any} */ o) => ELEVATION_FIELDS.some((f) => fieldChanged(o, base, f));
+  const dTriple = tripleChanged(disk);
+  const mTriple = tripleChanged(mine);
+  const tripleSide = mTriple && !dTriple ? mine : disk; // both or neither → disk
+  for (const f of ELEVATION_FIELDS) setOrDelete(merged, tripleSide, f);
+
+  const fields = new Set([...Object.keys(disk ?? {}), ...Object.keys(mine ?? {})].filter((f) => !RESERVED_FIELDS.has(f)));
+  for (const f of fields) {
+    if (f === "conflicts") {
+      mergeConflictsField(merged, disk, mine, base, identityChanged);
+      continue;
+    }
+    const dCh = fieldChanged(disk, base, f);
+    const mCh = fieldChanged(mine, base, f);
+    if (dCh && mCh) {
+      if (hasField(disk, f) === hasField(mine, f) && JSON.stringify(disk[f]) === JSON.stringify(mine[f])) {
+        setOrDelete(merged, disk, f); // both changed to the same value → disk
+      } else if (f === "lastSeen" || f === "v") {
+        const mx = Math.max(Number(disk[f]) || 0, Number(mine[f]) || 0);
+        if (mx > 0) merged[f] = mx;
+        else setOrDelete(merged, disk, f);
+      } else if (f === "addresses") {
+        merged[f] = unionAddresses(disk[f], mine[f]);
+      } else {
+        setOrDelete(merged, disk, f); // note + any unknown field → the committed (disk) side
+      }
+    } else if (dCh) setOrDelete(merged, disk, f);
+    else if (mCh) setOrDelete(merged, mine, f);
+    else setOrDelete(merged, disk, f); // neither changed → disk canonical
+  }
+}
+
+/**
+ * Reconcile one record present on both sides against their causal common ancestor
+ * `base` (this writer's baseline, or `undefined` for a direct caller / a name both
+ * sides added concurrently). Classifies by `rev` movement vs the baseline and, on
+ * true concurrency (both advanced), merges per field; otherwise the whole-record
+ * winner stands with the monotone floors raised from the loser (legacy behaviour).
+ *
+ * @param {any} disk on-disk record (committed under the lock)
+ * @param {any} mine this writer's record
+ * @param {any} base baseline record, or `undefined`
+ */
+function mergeRecord(disk, mine, base) {
+  let decision;
+  if (base) {
+    const diskAdvanced = (Number(disk.rev) || 0) !== (Number(base.rev) || 0);
+    const mineAdvanced = (Number(mine.rev) || 0) !== (Number(base.rev) || 0);
+    if (diskAdvanced && mineAdvanced) decision = "merge"; // TRUE concurrency
+    else if (diskAdvanced) decision = "disk";
+    else if (mineAdvanced) decision = "mine";
+    else decision = "disk"; // identical lineage; disk is canonical
+  } else {
+    // No baseline: legacy behaviour — higher rev wins, a tie resolves to disk.
+    decision = (Number(mine.rev) || 0) > (Number(disk.rev) || 0) ? "mine" : "disk";
+  }
+
+  if (decision !== "merge") {
+    const winner = decision === "mine" ? mine : disk;
+    const loser = decision === "mine" ? disk : mine;
+    // Raise the monotone floors from the loser too, so even a disk-winning tie can
+    // differ from the disk record if the snapshot carried a higher floor — the floor
+    // doing its job (never regress), not a merge instability.
+    const merged = { ...winner };
+    const bindingSeen = Math.max(Number(winner.bindingSeen) || 0, Number(loser.bindingSeen) || 0);
+    if (bindingSeen > 0) merged.bindingSeen = bindingSeen;
+    if (winner.sealRequired || loser.sealRequired) merged.sealRequired = true;
+    return merged;
+  }
+
+  // True concurrency: assemble from the identity winner, apply the seal unit, merge
+  // the non-security fields per field, then raise the monotone floors.
+  const sec = mergeSecurityUnit(disk, mine, base);
+  const merged = { ...sec.identityFrom };
+  if (sec.sealOverride) {
+    delete merged.sealPublicKey;
+    delete merged.sealSeen;
+    delete merged.sealConflict;
+    Object.assign(merged, sec.sealOverride);
+  }
+  mergeFields(merged, disk, mine, base, sec.identityChanged);
+  if (sec.conflictKey) appendConflict(merged, sec.conflictKey);
+  const bindingSeen = Math.max(Number(disk.bindingSeen) || 0, Number(mine.bindingSeen) || 0);
+  if (bindingSeen > 0) merged.bindingSeen = bindingSeen;
+  if (disk.sealRequired || mine.sealRequired) merged.sealRequired = true;
+  merged.rev = Math.max(Number(disk.rev) || 0, Number(mine.rev) || 0);
+  return merged;
 }
 
 /** The seal-relevant fields of a record, present-only (for a coherent add-or-remove).
