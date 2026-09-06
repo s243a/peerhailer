@@ -1075,6 +1075,10 @@ export function createDaemon({
         const dest = String(body.dest);
         if (url.pathname === "/api/route/discover") {
           try {
+            // The probe payload MUST be literal `null` (data-free). `sendUnchecked`'s floor
+            // pre-flight exempts `payload == null` from demotion; a non-null probe (e.g. `""`)
+            // to a floor-advertising destination would be demoted and refused LOCALLY, so after
+            // a key discard nothing would re-teach the key — a re-discovery deadlock. Keep it null.
             await router.send(dest, null, { public: true });
           } catch (error) {
             if (error instanceof RoutedMessageInputError) return send(response, 400, { error: error.message });

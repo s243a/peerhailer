@@ -358,6 +358,14 @@ TCB expansion. Ships `yggdrasil-delegate` / `cjdns-delegate` families.
     then `hail route discover`, verify the fingerprint out of band, and `hail route
     approve --seal-key-file <expected>`. Discard only deletes local key state; it never
     binds a key and never lifts the destination's downgrade floor.
+  - A destination running `--require-sealed` **advertises** that floor on its signed
+    discovery record (`routed.requireSealed`, advisory), so `hail route status` shows
+    `— requires sealed` once you have discovered it. A `--public` send to such a
+    destination is then sent **sealed** if you have approved its key, or refused locally
+    `seal-refused:floor-advertised` if not (approve its key with `hail route approve` and
+    resend). `hail route discover` (a data-free probe) is never affected. The destination's
+    own delivery check is still the mechanism; the advertisement only lets an honest sender
+    seal proactively instead of paying a doomed `cleartext-refused` round trip.
 - **Routing attacks** (blackhole, grayhole, misdirection): mitigated by first-party
   success/RTT measurement feeding the next-hop weights (a peer that silently drops
   loses weight fast), by trust-weighting, and by keeping the "never relay toward a

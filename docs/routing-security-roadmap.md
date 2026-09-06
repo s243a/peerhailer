@@ -342,10 +342,17 @@ make the destination accept cleartext if the destination checks its **current lo
 policy at delivery**:
 
 1. destination stores `requireSealedRouting` locally (**implemented**);
-2. the field rides its signed public record (advisory to honest senders) — **not yet
-   implemented**: the discovery record is key-only, so an honest sender cannot pre-flight
-   the floor and instead learns it from a `cleartext-refused` refusal (which now carries
-   the destination's key so the sender can retry sealed);
+2. the field rides its signed public record (advisory to honest senders) — **implemented**:
+   the key-only discovery record carries `routed.requireSealed` under the same identity
+   signature (`src/routedDiscoveryRecord.js`; the field is authenticated by the unchanged
+   `verifyRecord`, which signs over the raw record, yet invisible to old readers, which strip
+   it — byte-identical output when the floor is off, so no flag day). An honest sender that has
+   learned the floor **demotes** an explicit `public` *application-data* send to confidential
+   (seals if it holds an approved key, else refuses locally `seal-refused:floor-advertised`);
+   the data-free `null` discovery probe is **never** demoted (it is how the record/key/floor
+   are learned — demoting it would deadlock discovery, M3b-F1/M3a-F3). On the sender the floor
+   is latest-verified-wins, recovered by a probe or `hail route discard`. A sender still learns
+   the floor from a `cleartext-refused` refusal too (which carries the same record);
 3. the signed manifest binds `payloadMode` (**implemented**);
 4. the destination rejects `payloadMode = clear` whenever its local floor requires
    sealing — the local check wins over any record a sender presents;
@@ -393,6 +400,15 @@ post-authentication in one change so the gate is not split.
 
 Lowering the floor is a deliberate destination-side change; a replayed remote record never lowers
 local enforcement.
+
+On the *sender*, the advertised floor is latest-verified-wins, so a replayed genuine record flips
+the stored floor **either way**, both bounded and neither a confidentiality loss: a replayed
+*older, pre-floor* record clears a learned floor (the next explicit-`public` app-data send crosses
+relays and is refused *remotely*, re-teaching the floor — one wasted round trip, the pre-change
+path); a replayed *newer, floor-on* record after the destination lowered its floor over-seals or
+refuses locally until the next `null` probe or `hail route discard` re-derives the current value.
+A Tier-1 conflict also drops the floor (the entry holds no record). In every case remote
+enforcement is the mechanism and the sender re-learns from a refusal.
 
 ## Milestones (reordered per the review)
 

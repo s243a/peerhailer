@@ -33,7 +33,7 @@
  * @module routedKeyStore
  */
 import { keyId } from "./routeManifest.js";
-import { verifyRecord } from "./peerRecord.js";
+import { verifyDiscoveryRecord } from "./routedDiscoveryRecord.js";
 import { sameKey } from "./identity.js";
 
 /** Ceiling on tracked destinations; the oldest *pending* entry is evicted when full.
@@ -57,7 +57,9 @@ const isKeyId = (v) => typeof v === "string" && v.length === SHA256_B64URL_LEN &
  * see the retirement?) instead of by a wall clock that can run backward. A missing `gen`
  * (`undefined`) marks a pre-upgrade claim, which the tombstone comparison treats as legacy;
  * a missing `at` loads as 0.
- * @typedef {{ id: string, sealKey: string | null, approved: boolean, conflict: boolean, name: string, record: any, at: number, gen: number | undefined }} StoredEntry
+ * @typedef {{ id: string, sealKey: string | null, approved: boolean, conflict: boolean, name: string, record: any, at: number, gen: number | undefined, requireSealed?: boolean }} StoredEntry
+ * `requireSealed` is the destination's advertised confidentiality floor, derived from `record`;
+ * persisted for readability but **overridden on load** by the re-verified record, exactly like `sealKey`.
  */
 
 /**
@@ -78,6 +80,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
    *   record: any,              // the signed self-record the key came from (null on conflict)
    *   at: number,               // when this entry last (re)established its claim (diagnostic)
    *   gen: number | undefined,  // the logical generation of that claim (undefined = pre-upgrade)
+   *   requireSealed: boolean,   // advertised floor (advisory); false once conflicted
    * }>}
    */
   const entries = new Map();
@@ -92,7 +95,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
   };
 
   /** @returns {StoredEntry[]} */
-  const serialize = () => [...entries].map(([id, e]) => ({ id, sealKey: e.sealKey, approved: e.approved, conflict: e.conflict, name: e.name, record: e.record ?? null, at: e.at ?? 0, gen: e.gen }));
+  const serialize = () => [...entries].map(([id, e]) => ({ id, sealKey: e.sealKey, approved: e.approved, conflict: e.conflict, name: e.name, record: e.record ?? null, at: e.at ?? 0, gen: e.gen, requireSealed: e.requireSealed === true }));
   /**
    * Persist the current snapshot, best-effort. A persist failure must not propagate out of
    * observe/approve/forget (breaking a Tier-0 handler mid-flight, or failing a send() for a
@@ -129,11 +132,13 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       const at = typeof it.at === "number" && Number.isFinite(it.at) ? it.at : 0;
       const g = typeof it.gen === "number" && Number.isFinite(it.gen) && it.gen >= 0 ? Math.floor(it.gen) : undefined;
       if (it.conflict === true) {
-        entries.set(it.id, { sealKey: null, approved: false, conflict: true, name: typeof it.name === "string" ? it.name : "", record: null, at, gen: g });
+        entries.set(it.id, { sealKey: null, approved: false, conflict: true, name: typeof it.name === "string" ? it.name : "", record: null, at, gen: g, requireSealed: false });
         continue;
       }
       if (!it.record) continue; // a usable/pending entry with no record to re-prove is dropped
-      const rec = verifyRecord(it.record, null);
+      // Re-verify AND re-derive the advertised floor from the record, so a hand-edited sibling
+      // `it.requireSealed` is ignored exactly as a tampered `it.sealKey` is.
+      const rec = verifyDiscoveryRecord(it.record);
       if (!rec.ok) continue;
       let identityKeyId;
       try {
@@ -144,7 +149,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       if (identityKeyId !== it.id) continue;
       const sealKey = rec.record.sealPublicKey ?? null;
       if (!sealKey) continue;
-      entries.set(it.id, { sealKey, approved: it.approved === true, conflict: false, name: rec.record.name, record: it.record, at, gen: g });
+      entries.set(it.id, { sealKey, approved: it.approved === true, conflict: false, name: rec.record.name, record: it.record, at, gen: g, requireSealed: rec.floor });
     }
   }
 
@@ -177,7 +182,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
      */
     observe(targetKeyId, envelope) {
       if (!isKeyId(targetKeyId)) return "unverified";
-      const rec = verifyRecord(envelope, null);
+      const rec = verifyDiscoveryRecord(envelope);
       if (!rec.ok) return "unverified";
 
       // Bind the record to the routing target: only the destination itself could have
@@ -202,12 +207,23 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
         // Keep the signed envelope so the binding is re-provable on restart, not just trusted.
         // Stamp the logical generation (and `at`, diagnostic) so a re-discovery AFTER an offline
         // forget causally outranks that forget's tombstone.
-        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name, record: envelope, at: Date.now(), gen: stampGen() });
+        entries.set(targetKeyId, { sealKey, approved: false, conflict: false, name: rec.record.name, record: envelope, at: Date.now(), gen: stampGen(), requireSealed: rec.floor });
         persistNow();
         return "record-carried";
       }
       if (existing.conflict) return "record-conflict"; // sticky — and now persisted, so sticky across restarts too
       if (sameKey(existing.sealKey, sealKey)) {
+        // Same key, so approval stands — but the destination may have raised or lowered its
+        // advertised floor (or a relay replayed the other value; both directions are safe — the
+        // destination's own delivery check is the mechanism). Latest-verified-record wins for the
+        // floor: keep the envelope that carries the current value so a restart re-derives it. A
+        // data-free probe re-learns it and `discardRoutedSeal` is the reverse door — no raise-only
+        // ratchet, which would need a new "clear the floor" surface to undo a legitimate lowering.
+        if (existing.requireSealed !== rec.floor) {
+          existing.requireSealed = rec.floor;
+          existing.record = envelope;
+          persistNow(); // advisory state, never restricting
+        }
         return existing.approved ? "record-approved" : "record-carried"; // adds no authority
       }
       // A different sealing key for the same target: ambiguous hearsay. Refuse to pick,
@@ -216,6 +232,7 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
       existing.approved = false;
       existing.conflict = true;
       existing.record = null; // a conflict seals to nothing; it carries no key to re-prove
+      existing.requireSealed = false; // and holds no record, so advertises no floor
       existing.at = Date.now(); // the conflict is a fresh, restricting claim (diagnostic)
       existing.gen = stampGen(); // and a fresh logical generation, so it outranks any older tombstone
       // A restricting transition: it VOIDS an approved key. Unlike the adding path, a
@@ -267,6 +284,18 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
     },
 
     /**
+     * Whether the destination's signed record advertised a confidentiality floor
+     * (`routed.requireSealed`). Advisory to the send path — the destination enforces at delivery
+     * regardless. False for a conflict (no record held) or an unknown target.
+     * @param {string} targetKeyId
+     * @returns {boolean}
+     */
+    recordFloor(targetKeyId) {
+      const e = entries.get(targetKeyId);
+      return Boolean(e && !e.conflict && e.requireSealed === true);
+    },
+
+    /**
      * The Tier-1 view of a destination. `record-approved` is usable; `record-carried` is
      * discovered-but-pending (awaiting approval); the rest are self-explanatory. Never
      * `verified`: that is a Tier-0 word and belongs to the directory.
@@ -289,12 +318,14 @@ export function createRoutedKeyStore({ maxEntries = DEFAULT_MAX_ENTRIES, initial
      * chooses wearing a freshness label.
      *
      * @param {string} targetKeyId
-     * @returns {{ sealKey: string, name: string, approved: boolean } | null}
+     * @returns {{ sealKey: string, name: string, approved: boolean, requireSealed?: boolean } | null}
      */
     recordDetail(targetKeyId) {
       const e = entries.get(targetKeyId);
       if (!e || e.conflict || !e.sealKey) return null;
-      return { sealKey: e.sealKey, name: e.name, approved: e.approved };
+      // `requireSealed` present-iff-true, matching `sealPublicKey`/`v`/`note` style, so existing
+      // deepEquals on `recordDetail` hold when no floor is advertised.
+      return { sealKey: e.sealKey, name: e.name, approved: e.approved, ...(e.requireSealed ? { requireSealed: /** @type {const} */ (true) } : {}) };
     },
 
     /**

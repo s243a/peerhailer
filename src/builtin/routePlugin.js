@@ -25,7 +25,7 @@ import { openRoutedMessage, openRoutedResponse, sealRoutedResponse, wrapRoutedMe
 import { buildReceipt, signReceipt, verifyReceipt } from "../routeReceipt.js";
 import { createRoutedKeyStore } from "../routedKeyStore.js";
 import { resolveRoutedSeal } from "../routedSealResolver.js";
-import { signRecord } from "../peerRecord.js";
+import { signDiscoveryRecord } from "../routedDiscoveryRecord.js";
 import { createRouter } from "../routing.js";
 import { REFUSE } from "../plugins.js";
 
@@ -43,10 +43,12 @@ const OPEN_REFUSAL = Symbol("route.open-refusal");
 
 /**
  * Wire field: the destination piggybacks its *signed* self-record on a routed response
- * so the origin can learn its advertised sealing key (M2 Tier-1 discovery). It crosses
- * JSON, so it is a reserved string key, not a symbol. Public and self-signed: a relay
- * may drop it (the origin simply gets no Tier-1 key) or replay an older one (the store
- * catches the identity match and flags a conflict), but cannot forge a new key.
+ * so the origin can learn its advertised sealing key (M2 Tier-1 discovery) and its
+ * confidentiality floor (`routed.requireSealed`, advisory). It crosses JSON, so it is a
+ * reserved string key, not a symbol. Public and self-signed: a relay may drop it (the origin
+ * simply gets no Tier-1 key), or replay an older one (the store catches the identity match and
+ * flags a conflict), but cannot forge a new key nor add, strip, or flip the signed `routed`
+ * policy (the identity signature covers it).
  */
 export const ROUTED_RECORD_FIELD = "__routedRecord";
 
@@ -95,7 +97,7 @@ const isPlainObject = (v) => {
  *   routedKeyStore?: ReturnType<typeof createRoutedKeyStore>,
  *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); opens sealed requests, receives sealed responses — REQUIRED to originate a confidential send
  *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
- *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
+ *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery — and advertise it on the signed discovery record
  *   requireSealFrom?: (originKeyId: string) => boolean, // per-origin downgrade floor (M3a)
  *   observeSealed?: (proof: { originKeyId: string }) => void, // record a sealed delivery (M3a)
  *   newMessageId?: () => string,
@@ -245,15 +247,15 @@ export function createRoutePlugin(deps) {
   /**
    * A signed, **key-only** self-record: name, identity key, and sealing key — never our
    * addresses. Discovery is *key* discovery; handing a routed origin (and every relay on
-   * the return path) our direct addresses would undercut F2F reachability.
+   * the return path) our direct addresses would undercut F2F reachability. When this machine's
+   * confidentiality floor is on it also advertises `routed.requireSealed` so an honest sender
+   * seals proactively instead of sending doomed cleartext. Advisory: the floor `openRoutedMessage`
+   * enforces above is the mechanism, and it reads the SAME `deps.requireSealed`, so the advert and
+   * the enforcement cannot disagree within one plugin instance. Byte-identical to the old key-only
+   * record when the floor is off (Ed25519 is deterministic) — old senders are unaffected.
    */
-  const signedDiscoveryRecord = () => {
-    const self = deps.selfRecord();
-    return signRecord(
-      { name: self?.name, publicKey: self?.publicKey, sealPublicKey: self?.sealPublicKey, addresses: [], lastSeen: null },
-      deps.privateKey,
-    );
-  };
+  const signedDiscoveryRecord = () =>
+    signDiscoveryRecord({ self: deps.selfRecord(), requireSealed: deps.requireSealed === true, privateKey: deps.privateKey });
 
   /**
    * Piggyback the key-only self-record on a delivery response so the origin can learn our
@@ -463,7 +465,10 @@ export function createRoutePlugin(deps) {
   /**
    * Host-only origin facade: sign the exact serialized body, then give the opaque
    * wrapper to the engine. The outer id is deliberately null (see `relay`). Sealed by
-   * default; `opts.public` is the explicit opt-out that permits a cleartext send.
+   * default; `opts.public` is the explicit opt-out that permits a cleartext send — unless the
+   * destination's signed record advertised a confidentiality floor, in which case an
+   * application-data send is demoted to confidential; a `null` payload (discovery probe) is
+   * never demoted.
    * @param {string} dest
    * @param {any} payload
    * @param {{ttl?: number, budget?: number, public?: boolean}} [opts]
@@ -481,22 +486,40 @@ export function createRoutePlugin(deps) {
     // else REFUSES rather than leaking — a relay must not be able to strip a seal by
     // forging a dispute or evicting a key. Cleartext needs an explicit `public` opt-out.
     const tier0 = deps.tier0Seal ? deps.tier0Seal(dest) : { state: /** @type {"unverified"} */ ("unverified"), key: null };
+    // Advisory pre-flight (roadmap "Destination confidentiality floor", step 2): if the destination's
+    // signed record advertised `routed.requireSealed`, an explicit `public` send of APPLICATION DATA is
+    // demoted to confidential — sealed if we hold a usable key, refused locally otherwise — so the
+    // clear payload never leaves this node for a destination that will refuse it anyway. A DATA-FREE
+    // probe (`payload == null`) is never demoted: it is how the record, key, and floor are learned and
+    // re-learned, and demoting it would deadlock discovery (M3b-F1 / M3a-F3). Read only while Tier 0 is
+    // unverified — a Tier-0 posture forgets the Tier-1 entry (and its floor) just below. Advisory only:
+    // the destination's own `openRoutedMessage` floor stays the mechanism; a sender that never sees the
+    // advert still gets `cleartext-refused` and recovers exactly as today.
+    const isProbe = payload === null || payload === undefined;
+    const floorAdvertised = tier0.state === "unverified" && routedKeyStore.recordFloor(destinationKeyId);
+    const demoted = opts.public === true && !isProbe && floorAdvertised;
     const target = resolveRoutedSeal({
       tier0,
       tier1: { state: routedKeyStore.recordState(destinationKeyId), key: routedKeyStore.recordSealKey(destinationKeyId) },
-      publicOk: opts.public === true,
+      publicOk: opts.public === true && !demoted,
+    });
+    /** The caller-facing seal summary; `floor:"advertised"` says the advertised floor overrode `public`. */
+    const sealSummary = (/** @type {"seal"|"refuse"|"cleartext"} */ decision, /** @type {string} */ state) => ({
+      decision, tier: target.tier, state, ...(demoted ? { floor: /** @type {const} */ ("advertised") } : {}),
     });
     // Once Tier 0 knows this peer's sealing posture, its Tier-1 entry is moot — drop it so
     // a stale key or conflict cannot linger (an authoritative walk supersedes discovery).
     if (tier0.state !== "unverified") routedKeyStore.forget(destinationKeyId);
     if (target.decision === "refuse") {
-      return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0, seal: { decision: target.decision, tier: target.tier, state: target.state } };
+      // A demoted public send names the CAUSE (the destination requires sealing); `seal.state`
+      // keeps the resolver's diagnosis (e.g. `tier1-pending`) so the fix stays visible.
+      const reason = demoted ? "seal-refused:floor-advertised" : `seal-refused:${target.state}`;
+      return { delivered: false, reason, spent: 0, seal: sealSummary("refuse", target.state) };
     }
     if (target.decision === "seal" && responseSealKey === null) {
       // A confidential send asks the destination to reply confidentially; refuse locally rather
-      // than ask for a reply we could not open (or get one withheld). Same shape as a resolver
-      // refusal so callers need one code path.
-      return { delivered: false, reason: "seal-refused:no-response-key", spent: 0, seal: { decision: "refuse", tier: target.tier, state: "no-response-key" } };
+      // than ask for a reply we could not open (or get one withheld). Same shape as a resolver refusal.
+      return { delivered: false, reason: "seal-refused:no-response-key", spent: 0, seal: sealSummary("refuse", "no-response-key") };
     }
     // Carry our own X25519 key inside the sealed request so the destination can seal its reply.
     const sealTo = target.decision === "seal" && target.key
@@ -528,7 +551,7 @@ export function createRoutePlugin(deps) {
     const settled = settleRoutedResponse(result, { expectSealed: Boolean(sealTo), destinationKeyId, messageId });
     // Surface the confidentiality decision so a caller sees whether it was sealed and at
     // which tier — not just that it was delivered (the review's pre-send disclosure).
-    return { ...settled.result, seal: { decision: target.decision, tier: target.tier, state: target.state }, receipt, responseSeal: settled.responseSeal };
+    return { ...settled.result, seal: sealSummary(target.decision, target.state), receipt, responseSeal: settled.responseSeal };
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as

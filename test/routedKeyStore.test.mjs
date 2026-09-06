@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { generateIdentity, normalizeKey } from "../src/identity.js";
 import { keyId } from "../src/routeManifest.js";
 import { signRecord } from "../src/peerRecord.js";
+import { signDiscoveryRecord } from "../src/routedDiscoveryRecord.js";
 import { createRoutedKeyStore } from "../src/routedKeyStore.js";
 
 /** A machine with an identity, a sealing key (normalized, as the store stores it), and
@@ -25,6 +26,10 @@ const machine = (name) => {
     name,
   };
 };
+
+/** A signed routed discovery record for `m`, optionally advertising its confidentiality floor. */
+const advertOf = (m, { requireSealed = false } = {}) =>
+  signDiscoveryRecord({ self: { name: m.name, publicKey: m.id.publicKey, sealPublicKey: m.id.sealPublicKey }, requireSealed, privateKey: m.id.privateKey });
 
 /** A signed self-record for `m`, optionally with a substituted sealing key or age. */
 const recordOf = (m, { sealPublicKey = m.sealPublicKey, lastSeen } = {}) =>
@@ -295,4 +300,77 @@ test("a tampered sealKey field is overridden by the signed record on load", () =
     initial: [{ id: d.keyId, sealKey: attacker.sealPublicKey, record: recordOf(d), approved: true, conflict: false, name: "dest" }],
   });
   assert.equal(store.recordSealKey(d.keyId), d.sealPublicKey, "the sealing key comes from the record, not the sibling field");
+});
+
+test("a floored discovery record is learned, surfaced, and still pending until approved", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  assert.equal(store.observe(d.keyId, advertOf(d, { requireSealed: true })), "record-carried");
+  assert.equal(store.recordFloor(d.keyId), true);
+  assert.deepEqual(store.recordDetail(d.keyId), { sealKey: d.sealPublicKey, name: "dest", approved: false, requireSealed: true });
+  assert.equal(store.recordSealKey(d.keyId), null, "the floor is advisory; the key is still pending");
+  // A plain (unfloored) record advertises no floor, and recordDetail has no requireSealed key.
+  const e = machine("plain");
+  store.observe(e.keyId, advertOf(e));
+  assert.equal(store.recordFloor(e.keyId), false);
+  assert.deepEqual(store.recordDetail(e.keyId), { sealKey: e.sealPublicKey, name: "plain", approved: false });
+});
+
+test("the floor survives a restart via re-verify, and a tampered sidecar sibling is ignored", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  store.observe(d.keyId, advertOf(d, { requireSealed: true }));
+  store.approve(d.keyId);
+  const restored = createRoutedKeyStore({ initial: store.snapshot() });
+  assert.equal(restored.recordFloor(d.keyId), true, "the floor is re-derived from the record on load");
+  assert.equal(restored.recordState(d.keyId), "record-approved", "approval preserved");
+  // The floor comes from the RECORD, not the sibling field — a hand-edited sidecar cannot flip it.
+  const unfloored = advertOf(d); // record says OFF, sibling lies ON:
+  const liar = createRoutedKeyStore({ initial: [{ id: d.keyId, sealKey: d.sealPublicKey, approved: true, conflict: false, name: "dest", record: unfloored, at: 1, gen: 0, requireSealed: true }] });
+  assert.equal(liar.recordFloor(d.keyId), false, "the sibling requireSealed:true is ignored; the record says off");
+  const floored = advertOf(d, { requireSealed: true }); // record says ON, sibling lies OFF:
+  const liar2 = createRoutedKeyStore({ initial: [{ id: d.keyId, sealKey: d.sealPublicKey, approved: true, conflict: false, name: "dest", record: floored, at: 1, gen: 0, requireSealed: false }] });
+  assert.equal(liar2.recordFloor(d.keyId), true, "the record says on; the sibling false is ignored");
+});
+
+test("latest-verified-record wins for the floor; approval survives, re-observe is idempotent", () => {
+  let persists = 0;
+  const store = createRoutedKeyStore({ persist: () => { persists += 1; } });
+  const d = machine("dest");
+  store.observe(d.keyId, advertOf(d, { requireSealed: true })); // learn floored
+  store.approve(d.keyId);
+  const base = persists;
+  // Same key, floor lowered -> false, approval kept, one persist.
+  assert.equal(store.observe(d.keyId, advertOf(d, { requireSealed: false })), "record-approved");
+  assert.equal(store.recordFloor(d.keyId), false);
+  assert.equal(persists, base + 1, "a floor change persists once");
+  // Idempotent re-observe of the same (unfloored) record: no floor change, no persist.
+  assert.equal(store.observe(d.keyId, advertOf(d, { requireSealed: false })), "record-approved");
+  assert.equal(persists, base + 1, "an idempotent re-observe does not persist");
+  // Raise it again; approval still stands.
+  store.observe(d.keyId, advertOf(d, { requireSealed: true }));
+  assert.equal(store.recordFloor(d.keyId), true);
+  assert.equal(store.recordState(d.keyId), "record-approved", "approval survived both floor changes");
+});
+
+test("a Tier-1 conflict clears the advertised floor", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  const other = machine("other");
+  store.observe(d.keyId, advertOf(d, { requireSealed: true }));
+  assert.equal(store.recordFloor(d.keyId), true);
+  // A different sealing key for the same identity -> conflict, and the floor goes with the record.
+  store.observe(d.keyId, recordOf(d, { sealPublicKey: other.sealPublicKey }));
+  assert.equal(store.recordState(d.keyId), "record-conflict");
+  assert.equal(store.recordFloor(d.keyId), false);
+  assert.equal(store.recordDetail(d.keyId), null);
+});
+
+test("an injected (unsigned) routed field is not learned", () => {
+  const store = createRoutedKeyStore();
+  const d = machine("dest");
+  const env = advertOf(d); // unfloored, genuinely signed
+  env.record = { ...env.record, routed: { requireSealed: true } }; // inject without re-signing
+  assert.equal(store.observe(d.keyId, env), "unverified", "the injected field breaks the signature");
+  assert.equal(store.size(), 0);
 });

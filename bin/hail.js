@@ -575,7 +575,8 @@ switch (command) {
       const fp = data.detail?.sealKey ? fingerprint(data.detail.sealKey).slice(0, 14) : "(none)";
       const name = data.detail?.name ? ` ${data.detail.name}` : "";
       const note = data.detail?.approved ? "APPROVED" : data.state === "record-conflict" ? "CONFLICT — refuses to seal" : "pending — approve to use";
-      log(`${data.state}${name}: ${fp} (${note})`);
+      const floor = data.detail?.requireSealed === true ? " — requires sealed" : "";
+      log(`${data.state}${name}: ${fp} (${note})${floor}`);
     };
 
     if (action === "discover" || action === "status") {
@@ -634,6 +635,15 @@ switch (command) {
         log(`delivered — ${sent ?? "unknown"}`);
       } else {
         log(`not delivered — ${data?.reason ?? data?.seal?.state ?? "unknown"}`);
+      }
+      // A `public` send the destination's ADVERTISED floor overrode: either sent sealed instead
+      // of clear (we held an approved key), or refused locally because we do not yet.
+      if (data?.seal?.floor === "advertised") {
+        if (data?.reason === "seal-refused:floor-advertised") {
+          log("  floor: the destination requires sealed delivery — approve its key (hail route approve) and resend");
+        } else {
+          log("  floor: the destination advertises a confidentiality floor — sent sealed instead of public");
+        }
       }
       // The signed receipt is the destination's own proof of what it did. A verified one
       // distinguishes a real delivery/refusal from a relay forgery; a missing one means no
