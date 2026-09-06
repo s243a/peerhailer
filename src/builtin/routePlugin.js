@@ -17,11 +17,11 @@
  *
  * @module builtin/routePlugin
  */
-import { createPrivateKey, randomBytes } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 
 import { keyId } from "../routeManifest.js";
 import { createRouteReplayGuard, DEFAULT_MAX_VALIDITY_MS } from "../routeReplayGuard.js";
-import { openRoutedMessage, wrapRoutedMessage } from "../routedMessage.js";
+import { openRoutedMessage, openRoutedResponse, sealRoutedResponse, wrapRoutedMessage } from "../routedMessage.js";
 import { buildReceipt, signReceipt, verifyReceipt } from "../routeReceipt.js";
 import { createRoutedKeyStore } from "../routedKeyStore.js";
 import { resolveRoutedSeal } from "../routedSealResolver.js";
@@ -59,6 +59,15 @@ export const ROUTED_RECORD_FIELD = "__routedRecord";
  */
 export const ROUTED_RECEIPT_FIELD = "__routedReceipt";
 
+/**
+ * Wire field: the destination's sealed reply to a SEALED request — the consumer's response body,
+ * framed with the request's messageId, sealed to the response key the origin carried inside its
+ * sealed request, and signed by the destination's identity key. The record and receipt beside it
+ * stay clear (signed, not secret). A relay can drop or replace it, but the origin then WITHHOLDS
+ * the reply rather than accepting clear content where it asked for sealed.
+ */
+export const ROUTED_SEALED_RESPONSE_FIELD = "__routedSealedResponse";
+
 /** A JSON-object response we can safely add a field to — not an array, Buffer, or class
  * instance, which spreading would flatten into indexed/own properties.
  * @param {any} v */
@@ -84,7 +93,7 @@ const isPlainObject = (v) => {
  *   now?: () => number,
  *   replayGuard?: ReturnType<typeof createRouteReplayGuard>,
  *   routedKeyStore?: ReturnType<typeof createRoutedKeyStore>,
- *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); enables opening sealed
+ *   sealPrivateKey?: string,   // this machine's X25519 private key (PEM); opens sealed requests, receives sealed responses — REQUIRED to originate a confidential send
  *   tier0Seal?: (destKey: string) => { state: "verified" | "conflict" | "reverify" | "unverified", key: string | null },
  *   requireSealed?: boolean,   // local confidentiality floor: refuse a clear delivery
  *   requireSealFrom?: (originKeyId: string) => boolean, // per-origin downgrade floor (M3a)
@@ -127,6 +136,12 @@ export function createRoutePlugin(deps) {
     }
     if (!usable) throw new Error("route plugin sealPrivateKey must be an X25519 private key");
   }
+  // The key a destination seals its reply to. Derived from the private key we will open with, so
+  // the two cannot drift (a misconfigured selfRecord.sealPublicKey cannot make us ask for replies
+  // we cannot read). Null when this machine holds no sealing key — then a confidential send refuses.
+  const responseSealKey = deps.sealPrivateKey === undefined
+    ? null
+    : createPublicKey(createPrivateKey(deps.sealPrivateKey)).export({ type: "spki", format: "pem" }).toString();
 
   const deliver = deps.deliver;
   const rawRouter = createRouter({
@@ -167,7 +182,8 @@ export function createRoutePlugin(deps) {
         // stale→conflict and stop spraying. A relay cannot manufacture a `seal`: the payload
         // digest is bound to the origin-signed manifest and checked first, so the sealed bytes are
         // exactly what the authenticated origin committed. Deliberately NOT
-        // `sealed`/`seal-origin-mismatch`/`body`: malformed/tampered/origin-bug, no record.
+        // `sealed`/`seal-origin-mismatch`/`body`/`response-key`: malformed/tampered/origin-bug
+        // (a bad response-sealing header the origin itself authored), no record — teaches nothing.
         if (opened.reason === "cleartext-refused" || opened.reason === "downgrade-refused" || opened.reason === "seal") {
           const record = signedDiscoveryRecord();
           return {
@@ -197,7 +213,32 @@ export function createRoutePlugin(deps) {
         originKeyId: opened.originKeyId,
       });
       const receipt = signedReceipt(opened.originKeyId, opened.messageId, opened.blockIndex, "delivered", "");
-      return attachReceipt(attachDiscovery(response), receipt);
+      if (!opened.sealed) {
+        // A clear (public) request gets a clear reply, exactly as before: the origin asked for
+        // nothing confidential.
+        return attachReceipt(attachDiscovery(response), receipt);
+      }
+      // A SEALED request gets a SEALED reply or none. Response mode follows request mode: the
+      // consumer's reply is application data too, and it must not travel back clear through the
+      // relays the sealed request bypassed. Without a response key (a legacy origin that sent no
+      // header) the body is WITHHELD — the receipt still proves delivery.
+      let outer = {};
+      if (opened.responseSealKey) {
+        try {
+          outer = {
+            [ROUTED_SEALED_RESPONSE_FIELD]: sealRoutedResponse({
+              self: deps.self,
+              privateKey: deps.privateKey,
+              responseSealKey: opened.responseSealKey,
+              messageId: opened.messageId,
+              body: response,
+            }),
+          };
+        } catch {
+          outer = {}; // oversize or unsealable reply: withhold, never fall back to clear
+        }
+      }
+      return attachReceipt(attachDiscovery(outer), receipt);
     },
   });
 
@@ -274,6 +315,50 @@ export function createRoutePlugin(deps) {
   };
 
   /**
+   * Enforce monotone response confidentiality at the origin. A sealed request expects a sealed
+   * reply; anything else on a delivered result — clear, unopenable, sealed by someone other than
+   * the routing target, or bound to another messageId — is WITHHELD: the caller gets the clear
+   * signed attachments only, never content it asked to receive sealed. Legitimate "nothing to
+   * seal" does not exist (a new destination seals even an empty reply), so the origin need not
+   * tell an old destination from a stripping relay: both are withheld, and the receipt says which
+   * delivered. A clear request keeps today's behaviour (a stray sealed field is dropped unopened).
+   * @param {any} result
+   * @param {{ expectSealed: boolean, destinationKeyId: string, messageId: string }} deps
+   */
+  const settleRoutedResponse = (result, { expectSealed, destinationKeyId, messageId }) => {
+    const response = result?.response;
+    const delivered = result?.delivered === true && result?.refused !== true;
+    if (!expectSealed) {
+      if (isPlainObject(response) && Object.hasOwn(response, ROUTED_SEALED_RESPONSE_FIELD)) {
+        const { [ROUTED_SEALED_RESPONSE_FIELD]: _drop, ...rest } = response;
+        return { result: { ...result, response: rest }, responseSeal: { expected: false, state: "clear" } };
+      }
+      return { result, responseSeal: { expected: false, state: "clear" } };
+    }
+    if (!delivered) return { result, responseSeal: { expected: true, state: "none" } };
+    // The clear signed attachments always survive a withhold — they are secret of nothing.
+    const attachments = isPlainObject(response)
+      ? {
+          ...(response[ROUTED_RECORD_FIELD] ? { [ROUTED_RECORD_FIELD]: response[ROUTED_RECORD_FIELD] } : {}),
+          ...(response[ROUTED_RECEIPT_FIELD] ? { [ROUTED_RECEIPT_FIELD]: response[ROUTED_RECEIPT_FIELD] } : {}),
+        }
+      : {};
+    /** @param {string} reason */
+    const withhold = (reason) => ({ result: { ...result, response: attachments }, responseSeal: { expected: true, state: "withheld", reason } });
+    if (!isPlainObject(response) || !Object.hasOwn(response, ROUTED_SEALED_RESPONSE_FIELD)) return withhold("clear");
+    const opened = openRoutedResponse(response[ROUTED_SEALED_RESPONSE_FIELD], {
+      destinationKeyId,
+      messageId,
+      sealPrivateKey: /** @type {string} */ (deps.sealPrivateKey),
+    });
+    if (!opened.ok) return withhold(opened.reason);
+    // Fold the outer clear record/receipt back onto a plain-object body; a non-plain body replaces
+    // `response` wholesale, matching today's non-plain passthrough.
+    const body = isPlainObject(opened.body) ? { ...opened.body, ...attachments } : opened.body;
+    return { result: { ...result, response: body }, responseSeal: { expected: true, state: "sealed" } };
+  };
+
+  /**
    * Learn a destination's advertised sealing key from the self-record it piggybacked on
    * the response. The store verifies the record against `destKeyId`, so a dropped,
    * swapped, or replayed record cannot install a wrong key here.
@@ -289,6 +374,9 @@ export function createRoutePlugin(deps) {
    * Reaching the outer destination and refusing the authenticated message is
    * terminal for route search. Keep the refusal in `response` so intermediate
    * engines thread it back (they intentionally retain no application semantics).
+   * Unchanged by response sealing: a destination refusal is never sealed, so its
+   * refusal-threading is untouched; a sealed delivery has no `refused`/`OPEN_REFUSAL`
+   * key on the outer object, so it passes through every intermediate hop as-is.
    * @param {any} result
    */
   const normalizeOpenResult = (result) => {
@@ -404,7 +492,16 @@ export function createRoutePlugin(deps) {
     if (target.decision === "refuse") {
       return { delivered: false, reason: `seal-refused:${target.state}`, spent: 0, seal: { decision: target.decision, tier: target.tier, state: target.state } };
     }
-    const sealTo = target.decision === "seal" && target.key ? { recipientKey: target.key } : undefined;
+    if (target.decision === "seal" && responseSealKey === null) {
+      // A confidential send asks the destination to reply confidentially; refuse locally rather
+      // than ask for a reply we could not open (or get one withheld). Same shape as a resolver
+      // refusal so callers need one code path.
+      return { delivered: false, reason: "seal-refused:no-response-key", spent: 0, seal: { decision: "refuse", tier: target.tier, state: "no-response-key" } };
+    }
+    // Carry our own X25519 key inside the sealed request so the destination can seal its reply.
+    const sealTo = target.decision === "seal" && target.key
+      ? { recipientKey: target.key, ...(responseSealKey ? { responseSealKey } : {}) }
+      : undefined;
 
     const messageId = newMessageId();
     const wrapper = wrapRoutedMessage({
@@ -426,9 +523,12 @@ export function createRoutePlugin(deps) {
     // minted: a verified `delivered`/`refused` is proof the routing target acted; a missing
     // or unverifiable one is surfaced as such (a relay may have grayholed or forged).
     const receipt = verifyRoutedReceipt(dest, messageId, result);
+    // Enforce monotone response confidentiality: a sealed request expects a sealed reply, and a
+    // clear/unopenable/wrong-sealer/mismatched reply is withheld rather than handed to the caller.
+    const settled = settleRoutedResponse(result, { expectSealed: Boolean(sealTo), destinationKeyId, messageId });
     // Surface the confidentiality decision so a caller sees whether it was sealed and at
     // which tier — not just that it was delivered (the review's pre-send disclosure).
-    return { ...result, seal: { decision: target.decision, tier: target.tier, state: target.state }, receipt };
+    return { ...settled.result, seal: { decision: target.decision, tier: target.tier, state: target.state }, receipt, responseSeal: settled.responseSeal };
   };
 
   // Public host/embedder entry points share the same plugin-wide work ceiling as
@@ -513,7 +613,7 @@ export function createRoutePlugin(deps) {
   };
   return {
     name: "route",
-    description: "Relay signed cleartext messages across admitted peers (routing M1).",
+    description: "Relay origin-signed, sealed-by-default messages across admitted peers (routing M1).",
     // Encrypted *arrival* (each hop's transport), like chat and files. Note this is
     // NOT payload confidentiality across the path: at M1 every relay can read the
     // signed body. Sealing to the destination is M3; do not route private content.

@@ -648,6 +648,14 @@ switch (command) {
           log("  receipt: none — no proof of delivery (possible grayhole, or a peer that predates receipts)");
         }
       }
+      // The response body of a sealed request is itself sealed back to us. A clear/unverifiable
+      // reply where sealed was expected is WITHHELD — nothing unsealed is ever handed up.
+      const rs = data?.responseSeal;
+      if (rs?.state === "sealed") {
+        log("  response: sealed by the destination");
+      } else if (rs?.state === "withheld") {
+        log(`  response: WITHHELD — expected sealed, got ${rs.reason} (a relay may have stripped it, or the destination predates sealed responses); nothing unsealed was accepted`);
+      }
       break;
     }
     if (action === "discard") {
