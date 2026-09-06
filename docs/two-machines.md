@@ -144,43 +144,42 @@ the CLI falls back to the default socket, which fails with the same
 `--socket=` or the `tailscale-cli` wrapper is the reliable way to point at the
 userspace daemon.
 
-Userspace networking creates no `tailscale0` interface, so
-`--hail-on tailscale0` has nothing to bind inside Termux. Keep peerhailer on
-loopback and publish the loopback port with Tailscale Serve:
+Userspace networking creates no `tailscale0` interface, so `--hail-on tailscale0`
+has nothing to bind inside Termux. Keep peerhailer on **loopback with the daemon
+doing its own TLS** (`--hail-on-tls 127.0.0.1`), and publish it with Tailscale Serve
+in **raw-TCP passthrough** — *not* the default terminating proxy:
 
 ```sh
-node bin/hail.js daemon --port 7645 --ui
+node bin/hail.js daemon --hail-on-tls 127.0.0.1 --port 7645 --route
 tailscale-cli serve reset
-tailscale-cli serve --bg 7645
+tailscale-cli serve --bg --tcp 443 tcp://127.0.0.1:7645
 tailscale-cli serve status
 ```
 
-Use `serve --bg 7645` — the port alone, which publishes loopback `7645` over
-**HTTPS on 443**. The `--http=7645` form sets up a split config that terminates
-plaintext on `7645` and left the backend unreached (a 502 from another machine);
-resetting first clears it.
-
-The local phone can verify only the Serve configuration. A healthy status shows
-the Termux node forwarding to loopback:
+**Passthrough is not optional for peers.** peerhailer pins a peer's TLS cert to its
+identity (a `peerhailer-vouch` SAN). A *terminating* `serve --bg <port>` completes the
+TLS handshake itself with a Let's Encrypt cert that has no vouch, so every peerhailer
+peer fails the pin (`TLS pin failed: the peer's cert is not the key held for it`).
+Passthrough (`--tcp`) forwards raw TCP so the **daemon's** own vouched cert reaches the
+caller end-to-end. A healthy status shows a TCP forward, not an HTTP proxy:
 
 ```text
-https://termux-tailscale-s24.<tailnet>.ts.net (tailnet only)
-|-- / proxy http://127.0.0.1:7645
+tcp://termux-<name>.<tailnet>.ts.net:443 (TLS over TCP)
+|--> tcp://127.0.0.1:7645
 ```
 
-The real inbound check needs a second tailnet machine. Serve terminates TLS and
-needs the hostname for SNI, so a machine without MagicDNS uses `--resolve`:
+The real inbound check is another peer hailing it: from a machine that holds the
+phone's key, `hail walk` reports `reached <phone> via https://<name>…ts.net`.
+**Verified this way (2026-09-05):** a desktop and a Puppy relay reached a Termux phone
+over passthrough, and a full sealed request/response round-trip completed *through the
+relay* — a phone is a full bidirectional peer, not outbound-only. A plain-browser
+`curl` is **not** a peer-reachability check: with the daemon doing mutual TLS, a client
+that presents no vouched cert is refused, so a raw curl failing says nothing about peers.
 
-```sh
-curl -ik --resolve termux-tailscale-s24.<tailnet>.ts.net:443:<node-ip> \
-  https://termux-tailscale-s24.<tailnet>.ts.net/
-```
-
-A 403 from peerhailer proves the request reached the loopback service; a 502
-means Serve could not reach the backend; a timeout means inbound is not working.
-**Verified this way:** a desktop hailed an inbound-configured phone and the
-phone's reply signature checked against its key — a phone is a full bidirectional
-peer, not outbound-only, once userspace `tailscaled` and Serve are up.
+The **terminating** proxy (`serve --bg 7645`, a Let's Encrypt cert) is instead the right
+tool for the opposite audience — a **browser** reaching the phone's page, which wants a
+CA-trusted cert and cannot present a peerhailer client cert. Peers and browsers are
+different audiences; serve them on different ports.
 
 The address other peers store is the Termux node over HTTPS, for example:
 
