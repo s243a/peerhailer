@@ -101,6 +101,10 @@ anywhere else until the control API is pinned back to loopback.
 
 ## Android phones
 
+For a step-by-step bootstrap of a phone as a node, see
+[termux-node.md](termux-node.md). This section is the underlying detail and the
+diagnostics behind it.
+
 The Android Tailscale app and Termux do not share a `tailscaled` daemon. The app
 can route ordinary Termux outbound traffic through the Android VPN when it is
 connected, so a phone can still hail a desktop. It does not give Termux a
