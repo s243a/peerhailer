@@ -55,6 +55,19 @@ const MAX_BODY = 1_000_000;
 /** How stale a signed hail may be. Generous: clocks drift, and this is not a nonce. */
 const FRESHNESS_MS = 5 * 60_000;
 
+/**
+ * Find a loaded plugin by its declared `name`. One convention for every builtin
+ * lookup (chat, route, …): the name is the stable identity a plugin advertises,
+ * and keying on it — rather than duck-typing a method that other plugins could
+ * also expose — keeps the release-gated renamed-builtin migration to one grep.
+ * Returns undefined when that plugin is not loaded (its `--flag` is off), which
+ * every caller already treats as "feature unavailable".
+ *
+ * @param {ReadonlyArray<any>} plugins
+ * @param {string} name
+ */
+const pluginNamed = (plugins, name) => plugins.find((pl) => pl?.name === name);
+
 /** The request body exceeded {@link MAX_BODY} — a 413 on the control API. */
 class RequestTooLarge extends Error {}
 /** The request body was not valid JSON — a 400 on the control API. */
@@ -876,11 +889,7 @@ export function createDaemon({
       // the page. The chat plugin (present only with --chat) holds them; here we
       // resolve peer names, deliver outgoing over the peer's /chat/send, and
       // record our own side. Text is attacker-chosen — the page MUST escape it.
-      const chat = /** @type {any} */ (
-        plugins.find(
-          (pl) => pl && typeof (/** @type {any} */ (pl).conversations) === "function" && typeof (/** @type {any} */ (pl).say) === "function",
-        )
-      );
+      const chat = /** @type {any} */ (pluginNamed(plugins, "chat"));
       const chatNames = () => new Map((directory.listAdmitted?.() ?? []).map((peer) => [peer.publicKey, peer.name]));
       // The sealing trust for a peer, with fingerprints of the held and pending
       // keys — so a person resolving a conflict compares two keys, not a bare
@@ -1038,7 +1047,7 @@ export function createDaemon({
       // (present only with --route) wraps/authenticates around the pure engine; we
       // hand it a destination identity key and JSON payload and report what came back.
       if (scope === "control" && url.pathname === "/api/route/send" && request.method === "POST") {
-        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        const router = /** @type {any} */ (pluginNamed(plugins, "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
@@ -1069,7 +1078,7 @@ export function createDaemon({
       // The routed key store is in-memory in this daemon, so discovery/approval are live
       // control operations, not state-file edits like Tier-0 `hail seal accept`.
       if (scope === "control" && (url.pathname === "/api/route/discover" || url.pathname === "/api/route/seal") && request.method === "POST") {
-        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        const router = /** @type {any} */ (pluginNamed(plugins, "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
@@ -1092,7 +1101,7 @@ export function createDaemon({
       // Approve a discovered Tier-1 key for sealing — the manual gate. Optionally pinned to
       // the fingerprint the operator reviewed, so an approval cannot race a changed key.
       if (scope === "control" && url.pathname === "/api/route/seal-approve" && request.method === "POST") {
-        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        const router = /** @type {any} */ (pluginNamed(plugins, "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });
@@ -1111,7 +1120,7 @@ export function createDaemon({
       // re-approved. It only deletes: the post-discard state is `none`, and the receive-side
       // `requireSealFrom` marker is untouched, so this cannot shed the armed downgrade posture.
       if (scope === "control" && url.pathname === "/api/route/seal-discard" && request.method === "POST") {
-        const router = /** @type {any} */ (plugins.find((pl) => pl && typeof (/** @type {any} */ (pl).send) === "function" && pl.name === "route"));
+        const router = /** @type {any} */ (pluginNamed(plugins, "route"));
         if (!router) return send(response, 501, { error: "routing is off — start the daemon with --route" });
         const body = await readJson(request);
         if (!body?.dest) return send(response, 400, { error: "a destination key is required" });

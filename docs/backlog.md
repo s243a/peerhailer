@@ -314,7 +314,14 @@ roadmap is shared, not scattered across PR threads.
 
 ## Minor / taste (batch opportunistically)
 
-- **TODO (left — touchier than the batch)** — `[fable]` `server.js` finds the chat plugin by duck-typing but the route plugin by name — one convention.
+- **DONE** — `[fable review]` `server.js` found the chat plugin by duck-typing but the route plugin by
+  name (duplicated at 4 endpoints) — now one convention: `pluginNamed(plugins, name)`, keyed on the
+  stable declared `name`. Fable confirmed both builtins declare the name on the exact object in the
+  array, all 5 call sites handle `undefined` (feature-off), and 644/644 pass. Known pre-existing gap
+  (not introduced, left as a separate item): no duplicate-plugin-name guard — an external plugin
+  reusing `"chat"`/`"route"` could collide only while that builtin is off (builtins are appended
+  first, so `.find` prefers them when loaded). A reserved-name refusal in `validatePlugin` is the fix
+  if we ever want it.
 - **DONE** — `[fable]` `bin/hail.js` called `publicKeyFromFlags()` twice — hoisted to a single call.
 - **DONE** — `[fable]` `directory.js` snapshot/gossip filter resolved the profile then fed raw `record.profile`
   to `allows` — now computed once and reused for both the blocked gate and `allows("hail")`.
