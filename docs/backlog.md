@@ -361,7 +361,8 @@ roadmap is shared, not scattered across PR threads.
   Open decisions: whether the X25519 seal key shares the wrap; migration for existing plaintext
   identities; an agent (ssh-agent-style, once-per-boot) for keystore-less interactive nodes. Prior art
   for the password UX: `src/gate.js` (`hashPassword`, session model). Relates to the identity-rotation
-  policy noted under the Phase 4 directory-merge item.
+  policy noted under the Phase 4 directory-merge item. **Full threat model + per-platform posture
+  (incl. the non-rooted-Android/Termux same-uid case): `docs/identity-security.md`.**
 
 ## Minor / taste (batch opportunistically)
 
