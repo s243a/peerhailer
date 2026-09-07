@@ -125,12 +125,25 @@ machinery in the plugin — see [shell.md](shell.md).
 
 ## Persistence: the state must land in the save
 
-A frugal or live install keeps changes in a **save file** that persists a fixed
-part of the filesystem — on Puppy, `/root`. peerhailer's identity is the thing
-that must survive a reboot: lose it and the key regenerates, so every peer that
-paired with the old key is now talking to a stranger and authentication fails.
+peerhailer's identity is the thing that must survive a reboot: lose it and the key
+regenerates, so every peer that paired with the old key is now talking to a stranger
+and authentication fails. Whether it survives depends on **how this Puppy stores its
+changes** — and the three modes behave very differently:
 
-Two rules make it durable:
+- **Save *file* (a frugal/live install with e.g. `puppy_save.4fs`)** — the writable
+  layer lives in RAM and is flushed to the file only on a **save** (shutdown, an
+  interval, or on demand). Anything not yet saved is **wiped on reboot**. This is the
+  mode that bit us, and the one the "commit the save" ritual below is for.
+- **Save *folder* (a save directory on a Linux-filesystem partition)** — the writable
+  layer *is* the folder on the real partition, so changes are written to disk as they
+  happen. No ritual: the identity persists once written, and it survives an unclean
+  reboot.
+- **Full install** — a normal on-disk Linux; changes are written straight through like
+  any distro. Nothing special to do.
+
+**For a node you want to leave running, prefer a save folder or a full install** — they
+make persistence the default instead of a thing you must remember. If you are on a save
+*file*, two rules make it durable:
 
 - **Put the state where the save reaches.** `--state /root/peerhailer/state.json`
   — and because `identity.json` is written *beside* the state file
@@ -181,17 +194,20 @@ its own instead of by hand.
 
 ### A hard reboot loses more than a clean one
 
-The save-file rules above assume a **clean** shutdown, which commits the save. A
-crash, a held power button, or a SysRq reboot (`echo b > /proc/sysrq-trigger`)
-**skips the commit** — so everything written since the last save is gone, a freshly
-generated identity included. We have watched this happen: an unclean reboot dropped a
-node's `identity.json`, `loadIdentity` silently minted a *new* key on next start
-(visible only as one `[identity] generated …` log line, easy to miss inside other
-output), and every peer's pin broke with `TLS pin failed`. So: commit the save
-**immediately after** pairing — not "eventually" — and treat any unclean reboot as a
-possible identity reset: **check `hail id` first thing after one**. See
-`docs/identity-security.md` for why this silent regeneration is the sharp edge, and
-the backlog for the loud-refusal fix.
+This is a **save-file** hazard specifically (see the three modes above): the commit
+happens on a clean shutdown, so a crash, a held power button, or a SysRq reboot
+(`echo b > /proc/sysrq-trigger`) **skips it** — and everything written since the last
+save is gone, a freshly generated identity included. We have watched this happen: an
+unclean reboot dropped a save-file node's `identity.json`, `loadIdentity` silently
+minted a *new* key on next start (visible only as one `[identity] generated …` log
+line, easy to miss inside other output), and every peer's pin broke with `TLS pin
+failed`. A **save folder or full install writes to disk continuously**, so an unclean
+reboot loses at most the last few unsynced writes — the once-written identity is long
+since durable. So: on a save file, commit **immediately after** pairing — not
+"eventually" — and treat any unclean reboot as a possible identity reset (**check
+`hail id` first thing after one**); or sidestep the whole hazard with a save folder or
+full install. See `docs/identity-security.md` for why this silent regeneration is the
+sharp edge, and the backlog for the loud-refusal fix.
 
 ## The shape, end to end
 
