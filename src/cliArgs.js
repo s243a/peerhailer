@@ -170,6 +170,32 @@ export const COMMANDS = {
   // Client side: drive a peer's share. The action is the THIRD positional (list|get|put), not a
   // grouped first-positional action, so this is a flat command; path and localfile are per-action optional.
   files: { positionals: ["peer", "share", "action", "[path]", "[localfile]"], options: {} },
+  // Rename this machine. Identity is the key, not the name, so this is cosmetic. One required
+  // positional (the handler fails on a bare call rather than printing the current name).
+  name: { positionals: ["newname"], options: {} },
+  // Print this machine's public key (`hail id > sol.pub`). No args.
+  id: { positionals: [], options: {} },
+  // Drop a peer/candidate from the directory.
+  forget: { positionals: ["name"], options: {} },
+  // Directory summaries; neither reads a flag or positional.
+  status: { positionals: [], options: {} },
+  peers: { positionals: [], options: {} },
+  // Client side: drive a shell on another peer. The action is the THIRD positional
+  // (open|send|poll|close|exec), so this is a flat command like `files`, not a grouped one; the
+  // handler checks per-action arity. A send/exec payload carrying its own `--flags` goes after `--`
+  // (as with `commands`/`shells`); `--raw` is the one real option.
+  shell: { positionals: ["peer", "name", "action", "...args"], options: { raw: "boolean" } },
+  // Same flat shape as `shell`; drives a peer's tunnel endpoint (pipe|forward|open|send|poll|close).
+  // No options — a payload carrying `--flags` goes after `--`.
+  tunnel: { positionals: ["peer", "name", "action", "...args"], options: {} },
+  // Configured plugin modules. add|remove take the module specifier; a bare or unknown action
+  // (`hail plugins`) lists via the lenient fallback, where the handler prints the listing.
+  plugins: {
+    actions: {
+      add: { positionals: ["module"], options: {} },
+      remove: { positionals: ["module"], options: {} },
+    },
+  },
 };
 
 /** A `--word` or `--word=…` option token (the strict parser's notion). @param {string} token */

@@ -79,10 +79,11 @@ test("a missing required positional fails with the argument name", () => {
 });
 
 test("an unmigrated command falls back to the lenient parse (no schema, no error)", () => {
-  // `plugins` has no schema: unknown flags are accepted, booleans stay greedy —
-  // exactly the legacy behaviour, so the migration can proceed leaf by leaf.
-  const { positional, flags } = of("plugins add mymod --anything here");
-  assert.equal(positional[0], "plugins");
+  // A command with no schema entry accepts unknown flags and stays greedy — exactly the
+  // legacy behaviour. Every real `hail` command is now migrated, so this uses a synthetic
+  // name to exercise the fallback mechanism itself.
+  const { positional, flags } = of("frobnicate add mymod --anything here");
+  assert.equal(positional[0], "frobnicate");
   assert.equal(flags.anything, "here");
 });
 
@@ -100,10 +101,10 @@ test("regression: unblock --key with no name is valid (Fable)", () => {
 });
 
 test("the lenient fallback is verbatim: --a --b=c keeps the old greedy reading", () => {
-  // An unmigrated command must behave exactly as before: the old parser read
+  // A command with no schema must behave exactly as before: the old parser read
   // `--b=c` (which is not a bare --word) as the value of --a.
-  const { flags } = of("plugins --a --b=c");
-  assert.equal(flags.a, "--b=c", "unchanged legacy behaviour on an unmigrated command");
+  const { flags } = of("frobnicate --a --b=c");
+  assert.equal(flags.a, "--b=c", "unchanged legacy behaviour on an unschemed command");
 });
 
 // --- Security-shaped commands: seal, rotate, trust, gate ---
@@ -201,4 +202,54 @@ test("files: flat positionals peer/share/action + optional path/localfile; no op
   assert.throws(() => of("files bob docs"), /missing argument: action/);
   assert.throws(() => of("files bob docs get a b c"), /unexpected extra argument: c/);
   assert.throws(() => of("files bob docs list --json"), /unknown option --json/);
+});
+
+// --- The last leaves: name, id, forget, status, peers, shell, tunnel, plugins ---
+
+test("name: one required positional (the new name); extras and unknown options refused", () => {
+  assert.deepEqual(of("name sol").positional, ["name", "sol"]);
+  assert.throws(() => of("name"), /missing argument: newname/);
+  assert.throws(() => of("name a b"), /unexpected extra argument: b/);
+  assert.throws(() => of("name sol --force"), /unknown option --force/);
+});
+
+test("id / status / peers: no positionals, no options", () => {
+  for (const cmd of ["id", "status", "peers"]) {
+    assert.deepEqual(of(cmd).positional, [cmd], cmd);
+    assert.throws(() => of(`${cmd} extra`), /unexpected extra argument: extra/, cmd);
+    assert.throws(() => of(`${cmd} --deep`), /unknown option --deep/, cmd);
+  }
+});
+
+test("forget: one required positional (the peer name)", () => {
+  assert.deepEqual(of("forget bob").positional, ["forget", "bob"]);
+  assert.throws(() => of("forget"), /missing argument: name/);
+  assert.throws(() => of("forget bob --hard"), /unknown option --hard/);
+});
+
+test("shell: flat peer/name/action + variadic args; --raw is a boolean; payload flags go after --", () => {
+  const send = of("shell bob mysh send S1 hello world");
+  assert.deepEqual(send.positional, ["shell", "bob", "mysh", "send", "S1", "hello", "world"]);
+  assert.equal(of("shell bob mysh send S1 hi --raw").flags.raw, true);
+  // A payload carrying its own --flags is preserved verbatim after `--`.
+  assert.deepEqual(of("shell bob mysh exec -- ls --color").positional.slice(4), ["ls", "--color"]);
+  assert.throws(() => of("shell bob mysh"), /missing argument: action/);
+  assert.throws(() => of("shell bob mysh exec ls --color"), /unknown option --color/);
+});
+
+test("tunnel: flat peer/name/action + variadic args; no options", () => {
+  const send = of("tunnel bob acp send T1 payload");
+  assert.deepEqual(send.positional, ["tunnel", "bob", "acp", "send", "T1", "payload"]);
+  assert.deepEqual(of("tunnel bob acp forward 9100").positional, ["tunnel", "bob", "acp", "forward", "9100"]);
+  assert.throws(() => of("tunnel bob acp"), /missing argument: action/);
+  assert.throws(() => of("tunnel bob acp send T1 hi --extra"), /unknown option --extra/);
+});
+
+test("plugins: add/remove take a module; bare/unknown action lists via the lenient fallback", () => {
+  assert.deepEqual(of("plugins add ./mod.js").positional, ["plugins", "add", "./mod.js"]);
+  assert.deepEqual(of("plugins remove ./mod.js").positional, ["plugins", "remove", "./mod.js"]);
+  assert.deepEqual(of("plugins").positional, ["plugins"]); // bare → lenient listing
+  assert.deepEqual(of("plugins list").positional, ["plugins", "list"]); // unknown action → lenient
+  assert.throws(() => of("plugins add"), /missing argument: module/);
+  assert.throws(() => of("plugins add ./mod.js --anything"), /unknown option --anything/);
 });
