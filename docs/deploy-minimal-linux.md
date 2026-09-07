@@ -145,6 +145,54 @@ Two rules make it durable:
   shell sessions add nothing persistent worth guarding, so one save after setup is
   enough.
 
+## No service manager (non-systemd Puppy): a reboot starts nothing
+
+Many Puppy builds — **TrixiePup64** among them — do not run systemd as init.
+`systemctl start tailscaled` answers *"System has not been booted with systemd as
+init system (PID 1)"*, and, more to the point, **nothing auto-starts on boot**: not
+`tailscaled`, not the peerhailer daemon, and a `hail` symlink from `npm link` may be
+gone too. Every reboot is a manual bring-up.
+
+**1. tailscaled, by hand.** Start it yourself and pass the socket explicitly (see
+Path A/B above for the TUN choice):
+
+```sh
+# kernel TUN (Path A)
+mkdir -p /var/lib/tailscale /var/run/tailscale
+setsid tailscaled --state=/var/lib/tailscale/tailscaled.state \
+  --socket=/var/run/tailscale/tailscaled.sock > /var/log/tailscaled.log 2>&1 < /dev/null &
+tailscale up            # reconnects from saved state; a login URL appears only if that state was lost
+tailscale ip -4
+```
+
+tailscaled's own state (`/var/lib/tailscale/…`) is what spares you a re-login — keep
+it where the save reaches, the same rule as peerhailer's state below.
+
+**2. Relink `hail` if it vanished.** `npm link` (and the `/usr/local/bin/hail`
+symlink) live in the RAM overlay; if they were created after the last save, a reboot
+loses them. `cd` to the repo and `npm link` again, or just call `node bin/hail.js …`.
+
+**3. Start the peerhailer daemon** — it has no init unit either; relaunch the
+`setsid … daemon …` line from "The shape" below.
+
+Consider wiring these three into your Puppy's boot hook (an entry in `/root/Startup`,
+`/etc/rc.d/rc.local`, or an autostart `.desktop`) so a reboot brings the node back on
+its own instead of by hand.
+
+### A hard reboot loses more than a clean one
+
+The save-file rules above assume a **clean** shutdown, which commits the save. A
+crash, a held power button, or a SysRq reboot (`echo b > /proc/sysrq-trigger`)
+**skips the commit** — so everything written since the last save is gone, a freshly
+generated identity included. We have watched this happen: an unclean reboot dropped a
+node's `identity.json`, `loadIdentity` silently minted a *new* key on next start
+(visible only as one `[identity] generated …` log line, easy to miss inside other
+output), and every peer's pin broke with `TLS pin failed`. So: commit the save
+**immediately after** pairing — not "eventually" — and treat any unclean reboot as a
+possible identity reset: **check `hail id` first thing after one**. See
+`docs/identity-security.md` for why this silent regeneration is the sharp edge, and
+the backlog for the loud-refusal fix.
+
 ## The shape, end to end
 
 Target (Puppy, as root, state under `/root`):
