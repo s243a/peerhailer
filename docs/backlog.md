@@ -180,21 +180,19 @@ roadmap is shared, not scattered across PR threads.
   a `content-length` pre-check so an over-declared body is refused *and answered* (413) rather than the
   socket being destroyed; the streaming guard still drops an under-declared flood. Tests in
   `test/malformedRequest.test.mjs` (control 400 + 413, hail plugin-route concealment). `server.js`.
-- **IN PROGRESS (Candidate A landed)** — `[sol]` **CLI arg parsing** — the local typed parser
-  (`docs/cli-arg-parsing.md` Candidate A) is built in `src/cliArgs.js` (typed + tested, out of the
-  un-checked `bin/`): per-leaf schemas with `boolean`/`string`/`optional` kinds, `--` pass-through,
-  unknown-option rejection, and positional-arity checks. Proven against the 13 assertable contract-
-  matrix points in `test/cliArgs.test.mjs` (point 14, help generated from the schemas, is future
-  work). Wired into `bin/hail.js`, replacing the ad-hoc parser; commands **without** a schema fall
-  back to the legacy lenient parse, so migration proceeds leaf by leaf with zero regression. Migrated
-  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`, `route`, the security-shaped
-  set `seal`, `rotate`, `trust`, `gate`, and the declared-capability/query set `walk`, `shells`,
-  `services`, `shares`, `tunnels`, `files` (2026-09-06). (`chat`/`compose` in the old list are not
-  CLI commands — `chat` is a `daemon --chat` flag, `compose` has no CLI entry.) **Remaining
-  (follow-ups):** `forget`, `id`, `name`, `peers`, `plugins`, `shell`, `tunnel`, `status` — most are
-  trivial (near-zero-arg or a single positional); `plugins`/`shell`/`tunnel` are action commands with
-  flags. Then generated `--help` from the schemas. Optional future
-  robustness: the Commander/Babashka dev-only differential+fuzz oracle (RFC "Future work"). Survey below:
+- **DONE (all commands migrated; only generated `--help` remains)** — `[sol]` **CLI arg parsing** — the
+  local typed parser (`docs/cli-arg-parsing.md` Candidate A) is built in `src/cliArgs.js` (typed +
+  tested, out of the un-checked `bin/`): per-leaf schemas with `boolean`/`string`/`optional` kinds,
+  `--` pass-through, unknown-option rejection, and positional-arity checks. Proven against the
+  contract-matrix points in `test/cliArgs.test.mjs`. **Every `hail` command is now schemed** (2026-09-06):
+  block, unblock, add, daemon, commands, profiles, route, seal, rotate, trust, gate, walk, shells,
+  services, shares, tunnels, files, forget, id, name, peers, plugins, shell, tunnel, status. (`chat`/
+  `compose` from the old list are not CLI commands — `chat` is a `daemon --chat` flag, `compose` has
+  no CLI entry.) The lenient fallback stays for any *future* unschemed command. One intentional
+  behavior change: a `shell`/`tunnel` send/exec payload carrying its own `--double-dash` flag must now
+  come after `--` (previously the lenient parser silently dropped such flags from the payload).
+  **Remaining:** only **point 14** — generate `--help` from the schemas. Optional future robustness:
+  the Commander/Babashka dev-only differential+fuzz oracle (RFC "Future work"). Survey below:
 - **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The audit found
   several real bugs: booleans can consume positionals, forwarded flags disappear (there is no `--`
   terminator), unknown flags are ignored, and missing string values behave inconsistently. The
