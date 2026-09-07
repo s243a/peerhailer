@@ -311,6 +311,28 @@ roadmap is shared, not scattered across PR threads.
 - **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
   identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
   (not the direct-chat `from === caller` binding). See `docs/routing.md`.
+- **TODO** — `[deferred]` **Identity persistence + encryption at rest.** The private key lives at
+  `<statedir>/identity.json`, **plaintext (mode 600)**, and on a **missing file (ENOENT) is silently
+  regenerated** — only a stderr `log` line, no warning or refusal (`loadIdentity` in `src/identity.js`).
+  So a fresh, moved, cleaned, or wrong-`--home` state dir mints a *new* identity, which every peer that
+  pinned the old key then rejects with `TLS pin failed`. We hit this live: a Puppy node's key rotated
+  `BvXN7…` → `z7R3j…` across a rebuild, breaking A's pin. (The non-ENOENT read-error path already fails
+  safe — it throws rather than overwrite a key it merely failed to read — so the gap is narrowly the
+  ENOENT→generate branch.) Two parts, likely one feature:
+  (a) **Rotation-safety / portability** — a way to export/back up and re-import an identity (so a node
+  keeps its key across a rebuild or a move to another machine), and a *loud* signal on that ENOENT
+  branch — a warning, or an opt-in `--refuse-new-identity` for an established node — so a daemon that is
+  about to generate a brand-new identity instead of loading an existing one says so, and silent rotation
+  stops being the default surprise. A stable key is what makes every pin, seal marker, and route grant
+  survive a restart.
+  (b) **Encryption at rest** — protect the key with a passphrase (KDF → symmetric wrap of the Ed25519 +
+  X25519 seal keys), so `identity.json` is not a plaintext secret sitting in a directory people are
+  invited to `cat`. Especially matters where mode 600 is weak (the Windows/NTFS ACL caveat already noted
+  in `src/identity.js`'s header). Decisions to make: passphrase prompt vs. env/keyring for an
+  unattended daemon (a headless node can't type one at boot), whether the seal key shares the wrap, and
+  the migration path for existing plaintext identities. Prior art / gate for the password UX:
+  `src/gate.js` (`hashPassword`, session model). Relates to the identity-rotation policy noted under the
+  Phase 4 directory-merge item.
 
 ## Minor / taste (batch opportunistically)
 
