@@ -104,6 +104,32 @@ export const COMMANDS = {
       list: { positionals: [], options: {} },
     },
   },
+  // The operator side of the sealing trust model. `hail seal` (bare) and `hail seal status`
+  // both list postures (a bare/unknown action falls to the lenient parse, where the handler
+  // reads the default). `accept` takes the peer name and an optional explicit key.
+  seal: {
+    actions: {
+      status: { positionals: [], options: {} },
+      accept: { positionals: ["name"], options: { "seal-key": "string", "seal-key-file": "string" } },
+    },
+  },
+  // `hail rotate <name> --key-file <new.pub>`: the new key is a required OPTION the handler
+  // checks (a schema can only require positionals), so a missing key still prints the handler's
+  // usage; only a missing NAME is caught here as a `missing argument`.
+  rotate: { positionals: ["name"], options: { key: "string", "key-file": "string" } },
+  // `hail trust` (no model) shows the current model; `hail trust <model>` sets it. The model is
+  // validated against TRUST_MODELS in the handler; the schema only checks it is at most one arg.
+  trust: { positionals: ["[model]"], options: { unknown: "string", vouches: "string" } },
+  // A password door in front of a local web app (src/gate.js). `hail gate` (bare) shows status.
+  gate: {
+    actions: {
+      "set-password": { positionals: [], options: { "keep-sessions": "boolean" } },
+      serve: {
+        positionals: [],
+        options: { target: "string", port: "string", host: "string", "tls-cert": "string", "tls-key": "string", "trust-forwarded": "boolean" },
+      },
+    },
+  },
 };
 
 /** A `--word` or `--word=…` option token (the strict parser's notion). @param {string} token */

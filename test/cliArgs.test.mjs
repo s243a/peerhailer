@@ -105,3 +105,45 @@ test("the lenient fallback is verbatim: --a --b=c keeps the old greedy reading",
   const { flags } = of("tunnels --a --b=c");
   assert.equal(flags.a, "--b=c", "unchanged legacy behaviour on an unmigrated command");
 });
+
+// --- Security-shaped commands: seal, rotate, trust, gate ---
+
+test("seal: status is an action with no positional; accept takes a name + key options", () => {
+  assert.deepEqual(of("seal status").positional, ["seal", "status"]);
+  const accept = of("seal accept bob --seal-key-file b.pub");
+  assert.deepEqual(accept.positional, ["seal", "accept", "bob"]);
+  assert.equal(accept.flags["seal-key-file"], "b.pub");
+  // A bare/unknown action falls to the lenient parse (the handler prints usage/status).
+  assert.deepEqual(of("seal").positional, ["seal"]);
+  assert.throws(() => of("seal accept"), /missing argument: name/);
+  assert.throws(() => of("seal accept bob --seal-keyy x"), /unknown option/);
+});
+
+test("rotate: name is required, key/key-file are typed, unknown options refused", () => {
+  const r = of("rotate bob --key-file new.pub");
+  assert.deepEqual(r.positional, ["rotate", "bob"]);
+  assert.equal(r.flags["key-file"], "new.pub");
+  assert.throws(() => of("rotate"), /missing argument: name/);
+  assert.throws(() => of("rotate bob --bogus"), /unknown option/);
+  // A dash-leading inline PEM is kept as --key's value (isLongFlag exempts a PEM).
+  const pem = "-----BEGIN-PUBLIC-KEY-----";
+  assert.equal(parseArgs(["rotate", "bob", "--key", pem]).flags.key, pem);
+});
+
+test("trust: bare shows status (no model); a model is one positional; options typed", () => {
+  assert.deepEqual(of("trust").positional, ["trust"]);
+  assert.deepEqual(of("trust web-of-trust").positional, ["trust", "web-of-trust"]);
+  assert.equal(of("trust --unknown known").flags.unknown, "known");
+  assert.equal(of("trust web-of-trust --vouches 2").flags.vouches, "2");
+  assert.throws(() => of("trust a b"), /unexpected extra argument: b/);
+});
+
+test("gate: set-password/serve are actions; keep-sessions/trust-forwarded are booleans", () => {
+  assert.equal(of("gate set-password --keep-sessions").flags["keep-sessions"], true);
+  const serve = of("gate serve --target http://127.0.0.1:3000 --port 8443 --trust-forwarded");
+  assert.deepEqual(serve.positional, ["gate", "serve"]);
+  assert.equal(serve.flags.target, "http://127.0.0.1:3000");
+  assert.equal(serve.flags["trust-forwarded"], true);
+  assert.deepEqual(of("gate").positional, ["gate"]); // bare → status via lenient
+  assert.throws(() => of("gate serve --targett x"), /unknown option/);
+});

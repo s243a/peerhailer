@@ -187,9 +187,10 @@ roadmap is shared, not scattered across PR threads.
   matrix points in `test/cliArgs.test.mjs` (point 14, help generated from the schemas, is future
   work). Wired into `bin/hail.js`, replacing the ad-hoc parser; commands **without** a schema fall
   back to the legacy lenient parse, so migration proceeds leaf by leaf with zero regression. Migrated
-  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`. **Remaining (follow-ups):**
-  schema the rest (`tunnels`, `services`, `shells`, `shares`, `files`, `gate`, `seal`, `rotate`,
-  `walk`, `trust`, `chat`, compose…), then generated `--help` from the schemas. Optional future
+  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`, `route`, and the
+  security-shaped set `seal`, `rotate`, `trust`, `gate` (2026-09-06). **Remaining (follow-ups):**
+  schema the rest (`tunnels`, `services`, `shells`, `shares`, `files`, `walk`, `chat`, compose…),
+  then generated `--help` from the schemas. Optional future
   robustness: the Commander/Babashka dev-only differential+fuzz oracle (RFC "Future work"). Survey below:
 - **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The audit found
   several real bugs: booleans can consume positionals, forwarded flags disappear (there is no `--`
