@@ -79,10 +79,10 @@ test("a missing required positional fails with the argument name", () => {
 });
 
 test("an unmigrated command falls back to the lenient parse (no schema, no error)", () => {
-  // `tunnels` has no schema yet: unknown flags are accepted, booleans stay greedy —
+  // `plugins` has no schema: unknown flags are accepted, booleans stay greedy —
   // exactly the legacy behaviour, so the migration can proceed leaf by leaf.
-  const { positional, flags } = of("tunnels add acp 127.0.0.1:9100 --anything here");
-  assert.equal(positional[0], "tunnels");
+  const { positional, flags } = of("plugins add mymod --anything here");
+  assert.equal(positional[0], "plugins");
   assert.equal(flags.anything, "here");
 });
 
@@ -102,7 +102,7 @@ test("regression: unblock --key with no name is valid (Fable)", () => {
 test("the lenient fallback is verbatim: --a --b=c keeps the old greedy reading", () => {
   // An unmigrated command must behave exactly as before: the old parser read
   // `--b=c` (which is not a bare --word) as the value of --a.
-  const { flags } = of("tunnels --a --b=c");
+  const { flags } = of("plugins --a --b=c");
   assert.equal(flags.a, "--b=c", "unchanged legacy behaviour on an unmigrated command");
 });
 
@@ -146,4 +146,59 @@ test("gate: set-password/serve are actions; keep-sessions/trust-forwarded are bo
   assert.equal(serve.flags["trust-forwarded"], true);
   assert.deepEqual(of("gate").positional, ["gate"]); // bare → status via lenient
   assert.throws(() => of("gate serve --targett x"), /unknown option/);
+});
+
+// --- Declared-capability commands: walk, shells, services, shares, tunnels, files ---
+
+test("walk: no options, no positionals; an unknown option is refused", () => {
+  assert.deepEqual(of("walk").positional, ["walk"]);
+  assert.throws(() => of("walk --deep"), /unknown option --deep/);
+});
+
+test("shells: add takes name + a variadic command line; bare lists via lenient", () => {
+  // A real shell line is quoted (one argv token); the handler joins the variadic tail either way.
+  const { positional } = of("shells add sandboxed firejail bash");
+  assert.deepEqual(positional, ["shells", "add", "sandboxed", "firejail", "bash"]);
+  // A line carrying its own flags is passed after `--`, kept verbatim as payload.
+  assert.deepEqual(of("shells add sandboxed -- firejail --net=none bash").positional.slice(3), ["firejail", "--net=none", "bash"]);
+  assert.deepEqual(of("shells").positional, ["shells"]); // bare → lenient listing
+  assert.throws(() => of("shells add"), /missing argument: name/);
+});
+
+test("services: add carries offer metadata + optional --reports-port; remove needs a name", () => {
+  const add = of("services add web node-srv --label My --role worker --reports-port");
+  assert.deepEqual(add.positional, ["services", "add", "web", "node-srv"]);
+  assert.equal(add.flags.label, "My");
+  assert.equal(add.flags.role, "worker");
+  assert.equal(add.flags["reports-port"], true);
+  assert.throws(() => of("services add web x --bogus"), /unknown option --bogus/);
+  assert.throws(() => of("services remove"), /missing argument: name/);
+});
+
+test("shares: add takes name + optional root and backend options; http omits the root", () => {
+  const local = of("shares add drop /srv/drop --writable");
+  assert.deepEqual(local.positional, ["shares", "add", "drop", "/srv/drop"]);
+  assert.equal(local.flags.writable, true);
+  const http = of("shares add repo --backend http --base https://h/f/");
+  assert.deepEqual(http.positional, ["shares", "add", "repo"]); // root omitted for http
+  assert.equal(http.flags.base, "https://h/f/");
+  assert.throws(() => of("shares add drop /srv --nope"), /unknown option --nope/);
+});
+
+test("tunnels: add takes name + address; --exit-token is a valued string", () => {
+  const add = of("tunnels add acp 127.0.0.1:9100 --exit-token sekret-token");
+  assert.deepEqual(add.positional, ["tunnels", "add", "acp", "127.0.0.1:9100"]);
+  assert.equal(add.flags["exit-token"], "sekret-token");
+  assert.deepEqual(of("tunnels").positional, ["tunnels"]); // bare → lenient listing
+  assert.throws(() => of("tunnels add acp 127.0.0.1:9100 --bogus"), /unknown option --bogus/);
+  assert.throws(() => of("tunnels add acp"), /missing argument: address/);
+});
+
+test("files: flat positionals peer/share/action + optional path/localfile; no options", () => {
+  const get = of("files bob docs get a/b.txt out.txt");
+  assert.deepEqual(get.positional, ["files", "bob", "docs", "get", "a/b.txt", "out.txt"]);
+  assert.deepEqual(of("files bob docs list").positional, ["files", "bob", "docs", "list"]);
+  assert.throws(() => of("files bob docs"), /missing argument: action/);
+  assert.throws(() => of("files bob docs get a b c"), /unexpected extra argument: c/);
+  assert.throws(() => of("files bob docs list --json"), /unknown option --json/);
 });

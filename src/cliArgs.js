@@ -130,6 +130,46 @@ export const COMMANDS = {
       },
     },
   },
+  // Ask known peers who else they know. No options, no positionals.
+  walk: { positionals: [], options: {} },
+  // Declared local capabilities, each an action command keyed by add|remove; a bare or unknown
+  // action lists (lenient, so the handler prints its own listing/usage). The `add` command line is
+  // a variadic payload — quote it, or pass it after `--` if it carries its own flags (cf. `commands`).
+  shells: {
+    actions: {
+      add: { positionals: ["name", "...command"], options: {} },
+      remove: { positionals: ["name"], options: {} },
+    },
+  },
+  services: {
+    actions: {
+      // --reports-port is optional: bare means the child announces its own port; given a value that
+      // value is the command line (the flag can precede the line and swallow it). label/agent/role/
+      // tunnel/supervisor-tunnel are offer metadata the composer advertises via /offers.
+      add: {
+        positionals: ["name", "...command"],
+        options: { "reports-port": "optional", label: "string", agent: "string", role: "string", tunnel: "string", "supervisor-tunnel": "string" },
+      },
+      remove: { positionals: ["name"], options: {} },
+    },
+  },
+  shares: {
+    actions: {
+      // Local backend takes <root> as a positional; --backend http takes --base instead, so root is optional.
+      add: { positionals: ["name", "[root]"], options: { backend: "string", base: "string", writable: "boolean" } },
+      remove: { positionals: ["name"], options: {} },
+    },
+  },
+  tunnels: {
+    actions: {
+      // --exit-token is a string the handler validates; bare (no value) is refused as "needs a value".
+      add: { positionals: ["name", "address"], options: { "exit-token": "string" } },
+      remove: { positionals: ["name"], options: {} },
+    },
+  },
+  // Client side: drive a peer's share. The action is the THIRD positional (list|get|put), not a
+  // grouped first-positional action, so this is a flat command; path and localfile are per-action optional.
+  files: { positionals: ["peer", "share", "action", "[path]", "[localfile]"], options: {} },
 };
 
 /** A `--word` or `--word=…` option token (the strict parser's notion). @param {string} token */

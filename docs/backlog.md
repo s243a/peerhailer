@@ -187,10 +187,13 @@ roadmap is shared, not scattered across PR threads.
   matrix points in `test/cliArgs.test.mjs` (point 14, help generated from the schemas, is future
   work). Wired into `bin/hail.js`, replacing the ad-hoc parser; commands **without** a schema fall
   back to the legacy lenient parse, so migration proceeds leaf by leaf with zero regression. Migrated
-  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`, `route`, and the
-  security-shaped set `seal`, `rotate`, `trust`, `gate` (2026-09-06). **Remaining (follow-ups):**
-  schema the rest (`tunnels`, `services`, `shells`, `shares`, `files`, `walk`, `chat`, compose…),
-  then generated `--help` from the schemas. Optional future
+  so far: `block`, `unblock`, `add`, `daemon`, `commands`, `profiles`, `route`, the security-shaped
+  set `seal`, `rotate`, `trust`, `gate`, and the declared-capability/query set `walk`, `shells`,
+  `services`, `shares`, `tunnels`, `files` (2026-09-06). (`chat`/`compose` in the old list are not
+  CLI commands — `chat` is a `daemon --chat` flag, `compose` has no CLI entry.) **Remaining
+  (follow-ups):** `forget`, `id`, `name`, `peers`, `plugins`, `shell`, `tunnel`, `status` — most are
+  trivial (near-zero-arg or a single positional); `plugins`/`shell`/`tunnel` are action commands with
+  flags. Then generated `--help` from the schemas. Optional future
   robustness: the Commander/Babashka dev-only differential+fuzz oracle (RFC "Future work"). Survey below:
 - **DESIGN** — `[sol]` **CLI arg parsing** — surveyed in `docs/cli-arg-parsing.md`. The audit found
   several real bugs: booleans can consume positionals, forwarded flags disappear (there is no `--`
