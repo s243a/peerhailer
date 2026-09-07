@@ -325,14 +325,43 @@ roadmap is shared, not scattered across PR threads.
   about to generate a brand-new identity instead of loading an existing one says so, and silent rotation
   stops being the default surprise. A stable key is what makes every pin, seal marker, and route grant
   survive a restart.
-  (b) **Encryption at rest** — protect the key with a passphrase (KDF → symmetric wrap of the Ed25519 +
-  X25519 seal keys), so `identity.json` is not a plaintext secret sitting in a directory people are
-  invited to `cat`. Especially matters where mode 600 is weak (the Windows/NTFS ACL caveat already noted
-  in `src/identity.js`'s header). Decisions to make: passphrase prompt vs. env/keyring for an
-  unattended daemon (a headless node can't type one at boot), whether the seal key shares the wrap, and
-  the migration path for existing plaintext identities. Prior art / gate for the password UX:
-  `src/gate.js` (`hashPassword`, session model). Relates to the identity-rotation policy noted under the
-  Phase 4 directory-merge item.
+  (b) **Encryption at rest — target: encrypted by default, passwordless by default.** `identity.json` is
+  a plaintext secret in a directory people are invited to `cat`, and mode 600 is weak where it counts (the
+  Windows/NTFS ACL caveat in `src/identity.js`'s header). **Threat-model honesty first:** a passphrase
+  wrap protects the key only *offline* — powered-off theft, a leaked backup, a disk image. It does **not**
+  stop the worry that motivated this ("a malicious process on the node fakes the identity"): to sign, the
+  daemon holds the decrypted key in memory, and a **same-user** process can read it (`/proc/pid/mem`,
+  ptrace) or read the passphrase you fed it. So a remembered password answers a different, narrower threat
+  than the one asked. The design we converged on:
+  - **Default posture = never plaintext.** The wrapping key comes from the strongest *passwordless*
+    mechanism the platform offers — an OS keystore (macOS Keychain, Windows DPAPI, libsecret,
+    **Android Keystore** for the phone), unlocked by the login session. Encrypted at rest *and* nothing
+    to remember, which is the actual resolution of "I hate passwords."
+  - **A passphrase is the exception, not the mechanism** — reserved for the portable **export/backup**
+    path (part (a)) and for a keystore-less machine where the operator explicitly wants protection.
+  - **The real fix for impersonation is OS isolation, not a secret.** The cheap immediate step is a
+    **dedicated uid** for the daemon (makes mode 600 actually mean something — other users can't read the
+    file or ptrace the process). The strong end state is a **keystore that signs without exposing the
+    key** (TPM / Secure Enclave / Android Keystore / PKCS#11 token): a compromise can request signatures
+    only while it has access and can never exfiltrate the identity. Honest residual: a *live* compromise
+    can still ask it to sign — bounding that is a grants / short-lived-credential question, separate from
+    protecting the long-term key.
+  - **Two conditions keep default-on honest:** (1) it MUST fail *loud* when it cannot decrypt (moved
+    state dir, missing keyring entry) and never silently mint a new identity — this is the same fix as
+    part (a); default-on encryption without it just trades the plaintext footgun for the silent-rotation
+    footgun. (2) Headless nodes cannot default to a typed passphrase (breaks unattended boot), so where
+    there is no keystore, "by default" degrades to a machine-bound wrap **labeled as weak** against a
+    same-user/live process, or plaintext + 600 + dedicated-uid with a warning — never unlabeled
+    encryption theater (a wrap whose key sits readable beside it protects nothing).
+  - **Sequencing (zero-dep constraint):** real keyring integration means shelling out to platform CLIs
+    (`security`, `secret-tool`, DPAPI via PowerShell, Android keystore) rather than an npm dep — per
+    platform. So *default-on* is the end state, after the keyring path exists. Stage 1 (cheap, now):
+    dedicated-uid guidance + the loud no-silent-regeneration refusal. Stage 2: opt-in
+    keyring/passphrase wrap + export. Stage 3: make it the default with the honest headless fallback.
+  Open decisions: whether the X25519 seal key shares the wrap; migration for existing plaintext
+  identities; an agent (ssh-agent-style, once-per-boot) for keystore-less interactive nodes. Prior art
+  for the password UX: `src/gate.js` (`hashPassword`, session model). Relates to the identity-rotation
+  policy noted under the Phase 4 directory-merge item.
 
 ## Minor / taste (batch opportunistically)
 
