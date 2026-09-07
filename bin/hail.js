@@ -21,7 +21,7 @@ import { networkInterfaces } from "node:os";
 import { hostname } from "node:os";
 
 import { createDirectory, finalizeRouteGens, reconcileBaseline, reconcilePersist, MAX_TOMBSTONES } from "../src/directory.js";
-import { parseArgs, CliError } from "../src/cliArgs.js";
+import { parseArgs, helpFor, CliError } from "../src/cliArgs.js";
 import { defaultIdentityPath, fingerprint, loadIdentity, normalizeKey } from "../src/identity.js";
 import { isAssignableProfile, listProfiles, removeProfile, setPinned, setProfile, setRejection } from "../src/profiles.js";
 import { createDiagnostics, DEFAULT_WINDOW_MS } from "../src/diagnostics.js";
@@ -50,6 +50,25 @@ const fail = (message) => {
   process.stderr.write(`hail: ${message}\n`);
   process.exit(1);
 };
+
+// `hail <cmd> --help` prints the command's schema-derived synopsis and exits. We
+// intercept before parseArgs because strict parsing would reject `--help` as an
+// unknown option (or fail arity on a required positional it stands in for). A bare
+// `hail --help` (no command, or an unschemed one) falls through to the curated
+// overview in the default case below. `--help` after a `--` terminator is payload.
+{
+  const raw = process.argv.slice(2);
+  const stop = raw.indexOf("--");
+  const before = stop === -1 ? raw : raw.slice(0, stop);
+  if (before.some((a) => a === "--help" || a === "-h")) {
+    const cmd = before.find((a) => !a.startsWith("-"));
+    const usage = cmd ? helpFor(cmd) : null;
+    if (usage) {
+      log(usage);
+      process.exit(0);
+    }
+  }
+}
 
 // Argument parsing lives in src/cliArgs.js (typed, tested, schema-driven). A
 // scheduled command is parsed strictly (typed options, `--` pass-through, unknown

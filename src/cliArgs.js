@@ -395,3 +395,38 @@ export function parseArgs(argv, registry = COMMANDS) {
   const { positional: pos, flags } = parseStrict(argv, start, positional, resolved.schema);
   return { positional: pos, flags: { ...leadingGlobals, ...flags } };
 }
+
+/** A positional as it reads in usage: `<name>`, `[name]`, or `[name...]`. @param {string} p */
+const positionalUsage = (p) => (p.startsWith("...") ? `[${p.slice(3)}...]` : p.startsWith("[") ? p : `<${p}>`);
+
+/** An option as it reads in usage: `[--x]`, `[--x <value>]`, or `[--x [value]]`.
+ * @param {string} name @param {OptionKind} kind */
+const optionUsage = (name, kind) => (kind === "boolean" ? `[--${name}]` : kind === "optional" ? `[--${name} [value]]` : `[--${name} <value>]`);
+
+/** One usage line for a leaf (command or action) schema.
+ * @param {string} prefix @param {Omit<CommandSchema, "actions">} leaf */
+const leafUsage = (prefix, leaf) =>
+  [prefix, ...(leaf.positionals ?? []).map(positionalUsage), ...Object.entries(leaf.options ?? {}).map(([n, k]) => optionUsage(n, k))].join(" ");
+
+/**
+ * Schema-derived usage for one command, so `hail <cmd> --help` cannot drift from what
+ * the parser actually accepts. Returns null for an unschemed command (its handler's own
+ * usage message stands). Lists each action of a grouped command, then the global options
+ * every command takes. It is a synopsis, not prose: the shape, kept honest by construction.
+ *
+ * @param {string} command
+ * @param {Record<string, CommandSchema>} [registry]
+ * @returns {string | null}
+ */
+export function helpFor(command, registry = COMMANDS) {
+  const entry = registry[command];
+  if (!entry) return null;
+  const lines = ["usage:"];
+  if (entry.actions) {
+    for (const [action, leaf] of Object.entries(entry.actions)) lines.push(`  ${leafUsage(`hail ${command} ${action}`, leaf)}`);
+  } else {
+    lines.push(`  ${leafUsage(`hail ${command}`, entry)}`);
+  }
+  lines.push(`  global: ${Object.entries(GLOBAL_OPTIONS).map(([n, k]) => optionUsage(n, k)).join(" ")}`);
+  return lines.join("\n");
+}

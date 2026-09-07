@@ -200,6 +200,18 @@ Changes made at another terminal while the daemon runs **reach disk but not its
 memory**: it re-reads only when it makes a change itself. Restart it after a
 `hail add` or it will keep answering from the older picture.
 
+**Reloading in place needs `--ui`.** The one way to make a daemon pick up an
+edit without killing the process — `POST /api/reload`, which the page's "reload"
+button calls — is a control-scope route, so it exists only when `--ui` is on.
+`kill -HUP <pid>` reloads without it, but that assumes a shell on the box; a node
+you can only reach over the fabric (a phone, a relay) cannot be reloaded remotely
+unless it was started with `--ui`. That reach is not free: `--ui` opens the whole
+control API (admit, block, reload) on loopback with no auth of its own, and the
+reload route is one more state-changing verb behind it. Turn it on when you need
+remote control of that node, not by default — and remember a loopback-only API is
+still reachable by any page the box's own browser visits (§ the `cameFromAPage`
+Origin/host checks are what stand between that page and the control API).
+
 ## Firewall
 
 A default-DROP firewall is the usual reason a peer is reachable over Tailscale

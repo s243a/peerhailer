@@ -1,12 +1,12 @@
 /**
  * The contract matrix from docs/cli-arg-parsing.md, proven at the parser level.
- * (Point 14 — help generated from the same schemas — is a separate feature, not
- * yet built, so it is not asserted here.)
+ * Point 14 — help generated from the same schemas — is asserted at the end via
+ * helpFor(), which reads the very schemas the parser enforces.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseArgs, CliError } from "../src/cliArgs.js";
+import { parseArgs, helpFor, CliError } from "../src/cliArgs.js";
 
 const of = (line) => parseArgs(line.split(" ").filter(Boolean));
 
@@ -252,4 +252,33 @@ test("plugins: add/remove take a module; bare/unknown action lists via the lenie
   assert.deepEqual(of("plugins list").positional, ["plugins", "list"]); // unknown action → lenient
   assert.throws(() => of("plugins add"), /missing argument: module/);
   assert.throws(() => of("plugins add ./mod.js --anything"), /unknown option --anything/);
+});
+
+// --- Point 14: help generated from the schemas ---
+
+test("helpFor: a flat command renders positionals and typed options in one usage line", () => {
+  const text = helpFor("rotate");
+  assert.match(text, /hail rotate <name> \[--key <value>\] \[--key-file <value>\]/);
+  assert.match(text, /global: \[--state <value>\] \[--name <value>\]/);
+});
+
+test("helpFor: an action command lists one usage line per action", () => {
+  const text = helpFor("seal");
+  assert.match(text, /hail seal status/);
+  assert.match(text, /hail seal accept <name> \[--seal-key <value>\] \[--seal-key-file <value>\]/);
+});
+
+test("helpFor: boolean options render without a value placeholder", () => {
+  const text = helpFor("gate");
+  assert.match(text, /hail gate set-password \[--keep-sessions\]/); // boolean → no <value>
+  assert.match(text, /hail gate serve .*\[--port <value>\].*\[--trust-forwarded\]/); // mixed kinds
+});
+
+test("helpFor: variadic and optional positionals keep their brackets", () => {
+  assert.match(helpFor("shell"), /hail shell <peer> <name> <action> \[args\.\.\.\]/);
+  assert.match(helpFor("trust"), /hail trust \[model\]/); // optional positional stays bracketed
+});
+
+test("helpFor: an unschemed command yields null (its handler's own usage stands)", () => {
+  assert.equal(helpFor("frobnicate"), null);
 });
