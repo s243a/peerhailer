@@ -190,59 +190,33 @@ loses them. `cd` to the repo and `npm link` again, or just call `node bin/hail.j
 
 ### One script for all three
 
-The three steps fit in one idempotent script. It skips anything already running, so
-it is safe to re-run, and it checks that the identity survived the last save:
+**[`scripts/peerhailer-up.sh`](../scripts/peerhailer-up.sh)** does all three steps. Run
+it from the checkout after a boot:
 
 ```sh
-#!/bin/sh
-# peerhailer-up.sh — bring the node up after a boot (non-systemd Puppy, kernel TUN).
-#   sh peerhailer-up.sh        relay/destination role only
-#   sh peerhailer-up.sh ui     also serve --ui (the control API and page)
-# Set EXPECT_ID to the start of this node's fingerprint to get a warning if the
-# identity reverted (see "A hard reboot loses more than a clean one" below).
-REPO=${REPO:-/root/Projects/peerhailer}
-PORT=${PORT:-7645}
-EXPECT_ID=${EXPECT_ID:-}
-HAIL="node $REPO/bin/hail.js"
-UI=""; [ "$1" = "ui" ] && UI="--ui"
-
-# 1. tailscaled, if not already up; then wait until tailscale0 has an address
-if ! tailscale status >/dev/null 2>&1; then
-  mkdir -p /var/lib/tailscale /var/run/tailscale
-  setsid tailscaled --state=/var/lib/tailscale/tailscaled.state \
-    --socket=/var/run/tailscale/tailscaled.sock >/var/log/tailscaled.log 2>&1 </dev/null &
-  sleep 2
-fi
-tailscale up >/dev/null 2>&1 || true
-i=0; while [ -z "$(ip -4 -o addr show tailscale0 2>/dev/null)" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
-echo "[up] tailscale: $(tailscale ip -4 2>/dev/null || echo DOWN)"
-
-# 2. identity check: did the last save keep the key peers pin?
-ID=$($HAIL status 2>/dev/null | sed -n 's/^key:[[:space:]]*//p')
-echo "[up] identity: $ID"
-if [ -n "$EXPECT_ID" ]; then
-  case "$ID" in
-    "$EXPECT_ID"*) echo "[up]   ok: peers still pin this key" ;;
-    *) echo "[up]   WARNING: expected $EXPECT_ID…; the identity reverted, re-pin it on peers" ;;
-  esac
-fi
-
-# 3. the daemon, unless something already holds the port
-if ss -H -ltn 2>/dev/null | grep -q ":$PORT "; then
-  echo "[up] daemon: already listening on :$PORT"
-else
-  setsid sh -c "exec $HAIL daemon --hail-on-tls tailscale0 --port $PORT --route $UI \
-    >\$HOME/hail-daemon.log 2>&1 </dev/null" &
-  sleep 2
-fi
-tail -n 4 "$HOME/hail-daemon.log"
-echo "[up] peers:"; $HAIL peers
+EXPECT_ID=7Sm3D sh ~/Projects/peerhailer/scripts/peerhailer-up.sh      # relay/destination
+EXPECT_ID=7Sm3D sh ~/Projects/peerhailer/scripts/peerhailer-up.sh ui   # also the control API
 ```
 
-Save it as `/root/peerhailer-up.sh`, then save to flash so the script itself persists.
-After a boot, run `EXPECT_ID=<your fingerprint prefix> sh /root/peerhailer-up.sh`. It
-calls `node …/bin/hail.js` by absolute path, so it works even if the `hail` symlink
-from `npm link` was lost with an unsaved change.
+Here `7Sm3D` stands in for the start of your node's own fingerprint (`hail status`,
+the `key:` line). What the script does, in order:
+
+1. **Starts tailscaled** if it isn't running, runs `tailscale up`, then **waits until
+   `tailscale0` has an address**. Without that wait, starting the daemon straight
+   after tailscaled fails with `tailscale0 has no address to bind`.
+2. **Checks the identity.** It prints this node's fingerprint and, if you set
+   `EXPECT_ID`, warns when the fingerprint no longer matches. That is the loud signal
+   for the save-file revert described below, where the node silently comes back as a
+   stranger to every peer that pinned it.
+3. **Starts the daemon** with `--hail-on-tls tailscale0 --route`, unless something
+   already holds the port. It then prints the log tail and the peer list.
+
+It is idempotent (it skips anything already running, so a re-run is harmless). It
+finds its checkout from its own location and calls `node bin/hail.js` by path, so
+it works even if the `hail` symlink from `npm link` was lost with an unsaved change.
+Keeping it in the repo also means `git pull` updates it, and it persists as long as
+the checkout is somewhere the save reaches. `PORT` and `REPO` can be overridden from
+the environment; the header of the script lists them.
 
 **`--ui` is opt-in on purpose.** A relay or destination needs only `--hail-on-tls …
 --route`. The `--ui` control API (admit, block, reload, no authentication of its own;
@@ -250,10 +224,10 @@ see [cli.md](cli.md)) is worth having only while you are at the machine, so the 
 brings up a relay, not a control plane.
 
 **Run it by hand, or from a boot hook.** You can call it from `/etc/rc.d/rc.local`
-(`sh /root/peerhailer-up.sh &` before `exit 0`) or `/root/Startup/` so a reboot brings
-the node back on its own. The trade-off is convenience against an always-on node that
-comes up after any reboot, including one you did not start. Running it by hand keeps
-bringing the node up a deliberate act.
+(`sh /root/Projects/peerhailer/scripts/peerhailer-up.sh &` before `exit 0`) or from
+`/root/Startup/` so a reboot brings the node back on its own. The trade-off is
+convenience against an always-on node that comes up after any reboot, including one
+you did not start. Running it by hand keeps bringing the node up a deliberate act.
 
 ### A hard reboot loses more than a clean one
 
