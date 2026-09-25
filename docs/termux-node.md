@@ -119,6 +119,10 @@ hail add phone https://termux-phone.<tailnet>.ts.net \
   --transport tailscale --key "$(cat phone.pub)"
 ```
 
+A caller on WSL cannot resolve that name out of the box (`getaddrinfo
+ENOTFOUND`). Fix its resolver, or store the phone by tailnet IP instead
+(`https://100.x.y.z`, port 443); both are covered in [wsl.md](wsl.md).
+
 ## Verifying
 
 The phone can only confirm its own Serve config (`serve status`, which should show the

@@ -222,22 +222,11 @@ succeeds, but `hail shell …` reports *could not resolve host*. The name, not t
 route, is what is missing — so the fix is on the caller's DNS, not anything in
 peerhailer.
 
-Fix it once, and prefer the fix that keeps using the name:
-
-- **`tailscale set --accept-dns` (preferred).** Wires MagicDNS into the caller's
-  resolver, so every `.ts.net` name resolves — no per-command workaround and
-  nothing baked in.
-- **Point the resolver at `100.100.100.100`.** Tailscale's own DNS; add it to
-  `/etc/resolv.conf` (or your WSL resolver config). Same effect, more manual.
-- **A hosts entry (last resort).** Mapping the name to the tailnet IP in
-  `/etc/hosts` works, but it *bakes in an address*: if that node renumbers, the
-  entry goes silently stale — the exact failure the record's MagicDNS name exists
-  to avoid. So keep the peer's stored address as the `.ts.net` **name**, not a
-  resolved IP (a record survives renumbering; a pinned IP does not), and use a
-  hosts entry only to get unblocked.
-
-Any of these removes the need for the per-command DNS preload the shell
-otherwise required from WSL.
+The fix, the reason `tailscale set --accept-dns` alone does **not** work on WSL
+(its generated `/etc/resolv.conf` overrides Tailscale's resolver), and the
+workarounds if you would rather not change WSL's DNS are all in
+**[wsl.md](wsl.md)**. It applies to every peerhailer call from WSL, not only
+shells.
 
 ## Open
 

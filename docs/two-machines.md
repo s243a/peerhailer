@@ -166,7 +166,9 @@ or unverifiable reply where sealed was expected is *withheld*, never handed up. 
 This whole path was first exercised between two real machines — a WSL box and a
 Puppy Linux node over Tailscale — rather than on loopback. WSL2 reaches the tailnet
 outbound but not the host LAN, which is fine: the origin only ever dials the
-destination.
+destination. A WSL caller does need one DNS change to
+reach peers stored by MagicDNS name (a `serve`-published phone); see
+[wsl.md](wsl.md).
 
 ## Android phones
 
