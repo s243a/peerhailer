@@ -308,9 +308,16 @@ roadmap is shared, not scattered across PR threads.
   per-record vector clock, which would matter only for an *ancestor-less* merge — two state dirs syncing,
   or a phone and a laptop exchanging local directory state with no shared baseline. The on-disk record can
   gain a `vc` keyed-by-writer object later without a format change.
-- **TODO** — `[deferred]` **Routing Stage 1.5** — chunked, route-caching, end-to-end-sealed relay:
-  identity-key-indexed sealing-key discovery for routed destinations, and origin-from-payload auth
-  (not the direct-chat `from === caller` binding). See `docs/routing.md`.
+- **TODO** — `[deferred]` **Routing Stage 1.5 — what's left is chunking + route caching.** The
+  sealing half this item used to list is **done**: identity-key-indexed sealing-key discovery for
+  routed destinations (M2 Tier-1), end-to-end sealed payload and sealed response (M3b, #3), and
+  origin authenticated from the signed manifest rather than the direct-chat `from === caller`
+  binding (M1). Remaining (`docs/routing-security-roadmap.md` calls it M4): chunk a payload so the
+  first block doubles as the route probe, cache the working path and source-route blocks 2…N
+  down it (TTL, invalidate on any hop failure, hard per-message re-discovery cap), and bounded
+  reassembly (total-block count capped and verified from block 1, receive window, timeout,
+  per-sender and global in-flight caps). Until then a routed body is capped at 700 kB and every
+  send pays a full route search. See `docs/routing.md` "Stage 1.5".
 - **TODO** — `[deferred]` **Identity persistence + encryption at rest.** The private key lives at
   `<statedir>/identity.json`, **plaintext (mode 600)**, and on a **missing file (ENOENT) is silently
   regenerated** — only a stderr `log` line, no warning or refusal (`loadIdentity` in `src/identity.js`).
