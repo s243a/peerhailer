@@ -97,6 +97,8 @@ ss -ltnp | grep node     # should show only the 100.x address or 127.0.0.1,
                          # never 0.0.0.0 or a LAN IP
 ```
 
+Some Puppy builds ship without `ss`; `netstat -ltnp` gives the same answer there.
+
 ## Running as root
 
 A target like Puppy runs as root by default, so a declared `shells add debug
@@ -208,8 +210,9 @@ the `key:` line). What the script does, in order:
    `EXPECT_ID`, warns when the fingerprint no longer matches. That is the loud signal
    for the save-file revert described below, where the node silently comes back as a
    stranger to every peer that pinned it.
-3. **Starts the daemon** with `--hail-on-tls tailscale0 --route`, unless something
-   already holds the port. It then prints the log tail and the peer list.
+3. **Starts the daemon** with `--hail-on-tls tailscale0 --route`, unless a daemon is
+   already running (it checks the process with `pgrep`, not the port: some Puppy builds
+   have no `ss`). It then prints the log tail and the peer list.
 
 It is idempotent (it skips anything already running, so a re-run is harmless). It
 finds its checkout from its own location and calls `node bin/hail.js` by path, so

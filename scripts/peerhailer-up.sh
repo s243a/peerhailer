@@ -42,9 +42,11 @@ if [ -n "$EXPECT_ID" ]; then
   esac
 fi
 
-# 3. The daemon, unless something already holds the port.
-if ss -H -ltn 2>/dev/null | grep -q ":$PORT "; then
-  echo "[up] daemon: already listening on :$PORT"
+# 3. The daemon, unless one is already running. Check the process, not the
+#    port: minimal systems (Puppy) may have no `ss`, and without --ui the daemon
+#    listens only on the tailnet address, so a loopback probe would miss it.
+if pgrep -f "bin/hail.js daemon" >/dev/null 2>&1; then
+  echo "[up] daemon: already running (pid $(pgrep -f "bin/hail.js daemon" | head -1))"
 else
   setsid sh -c "exec $HAIL daemon --hail-on-tls tailscale0 --port $PORT --route $UI \
     >\$HOME/hail-daemon.log 2>&1 </dev/null" &
