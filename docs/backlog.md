@@ -373,6 +373,20 @@ roadmap is shared, not scattered across PR threads.
 
 ## Minor / taste (batch opportunistically)
 
+- **TODO** — `[live test]` **A peer admitted under a different name than it calls itself is
+  silently dropped.** `identify` looks a caller up by the name it *claims* (`directory.get(claim.name)`,
+  `src/server.js`), and an unidentified caller gets the `blocked` refusal style, which destroys the
+  socket without a reply. So admitting A as `sol-a` while A's own name is `caller` makes every hail,
+  walk and shell from A fail as `socket hang up` — indistinguishable from a network fault, with the
+  pin and TLS both fine. Cost us a long diagnosis against a live Puppy node. Options: log
+  `unknown peer <claimed-name>` even outside debug (a name is not a secret the drop protects); have
+  `hail add` warn when a stored `--key` belongs to a peer whose signed self-record names itself
+  differently; or fall back to identifying by the key the signature verifies against. The drop's
+  purpose (reveal nothing to a *blocked* peer) doesn't need to cover a peer we *admitted*.
+- **TODO** — `[live test]` `hail shells add` always prints "peers need shell:<name>; it is in no
+  profile" (`bin/hail.js` shells `add`), without checking profiles — misleading when a custom profile
+  (e.g. `remote-shell --allows …,shell:debug`) already grants it. Check `stored.profiles` and say which
+  profiles grant it, or print the "grant it deliberately" advice only when none do.
 - **DONE** — `[fable review]` `server.js` found the chat plugin by duck-typing but the route plugin by
   name (duplicated at 4 endpoints) — now one convention: `pluginNamed(plugins, name)`, keyed on the
   stable declared `name`. Fable confirmed both builtins declare the name on the exact object in the
